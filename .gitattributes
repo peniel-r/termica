@@ -1,0 +1,7 @@
+# Normalize line endings: text files are stored with LF in the repository and
+# checked out with LF in the working tree on every platform, so Windows and
+# Linux contributors see the same bytes and diffs stay clean.
+#
+# `text=auto` lets Git detect binary files by content and leave them alone;
+# `eol=lf` forces LF in the working tree even on Windows.
+* text=auto eol=lf
