@@ -1,0 +1,40 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "llvm-mingw",
+      "displayName": "Ninja + llvm-mingw (clang, release)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "x86_64-w64-mingw32-clang",
+        "CMAKE_CXX_COMPILER": "x86_64-w64-mingw32-clang++",
+        "CMAKE_RC_COMPILER": "x86_64-w64-mingw32-windres"
+      }
+    },
+    {
+      "name": "llvm-mingw-debug",
+      "displayName": "Ninja + llvm-mingw (clang, debug)",
+      "inherits": "llvm-mingw",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "gcc",
+      "displayName": "Ninja + gcc on PATH (scoop mingw / WinLibs, release)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "llvm-mingw",       "configurePreset": "llvm-mingw" },
+    { "name": "llvm-mingw-debug", "configurePreset": "llvm-mingw-debug" },
+    { "name": "gcc",              "configurePreset": "gcc" }
+  ]
+}
