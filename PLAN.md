@@ -269,3 +269,40 @@ Verification (all green):
 - Selection across reflow: ends are untracked snapshots today, so a resize
   clears the selection rather than following the text
   (`ghostty_tracked_grid_ref_*` is the way to change that).
+
+---
+
+# Follow-up: the built-in font is Maple Mono NF
+
+Swapped the embedded family from Google Sans Code NF Mono to
+**Maple Mono NF 7.9** (`MapleMono-NF.zip`, SHA-256
+`59098b87c895d871635d37680e88000ae2b2b25b55428195b228ec589e35fb89`, SIL OFL
+1.1), because it is the family the user's own prompt already expects. The
+plumbing did not change: the four faces sit in `assets/fonts/`,
+`src/fonts.rc.in` lists them as RCDATA 1..4, and `src/embed.c` reads them
+from the executable.
+
+## What had to be checked rather than assumed
+
+- **Icon width.** A terminal grid needs single-width symbols. Measured with
+  `TTF_GetGlyphMetrics` at 16 pt: `M` and every patched codepoint
+  (U+E0B0/U+E0B4 powerline, U+F0C9 git, U+E725 seti, U+276F chevron) have the
+  same advance, so the grid stays aligned. The *ink* of the powerline and
+  Font Awesome glyphs is 11-13 px, i.e. slightly over one cell - that is how
+  prompt segments are meant to touch, and the cell drawn after it paints
+  over the overlap.
+- **Coverage.** Box drawing, blocks, arrows and the chevron prompt are all
+  present. CJK (U+4E2D) and colour emoji (U+1F600) are **not** in the NF
+  build; the upstream `MapleMono-NF-CN.zip` is the variant that adds them.
+  The README says so instead of letting the grid go blank silently.
+- **Fallback still earns its keep.** Consolas carries neither U+276F nor any
+  Nerd icon, so `glyphs.fallback` (the built-in regular face) is what keeps
+  icons working under a system font.
+
+## Verification
+
+- `--selftest`: 33 checks, 0 failures.
+- Startup line: `font: Maple Mono NF (built in)  cell: 9x22 px  scale: 1.00
+  bold: yes  italic: yes` (Google Sans Code NF Mono was 9x21).
+- Executable size 15.9 MB (was 16.5 MB): the Maple faces are a little
+  smaller.

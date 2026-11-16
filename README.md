@@ -76,31 +76,40 @@ Check: `x86_64-w64-mingw32-clang --version`, `cmake --version`, `ninja --version
 **Zig is still not needed.** CMake downloads the prebuilt libghostty-vt release
 zip for Windows, so the library is linked without a Zig toolchain.
 
-## 2. Fonts: Google Sans Code NF is built in
+## 2. Fonts: Maple Mono NF is built in
 
-The executable carries **Google Sans Code Nerd Font Mono** - regular, bold, italic and
-bold-italic, Nerd Fonts release 3.5.1, SIL OFL 1.1 - linked in as Windows resources. There
-is nothing to install and no font path to pass: prompt symbols, box drawing and Nerd icons
-render out of the box. The program prints `font: Google Sans Code NF (built in)`.
+The executable carries **Maple Mono NF** - regular, bold, italic and bold-italic, version
+7.9 from [subframe7536/maple-font](https://github.com/subframe7536/maple-font), SIL OFL 1.1 -
+linked in as Windows resources. There is nothing to install and no font path to pass: prompt
+symbols, box drawing and Nerd icons render out of the box. The program prints
+`font: Maple Mono NF (built in)`.
+
+Its icons are **single-width**: at 16 pt every patched codepoint (powerline separators,
+`nf-fa-git`, seti icons) has the same advance as `M`, so the grid stays aligned. The ink of
+the powerline and Font Awesome glyphs is 11-13 px wide, slightly more than one cell, which is
+deliberate - the segments have to touch. A cell that follows one is drawn after it, so the
+overlap only shows where a coloured prompt segment ends.
 
 A path on the command line still wins:
 
 ```
-build\llvm-mingw\termica.exe "C:\path\to\AnotherNerdFontMono-Regular.ttf" 16
+build\llvm-mingw\termica.exe "C:\path\to\AnotherFont-Regular.ttf" 16
 ```
 
 If that file cannot be opened, the built-in family is used instead. With a font from disk
-that lacks a codepoint (Consolas has no Nerd icons), the built-in regular face draws that
-glyph, so icons keep working. There is no further fallback: CJK or emoji that neither face
-has are still blank.
+that lacks a codepoint (Consolas has no U+276F chevron and no Nerd icons at all), the
+built-in regular face draws that glyph, so icons keep working. There is no further
+fallback: Maple Mono NF carries no CJK and no colour emoji, and those stay blank unless the
+chosen font has them. (The `MapleMono-NF-CN` build of the same family does carry CJK, if
+you want that as the built-in instead.)
 
 For a font from disk the program looks for matching bold, italic and bold-italic faces next
 to the regular one (`consola.ttf` -> `consolab.ttf`, `... Nerd Font.ttf` -> `... Nerd Font
 Bold.ttf`), and fakes bold by drawing the glyph twice when there is no bold face. The
 built-in family has all four real faces.
 
-The TTFs live in `assets/fonts/` with their `OFL.txt`; CMake embeds them through
-`src/fonts.rc.in`. That is where roughly 10 MB of the executable's size goes.
+The TTFs live in `assets/fonts/` with their `LICENSE.txt`; CMake embeds them through
+`src/fonts.rc.in`. That is where roughly 9.5 MB of the executable's size goes.
 
 ## 3. Build and run
 
@@ -296,7 +305,7 @@ The app itself only does the parts the library leaves to the embedder:
 | `src/main.c` | the app: event loop, keyboard and paste, spawning and draining the shell, one frame |
 | `src/term.{h,c}` | the libghostty-vt wrapper: screen, render state, key encoder, replies, paste |
 | `src/pty.{h,c}` | ConPTY: pipes, the child process, the reader thread, resize, teardown |
-| `src/embed.{h,c}` | the Google Sans Code NF bytes linked into the executable |
+| `src/embed.{h,c}` | the Maple Mono NF bytes linked into the executable |
 | `src/fonts.rc.in` | the Windows resource script that carries those bytes |
 | `src/glyph.{h,c}` | fonts, the glyph cache, drawing a cell's text (bold/italic faces) |
 | `src/style.{h,c}` | a terminal cell style -> colors and decorations for the renderer |
@@ -313,7 +322,7 @@ easy to reason about on their own.
 - **ConPTY only.** The shell needs Windows 10 1809 or later. `pty.c` has a stub for other
   platforms, so the app still builds there, but no shell starts.
 - Glyph cache covers the Basic Multilingual Plane. The fallback covers only the built-in
-  face: a character neither the chosen font nor Google Sans Code NF has (most CJK, colour
+  face: a character neither the chosen font nor Maple Mono NF has (most CJK, colour
   emoji) is blank.
 - One font scale chosen at startup. Moving the window between monitors with different DPI
   will not rescale (the corner masks would need a rebuild too).
@@ -328,7 +337,7 @@ easy to reason about on their own.
 - A very large paste blocks the UI thread while it is written to the console; the pipe is
   synchronous and there is no writer queue yet.
 - **Verified on Windows 11 25H2 (build 26200)**: llvm-mingw clang 23.1.5 + lld + Ninja,
-  `direct3d11` renderer, translucent panel, built-in Google Sans Code NF icons, a live
+  `direct3d11` renderer, translucent panel, built-in Maple Mono NF icons, a live
   `pwsh` 7 / `cmd` shell in ConPTY (a typed command and its output appear on the grid, the
   window title comes from the shell's OSC sequence), wheel and `Ctrl+Shift+*` scrolling with
   the thumb drawn, drag/word/line selection copied to the clipboard, `fzf` taking the pointer

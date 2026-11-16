@@ -7,7 +7,7 @@
     name, cell size, bold/italic faces) shows up inline - there is no
     separate console window, because the exe inherits this console.
 
-    No font is needed: the exe carries Google Sans Code NF Mono and uses it
+    No font is needed: the exe carries Maple Mono NF and uses it
     unless -Font names a different .ttf.
 
     With -SelfTest the terminal half is checked without opening a window
@@ -55,7 +55,7 @@ if ($SelfTest) {
 if ($Font) {
     Write-Host "font: $Font (override)" -ForegroundColor DarkGray
 } else {
-    Write-Host "font: Google Sans Code NF (built in)" -ForegroundColor DarkGray
+    Write-Host "font: Maple Mono NF (built in)" -ForegroundColor DarkGray
 }
 Write-Host "size: $Size" -ForegroundColor DarkGray
 Write-Host ""

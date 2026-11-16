@@ -6,10 +6,10 @@
  * Multilingual Plane, which is enough for ASCII, box drawing and Nerd Font
  * icons.
  *
- * The default font is Google Sans Code NF Mono, compiled into the
- * executable. A path passed on the command line still wins; if it cannot be
- * opened, the built-in family is used instead, and its regular face also
- * fills in codepoints the chosen font lacks.
+ * The default font is Maple Mono NF, compiled into the executable. A path
+ * passed on the command line still wins; if it cannot be opened, the
+ * built-in family is used instead, and its regular face also fills in
+ * codepoints the chosen font lacks.
  *
  * SDL_ttf does the rasterising. For a font from disk, bold, italic or
  * bold-italic faces are looked up next to the regular one (consola.ttf ->

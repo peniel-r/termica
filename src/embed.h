@@ -1,10 +1,10 @@
 /*
  * termica - the font compiled into the executable.
  *
- * Google Sans Code Nerd Font Mono (SIL OFL 1.1, see assets/fonts/OFL.txt) is
- * linked into the binary as four Windows resources, so the app has a
- * working terminal font with Nerd icons even when no font is installed and
- * no font path is given. A path passed on the command line still wins.
+ * Maple Mono NF (SIL OFL 1.1, see assets/fonts/LICENSE.txt) is linked into
+ * the binary as four Windows resources, so the app has a working terminal
+ * font with Nerd icons even when no font is installed and no font path is
+ * given. A path passed on the command line still wins.
  *
  * Strict C99.
  */

@@ -70,6 +70,9 @@ static const SDL_Color PANEL_BACKGROUND = { 14, 18, 22, 255 };
 static const SDL_Color PANEL_BORDER = { 90, 100, 112, PANEL_BORDER_ALPHA };
 static const SDL_Color STATUS_TEXT = { 130, 138, 148, 255 };
 
+/* What the built-in family is called, for the startup line. */
+#define BUILT_IN_FONT "Maple Mono NF (built in)"
+
 /* What a left-drag means: single cells, whole words, or whole lines. */
 enum {
     SELECT_CELLS = 0,
@@ -1193,7 +1196,7 @@ static bool is_point_size(const char *text, float *out)
     return true;
 }
 
-/* The font is optional: no path means the built-in Google Sans Code NF.
+/* The font is optional: no path means the built-in Maple Mono NF.
  * A build without the embedded font (anything but Windows) falls back to a
  * monospace font from the system. */
 static const char *pick_font(const char *requested)
@@ -1359,7 +1362,7 @@ int main(int argc, char **argv)
                 "[point-size]\n", argv[0]);
         return 1;
     }
-    font_label = font_path ? font_path : "Google Sans Code NF (built in)";
+    font_label = font_path ? font_path : BUILT_IN_FONT;
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
@@ -1394,7 +1397,7 @@ int main(int argc, char **argv)
         goto cleanup;
     }
     if (app.glyphs.built_in)
-        font_label = "Google Sans Code NF (built in)";
+        font_label = BUILT_IN_FONT;
     printf("font: %s  cell: %dx%d px  scale: %.2f  bold: %s  italic: %s\n",
            font_label, app.glyphs.cell_width, app.glyphs.cell_height,
            (double)app.display_scale, app.glyphs.bold ? "yes" : "no",

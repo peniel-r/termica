@@ -101,8 +101,8 @@ terminal.
 pwsh -File ./run.ps1
 ```
 
-`run.ps1` passes no font by default: the exe carries Google Sans Code NF
-Mono and uses it, so nothing has to be installed. Pass `-Font` to use a
+`run.ps1` passes no font by default: the exe carries Maple Mono NF and
+uses it, so nothing has to be installed. Pass `-Font` to use a
 different `.ttf`.
 
 Because the program is a console-subsystem app launched from an existing
@@ -111,7 +111,7 @@ and the renderer/cell-size output lands inline in your prompt.
 
 ```
 renderer: direct3d11
-font: Google Sans Code NF (built in)  cell: 9x21 px  scale: 1.00  bold: yes  italic: yes
+font: Maple Mono NF (built in)  cell: 9x22 px  scale: 1.00  bold: yes  italic: yes
 ```
 
 Override the font or the size:
