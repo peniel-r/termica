@@ -93,6 +93,7 @@ endif()
 add_executable(termica
     src/main.c
     src/term.c
+    src/pty.c
     src/selftest.c
     src/glyph.c
     src/style.c
@@ -100,6 +101,7 @@ add_executable(termica
     src/geometry.c
     src/window.c
     src/term.h
+    src/pty.h
     src/glyph.h
     src/style.h
     src/panel.h

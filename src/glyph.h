@@ -64,9 +64,6 @@ bool glyphs_open(Glyphs *glyphs, SDL_Renderer *renderer, const char *font_path,
 /* Free every texture and font. Safe on a zeroed struct. */
 void glyphs_close(Glyphs *glyphs);
 
-/* Does the regular face carry this codepoint? */
-bool glyphs_has(const Glyphs *glyphs, Uint32 codepoint);
-
 /* Draw one cell's text at (x, y). `text` is UTF-8 and may be a whole
  * grapheme cluster; `length` is in bytes. */
 void glyphs_draw_text(Glyphs *glyphs, const char *text, size_t length,

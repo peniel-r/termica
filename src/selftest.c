@@ -11,6 +11,7 @@
  */
 
 #include "term.h"
+#include "pty.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -433,6 +434,65 @@ static void test_title(void)
     term_free(&term);
 }
 
+#ifdef _WIN32
+/* The only test that touches a real child process: start cmd.exe with one
+ * command through ConPTY, read the output back, check the exit code. This
+ * is what proves the pipes, the reader thread and the close path work. */
+static void test_pty(void)
+{
+    char     error[256] = "";
+    Pty     *pty;
+    char     output[4096];
+    size_t   used = 0;
+    uint32_t exit_code = 0;
+    bool     exited = false;
+    int      spins;
+
+    pty = pty_spawn(L"cmd.exe /c \"echo termica-pty-ok\"", 80, 24, NULL, NULL,
+                    error, sizeof error);
+    if (!pty) {
+        check(false, "pty spawn");
+        printf("      %s\n", error);
+        return;
+    }
+    output[0] = '\0';
+
+    for (spins = 0; spins < 200; spins++) {
+        uint8_t chunk[2048];
+        size_t  got = pty_read(pty, chunk, sizeof chunk);
+
+        if (got > 0) {
+            size_t room = sizeof output - 1 - used;
+            size_t take = got < room ? got : room;
+
+            if (take > 0) {
+                memcpy(output + used, chunk, take);
+                used += take;
+                output[used] = '\0';
+            }
+        }
+        if (pty_exit_code(pty, &exit_code))
+            exited = true;
+        /* conhost keeps the pseudoconsole session (and its output pipe)
+         * alive until ClosePseudoConsole, so EOF is not the exit signal:
+         * stop once the child is gone and the pipe has been quiet for a
+         * moment. */
+        if (exited && !pty_wait(pty, 100))
+            break;
+        if (!exited)
+            pty_wait(pty, 100);
+    }
+
+    check(strstr(output, "termica-pty-ok") != NULL,
+          "pty output reaches the terminal");
+    check(exited && exit_code == 0, "pty child exits with code 0");
+    if (strstr(output, "termica-pty-ok") == NULL)
+        printf("      output was: %s\n", output);
+
+    pty_close(pty);
+}
+#endif /* _WIN32 */
+
 int term_selftest(void)
 {
     printf("termica self test (libghostty-vt)\n\n");
@@ -444,6 +504,9 @@ int term_selftest(void)
     test_key_encoding();
     test_resize();
     test_title();
+#ifdef _WIN32
+    test_pty();
+#endif
 
     printf("\n%s (%d failure%s)\n", failure_count ? "FAILED" : "OK",
            failure_count, failure_count == 1 ? "" : "s");

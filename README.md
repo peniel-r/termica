@@ -1,10 +1,11 @@
-# termica: milestone 1
+# termica: milestone 2
 
-A tiny SDL3 program that answers two questions:
+A tiny SDL3 terminal that answers three questions:
 
 1. **Does the stack produce the borderless, translucent, Nerd-Font look from your WezTerm
    screenshot?** (milestone 0 - yes)
-2. **Can libghostty-vt drive a real terminal grid behind that look?** (milestone 1 - this one)
+2. **Can libghostty-vt drive a real terminal grid behind that look?** (milestone 1 - yes)
+3. **Can it run a real shell?** (milestone 2 - this one)
 
 What it draws: a borderless window with a translucent dark panel, opaque text on a fixed
 cell grid, a block cursor and a status line. Text goes through a one-texture-per-codepoint
@@ -17,15 +18,19 @@ movement, erase, scroll, OSC - and the keyboard goes back through the same libra
 encoder. This is the flow from
 [Your First Terminal](https://lib.ghostty.org/vt/first-terminal.html).
 
+The program itself is a real process in a Windows pseudoconsole (ConPTY): `pwsh.exe` if it
+is installed, else `powershell.exe`, else `cmd.exe`. Its output drives the grid, keystrokes
+go into its console, the window size is the console size, and closing the window kills the
+process tree.
+
 | Key | Action |
 |---|---|
-| typing | write text into the terminal |
-| arrows / Home / End / PgUp / PgDn / F1-F12 | encoded by libghostty-vt and written back |
-| Ctrl+V | paste the clipboard (newlines become CRLF) |
-| Enter / Backspace | line feed / erase (the kernel echo is emulated, see below) |
+| typing, arrows, Home/End/PgUp/PgDn, F1-F12 | encoded by libghostty-vt and written to the shell |
+| Enter / Backspace / Esc | go to the shell; the shell echoes them, not the app |
+| Ctrl+V or Ctrl+Shift+V | paste; bracketed paste when the program enabled it |
 | Alt+Up / Alt+Down | panel opacity (text must stay fully opaque) |
 | Alt+M | cycle the backdrop: panel, Mica, Mica Alt, Acrylic |
-| Esc | quit |
+| Ctrl+Shift+Q | quit |
 
 > **On Windows:** PowerShell 7 + WezTerm, everything from Scoop. See
 > [README-powershell.md](README-powershell.md) - llvm-mingw (clang + lld +
@@ -104,7 +109,9 @@ Terminal](https://lib.ghostty.org/vt/first-terminal.html), formats the screen ba
 text with a `GhosttyFormatter`, and checks the result. Then it checks the parts the app
 depends on: resolved colors, bold/underline, the cursor position, erase, wide characters
 (head cell + spacer tail), key encoding (arrows, Ctrl+letter, Enter, Backspace), resize and
-the OSC window title. Exit code is the number of failures.
+the OSC window title. The last check starts a real ConPTY, runs `cmd.exe /c
+"echo termica-pty-ok"`, and verifies the text came back through the pipes and the exit code
+is 0. Exit code is the number of failures.
 
 ### Memory safety
 
@@ -142,13 +149,22 @@ half way, so an early `return` cannot leak either.
    current one. Mica should pick up the tint of the wallpaper, and Mica Alt should look different.
 4. **Edges.** Drag and resize. The grid re-fits, the terminal is resized with it, and a Mica
    window keeps its rounded region while resizing.
-5. **Colors and attributes.** The demo line shows bold, italic, underline, inverse, strike,
-   dim, the 16 ANSI colors, a 24-bit color and a 256-color background.
-6. **Typing.** Text appears at the prompt, Enter breaks the line, Backspace erases, arrows
-   move the cursor. Ctrl+V pastes (try a CJK string, it should take two cells per character).
-7. **Text quality.** Compare the text with WezTerm at the same size. Look at it on your actual display scale.
-8. **Console output.** The program prints the renderer name (you want `direct3d11` or
-   `direct3d12`), the cell size and whether it found bold/italic faces.
+5. **The shell.** A prompt appears (PowerShell 7, Windows PowerShell or `cmd`, whichever is
+   installed). `dir`, `cls`, `echo %CD%` and a quoted argument work. Ctrl+C interrupts
+   `ping -t localhost`. Tab completion and the PSReadLine menu draw correctly. `vim` uses the
+   alternate screen and Esc leaves insert mode instead of closing the terminal.
+6. **Typing.** Characters appear at the prompt because the shell echoes them, not the app.
+   Enter runs the line, Backspace edits it, Up/Down walk the history, arrows work inside a line.
+   Ctrl+V pastes; pasting several lines asks for confirmation when the program has not enabled
+   bracketed paste.
+7. **Colors and attributes.** A program that emits SGR shows bold, underline, 24-bit color and
+   the 16 ANSI colors (`git log`, `ls`, or a PowerShell escape-sequence sample).
+8. **Resize.** Drag an edge while `more` or a full-screen program runs: the console is resized
+   with the grid and the program reflows.
+9. **Text quality.** Compare the text with WezTerm at the same size. Look at it on your actual display scale.
+10. **Console output.** The program prints the renderer name (you want `direct3d11` or
+    `direct3d12`), the cell size and whether it found bold/italic faces. Closing the window
+    while the shell runs must leave no `conhost.exe` or shell behind in Task Manager.
 
 ## 6. Window chrome: the corners and the backdrops
 
@@ -215,32 +231,38 @@ The app itself only does the parts the library leaves to the embedder:
 
 - draws the render state: cell text, resolved colors, bold/italic/underline/strike/overline,
   dim, inverse, invisible, wide-character tails, all four cursor styles and blinking
-- emulates the kernel's line discipline echo, because there is no pty yet: plain Enter writes
-  CRLF and plain Backspace writes BS-space-BS
-- Ctrl+V reads the clipboard and writes the text into the terminal
+- runs the shell: `pty.c` creates the pseudoconsole, starts the process, reads its output on
+  a thread into a bounded ring buffer and writes keys, pastes and the terminal's own replies
+  into the input pipe (`GHOSTTY_TERMINAL_OPT_WRITE_PTY`)
+- passes the clipboard through `ghostty_terminal_paste`, so bracketed paste, the kitty paste
+  protocol and the unsafe-paste check are the library's rules, not reimplemented ones
+- resizes with `ResizePseudoConsole`, and kills the process tree with a kill-on-close job
+  object when the window closes
 
 ## Where the code lives
 
 | file | what it does |
 |---|---|
-| `src/main.c` | the app: event loop, keyboard and paste, laying cells out, one frame |
-| `src/term.{h,c}` | the libghostty-vt wrapper: screen, render state, key encoder, title |
+| `src/main.c` | the app: event loop, keyboard and paste, spawning and draining the shell, one frame |
+| `src/term.{h,c}` | the libghostty-vt wrapper: screen, render state, key encoder, replies, paste |
+| `src/pty.{h,c}` | ConPTY: pipes, the child process, the reader thread, resize, teardown |
 | `src/glyph.{h,c}` | fonts, the glyph cache, drawing a cell's text (bold/italic faces) |
 | `src/style.{h,c}` | a terminal cell style -> colors and decorations for the renderer |
 | `src/panel.{h,c}` | the rounded translucent panel and its antialiased corner masks |
 | `src/geometry.{h,c}` | the squircle curve: pure math, shared by the panel and the region |
 | `src/window.{h,c}` | the SDL window, the drag/resize hit test, the Windows 11 chrome |
-| `src/selftest.c` | `--selftest` |
+| `src/selftest.c` | `--selftest`, including the ConPTY round trip |
 
 `geometry.c` and `style.c` have no SDL state and no Windows calls, which is what makes them
 easy to reason about on their own.
 
 ## Known limits of this milestone
 
-- **No pty, no shell.** The terminal is a sandbox: keystrokes are echoed into it and nothing
-  runs. Wiring up ConPTY is the next milestone.
+- **ConPTY only.** The shell needs Windows 10 1809 or later. `pty.c` has a stub for other
+  platforms, so the app still builds there, but no shell starts.
 - Glyph cache covers the Basic Multilingual Plane only, and there is no font fallback: a
-  character the chosen font lacks is blank. Fine for ASCII, box drawing and Nerd icons.
+  character the chosen font lacks is blank. Fine for ASCII, box drawing and Nerd icons, not
+  for CJK or emoji.
 - One font scale chosen at startup. Moving the window between monitors with different DPI
   will not rescale (the corner masks would need a rebuild too).
 - The Mica/Acrylic backdrops need Windows 11 22H2 or later; below that the app stays on the
@@ -248,11 +270,16 @@ easy to reason about on their own.
   click-through outside the region means the very corners cannot start a resize.
 - macOS also draws a shadow that follows the window shape; DWM draws its own, so the shadow is
   Windows' and is not part of this.
-- No mouse reporting, no scrollback scrolling UI, no hyperlinks, no kitty graphics.
-- Not run on Windows by me. It configures, compiles and links under strict C99 with
-  `-Wall -Wextra -pedantic`.
-- **Built and run on Windows** (llvm-mingw clang 23.1.5 + lld, Ninja, from PowerShell 7 /
-  WezTerm): `direct3d11` renderer, translucent panel, Nerd Font icons working, no warnings
-  from the project's own sources. See [README-powershell.md](README-powershell.md).
+- No mouse reporting, no scrollback scrolling UI, no selection/copy, no hyperlinks, no kitty
+  graphics, no focus events, no IME composition window at the cursor, no OSC 52 clipboard
+  writes. Mouse, scrollback and selection are the next milestone.
+- A very large paste blocks the UI thread while it is written to the console; the pipe is
+  synchronous and there is no writer queue yet.
+- **Verified on Windows 11 25H2 (build 26200)**: llvm-mingw clang 23.1.5 + lld + Ninja,
+  `direct3d11` renderer, translucent panel, Nerd Font icons, a live `pwsh` 7 shell in ConPTY
+  (a typed command and its output appear on the grid, the window title comes from the
+  shell's OSC sequence), closing the window while the shell runs leaves no `conhost.exe` or
+  shell behind, and `--selftest`'s ConPTY round trip passes. No warnings from the project's
+  own sources under `-Wall -Wextra -pedantic`.
 - SDL3 enables C++ on Windows for its own sources, which is why the presets also set a C++
   compiler. Your own code stays C99.

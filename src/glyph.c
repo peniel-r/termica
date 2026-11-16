@@ -210,13 +210,6 @@ void glyphs_close(Glyphs *glyphs)
     memset(glyphs, 0, sizeof *glyphs);
 }
 
-bool glyphs_has(const Glyphs *glyphs, Uint32 codepoint)
-{
-    if (!glyphs->regular || codepoint >= GLYPH_MAX_CODEPOINT)
-        return false;
-    return TTF_FontHasGlyph(glyphs->regular, codepoint);
-}
-
 void glyphs_draw_text(Glyphs *glyphs, const char *text, size_t length,
                       float x, float y, bool bold, bool italic,
                       SDL_Color color)

@@ -1,22 +1,23 @@
 /*
- * termica - milestone 1: a real terminal grid.
+ * termica - milestone 2: a real shell behind the grid.
  *
  * Milestone 0 proved the look (borderless, translucent, rounded, glyph
- * cache). This milestone puts a real terminal behind it:
+ * cache). Milestone 1 put a real terminal behind it. This milestone puts a
+ * real program behind that:
  *
  *   1. libghostty-vt owns the screen state. vt_write() parses every
  *      escape sequence (SGR colors and attributes, cursor movement,
  *      erase, scroll, OSC, ...) for us. See
  *      https://lib.ghostty.org/vt/first-terminal.html
- *   2. the keyboard is encoded with the same library (arrow keys,
- *      modifiers, whatever the terminal modes ask for) and written back
- *      into the terminal. There is no pty yet, so the kernel's echo part
- *      of the line discipline is emulated for Enter and Backspace.
+ *   2. pty.c starts a shell in a ConPTY. Keys and pastes go into the
+ *      pseudoconsole, its UTF-8 output comes back through a reader thread
+ *      and is fed to the terminal. The program echoes, not us.
  *   3. every frame is drawn from a GhosttyRenderState: rows, cells,
  *      resolved colors, attributes, the cursor, on the fixed cell grid.
  *
  * The pieces live in their own files:
- *   term.c      the libghostty-vt wrapper (screen, key encoder)
+ *   term.c      the libghostty-vt wrapper (screen, key encoder, replies)
+ *   pty.c       ConPTY: the child process, the pipes, the reader thread
  *   glyph.c     fonts, the glyph cache, drawing text
  *   style.c     terminal cell style -> colors and flags
  *   panel.c     the rounded translucent panel
@@ -24,10 +25,11 @@
  *   window.c    the SDL window and the Windows 11 chrome
  *
  * Usage:  termica [--selftest] [path\to\NerdFont.ttf] [point-size]
- * Keys:   type to write, arrows move the cursor, Enter newline,
- *         Backspace erase, Ctrl+V paste, Alt+Up/Down = panel opacity,
+ * Keys:   type, arrows, Enter, Backspace and the rest go to the shell;
+ *         Ctrl+V pastes, Ctrl+Shift+Q quits,
+ *         Alt+Up/Down = panel opacity,
  *         Alt+M = cycle the window backdrop (panel, Mica, Mica Alt,
- *         Acrylic), Esc = quit
+ *         Acrylic)
  *
  * Strict C99. Windows-only bits are behind #ifdef _WIN32.
  */
@@ -38,6 +40,7 @@
 
 #include "glyph.h"
 #include "panel.h"
+#include "pty.h"
 #include "style.h"
 #include "term.h"
 #include "window.h"
@@ -45,9 +48,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-/* Chevron prompt (U+276F); a plain '>' when the font does not carry it. */
-#define PROMPT_CHEVRON "\xE2\x9D\xAF"
 
 /* Over a DWM backdrop the panel is only a light tint: the material is the
  * background, the tint just keeps the text readable. */
@@ -65,6 +65,7 @@ typedef struct App {
     Glyphs        glyphs;
     Panel         panel;
     Term          term;
+    Pty          *pty;              /* the shell behind the grid        */
 
     float          display_scale;
     float          panel_opacity;   /* 0..1                            */
@@ -77,6 +78,7 @@ typedef struct App {
 
     bool           running;
     bool           needs_redraw;
+    bool           shell_exited;
     bool           cursor_lit;      /* blink phase                      */
     bool           cursor_blinks;   /* the terminal asked for a blink   */
     SDL_TimerID    blink_timer;
@@ -370,67 +372,103 @@ static GhosttyMods ghostty_modifiers_for(SDL_Keymod modifiers)
     return result;
 }
 
-/* Write a block of text (a paste, or a burst from the IME) into the
- * terminal. Newlines become CRLF, because in a terminal a bare LF only
- * moves the cursor down. */
-static void write_text_block(App *app, const char *text)
+/* Send bytes to the program: key encoding, pastes, and the terminal's own
+ * replies (device status reports, mode queries) all end up here. A no-op
+ * before the shell exists or after it is gone. */
+static void send_to_shell(void *userdata, const void *data, size_t length)
 {
-    size_t length;
-    size_t index;
-    size_t written = 0;
-    char *converted;
+    App *app = (App *)userdata;
+
+    if (app->pty && length > 0)
+        pty_write(app->pty, data, length);
+}
+
+/* Send text to the program (layout text, an IME commit). SDL reports Enter
+ * as "\r" in SDL_EVENT_TEXT_INPUT as well as on the key event, and the key
+ * encoder already sent it, so the carriage returns are dropped here instead
+ * of typing twice. */
+static void send_text(App *app, const char *text)
+{
+    const char *start;
+    const char *cursor;
 
     if (!text)
         return;
-    length = strlen(text);
-    if (length == 0)
-        return;
-    converted = (char *)malloc(length * 2 + 1);
-    if (!converted)
-        return;
-    for (index = 0; index < length; index++) {
-        if (text[index] == '\r')
-            continue;
-        if (text[index] == '\n') {
-            converted[written++] = '\r';
-            converted[written++] = '\n';
-            continue;
+    start = text;
+    cursor = text;
+    while (*cursor) {
+        if (*cursor == '\r') {
+            if (cursor > start)
+                send_to_shell(app, start, (size_t)(cursor - start));
+            start = cursor + 1;
         }
-        converted[written++] = text[index];
+        cursor++;
     }
-    term_write(&app->term, converted, written);
-    free(converted);
+    if (cursor > start)
+        send_to_shell(app, start, (size_t)(cursor - start));
+}
+
+/* Ask before pasting text that could run commands: line breaks outside
+ * bracketed paste, or an embedded end-of-paste marker. */
+static bool confirm_unsafe_paste(App *app)
+{
+    static const SDL_MessageBoxButtonData buttons[] = {
+        { SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 1, "Cancel" },
+        { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 0, "Paste" }
+    };
+    const SDL_MessageBoxData box = {
+        SDL_MESSAGEBOX_WARNING,
+        app->window,
+        "Paste anyway?",
+        "The clipboard contains line breaks or an end-of-paste marker that a "
+        "shell can run as commands.",
+        SDL_arraysize(buttons),
+        buttons,
+        NULL
+    };
+    int pressed = 1;
+
+    if (!SDL_ShowMessageBox(&box, &pressed))
+        return false;
+    return pressed == 0;
+}
+
+/* Paste the clipboard the way the program asked for it. The library frames
+ * bracketed paste and rejects unsafe text; the rejection is confirmed with
+ * the user and then retried. */
+static void paste_clipboard(App *app)
+{
+    char *clipboard = SDL_GetClipboardText();
+    size_t length;
+    bool rejected = false;
+
+    if (!clipboard)
+        return;
+    length = strlen(clipboard);
+    if (!term_paste(&app->term, clipboard, length, false, &rejected) &&
+        rejected && confirm_unsafe_paste(app))
+        term_paste(&app->term, clipboard, length, true, NULL);
+    SDL_free(clipboard);
     app->needs_redraw = true;
 }
 
-/* Encode one key event and write it into the terminal. No pty is attached,
- * so this also plays the kernel line discipline's echo role: plain Enter
- * echoes CRLF and plain Backspace erases the character in front of the
- * cursor. Escape sequences the encoder produces (arrows, ctrl combos, ...)
- * pass through untouched. */
+/* Encode one key event and write it to the program. The bytes are exactly
+ * what the terminal modes ask for; the program echoes them back. */
 static void write_key(App *app, const SDL_KeyboardEvent *event)
 {
-    static const uint8_t ENTER_ECHO[] = { '\r', '\n' };
-    static const uint8_t BACKSPACE_ECHO[] = { '\b', ' ', '\b' };
     uint8_t encoded[64];
     size_t byte_count;
     GhosttyKey key = ghostty_key_for(event->scancode);
     SDL_Keycode unshifted;
-    bool unmodified;
 
     if (key == GHOSTTY_KEY_UNIDENTIFIED)
         return;
 
-    /* Ctrl+V (or Ctrl+Shift+V, the usual terminal binding) pastes from the
-     * clipboard. There is no program behind the terminal yet, so the paste
-     * goes into the terminal itself. */
+    /* Ctrl+V and Ctrl+Shift+V paste from the clipboard, like every other
+     * Windows terminal. */
     if (key == GHOSTTY_KEY_V && (event->mod & SDL_KMOD_CTRL) &&
         !(event->mod & (SDL_KMOD_ALT | SDL_KMOD_GUI))) {
-        char *clipboard = SDL_GetClipboardText();
-        if (clipboard) {
-            write_text_block(app, clipboard);
-            SDL_free(clipboard);
-        }
+        paste_clipboard(app);
         return;
     }
 
@@ -445,25 +483,14 @@ static void write_key(App *app, const SDL_KeyboardEvent *event)
                                                : GHOSTTY_KEY_ACTION_PRESS,
                                  key, ghostty_modifiers_for(event->mod),
                                  (uint32_t)unshifted, encoded, sizeof encoded);
-    if (byte_count == 0)
-        return;
-
-    unmodified = !(event->mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_GUI));
-    if (byte_count == 1 && encoded[0] == '\r' && unmodified)
-        term_write(&app->term, ENTER_ECHO, sizeof ENTER_ECHO);
-    else if (byte_count == 1 && (encoded[0] == 0x7f || encoded[0] == 0x08) &&
-             unmodified)
-        term_write(&app->term, BACKSPACE_ECHO, sizeof BACKSPACE_ECHO);
-    else
-        term_write(&app->term, encoded, byte_count);
-    app->needs_redraw = true;
+    send_to_shell(app, encoded, byte_count);
 }
 
 /* Layout text (letters, digits, punctuation, IME output). SDL delivers it
  * separately from key events; feed it straight through. */
 static void handle_text_input(App *app, const SDL_TextInputEvent *event)
 {
-    write_text_block(app, event->text);
+    send_text(app, event->text);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -499,38 +526,83 @@ static void fit_grid(App *app)
         term_resize(&app->term, (uint16_t)columns, (uint16_t)rows,
                     (uint32_t)app->glyphs.cell_width,
                     (uint32_t)app->glyphs.cell_height);
+        /* The console follows the grid, so full-screen programs see the
+         * new size and reflow. */
+        if (app->pty)
+            pty_resize(app->pty, (uint16_t)columns, (uint16_t)rows);
     }
     /* The window region follows the window size. */
     window_sync_chrome(app->window, app->backdrop, app->panel.radius);
     app->needs_redraw = true;
 }
 
-static void write_demo(App *app)
+/* Write an app-level message into the terminal (spawn failures, the exit
+ * status). Gives the user something to read on the grid. */
+static void show_message(App *app, const char *text)
 {
-    const char *prompt = glyphs_has(&app->glyphs, 0x276F) ? PROMPT_CHEVRON
-                                                          : ">";
-    const char *lines[] = {
-        "\x1b[1;36mtermica\x1b[0m \x1b[90m- milestone 1: a real terminal grid\x1b[0m\r\n",
-        "\x1b[90mlibghostty-vt 1.0.1 does the parsing, we only draw it\x1b[0m\r\n",
-        "\x1b[1mbold\x1b[0m \x1b[3mitalic\x1b[0m \x1b[4munderline\x1b[0m "
-        "\x1b[7minverse\x1b[0m \x1b[9mstrike\x1b[0m \x1b[2mdim\x1b[0m\r\n",
-        "\x1b[31mred\x1b[0m \x1b[32mgreen\x1b[0m \x1b[33myellow\x1b[0m "
-        "\x1b[34mblue\x1b[0m \x1b[35mmagenta\x1b[0m \x1b[36mcyan\x1b[0m\r\n",
-        "\x1b[38;2;255;128;0mtruecolor orange\x1b[0m  "
-        "\x1b[48;2;40;44;52m 256-color background \x1b[0m\r\n",
-        "\x1b[90mtype below: arrows move the cursor, enter breaks the line, "
-        "backspace erases, ctrl+v pastes\x1b[0m\r\n",
-        "\x1b[90mwindow: Alt+Up/Down opacity, Alt+M backdrop, Esc quit\x1b[0m\r\n",
-        "\r\n",
-        "\x1b[1;32m",
-        prompt,
-        "\x1b[0m ",
-    };
-    size_t index;
-
-    for (index = 0; index < sizeof lines / sizeof lines[0]; index++)
-        term_write(&app->term, lines[index], strlen(lines[index]));
+    term_write(&app->term, text, strlen(text));
     app->needs_redraw = true;
+}
+
+/* The reader thread only announces that bytes are waiting. SDL_PushEvent is
+ * thread-safe; a full queue means the main thread is already awake, so
+ * retry briefly and let it drain. */
+static void on_pty_output(void *userdata)
+{
+    SDL_Event event;
+    int attempt;
+
+    (void)userdata;
+    SDL_zero(event);
+    event.type = SDL_EVENT_USER;
+    event.user.code = 2;
+    for (attempt = 0; attempt < 100; attempt++) {
+        if (SDL_PushEvent(&event))
+            return;
+        SDL_Delay(1);
+    }
+}
+
+/* Move pending program output into the terminal. Main thread only: the
+ * parser is not thread-safe. The pty's ring is bounded (256 KiB), so this
+ * cannot run away even if the program floods output. */
+static void pump_shell(App *app)
+{
+    uint8_t buffer[16384];
+    bool parsed = false;
+
+    if (!app->pty)
+        return;
+
+    for (;;) {
+        size_t got = pty_read(app->pty, buffer, sizeof buffer);
+
+        if (got == 0)
+            break;
+        term_write(&app->term, buffer, got);
+        parsed = true;
+    }
+
+    /* The direct child is gone. Report it once, and leave the last output
+     * on screen; the window can be closed after reading it. */
+    if (!app->shell_exited) {
+        uint32_t code = 0;
+
+        if (pty_exit_code(app->pty, &code)) {
+            char message[128];
+
+            app->shell_exited = true;
+            SDL_snprintf(message, sizeof message,
+                         "\r\n\x1b[90m[process exited with code %u]"
+                         "\x1b[0m\r\n",
+                         (unsigned)code);
+            term_write(&app->term, message, strlen(message));
+            parsed = true;
+        }
+    }
+
+    if (parsed)
+        app->needs_redraw = true;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -735,7 +807,11 @@ static Uint32 SDLCALL on_blink_timer(void *userdata, SDL_TimerID timer_id,
 
 static void handle_key_down(App *app, const SDL_KeyboardEvent *event)
 {
-    if (event->key == SDLK_ESCAPE) {
+    /* Esc belongs to the program now (vim, PSReadLine). Quit with
+     * Ctrl+Shift+Q or the window's close button. */
+    if (event->key == SDLK_Q && !event->repeat &&
+        (event->mod & (SDL_KMOD_CTRL | SDL_KMOD_SHIFT)) ==
+            (SDL_KMOD_CTRL | SDL_KMOD_SHIFT)) {
         app->running = false;
         return;
     }
@@ -840,10 +916,37 @@ int main(int argc, char **argv)
         fprintf(stderr, "libghostty-vt setup failed\n");
         goto cleanup;
     }
+    /* Replies from the parser belong in the program's input, like every
+     * other keystroke. */
+    term_set_writer(&app.term, send_to_shell, &app);
 
     window_sync_chrome(app.window, app.backdrop, app.panel.radius);
     fit_grid(&app);
-    write_demo(&app);
+
+    /* The grid is final now, so the console starts at the right size. */
+    {
+        wchar_t *command = pty_default_shell();
+        char error[256];
+
+        if (!command) {
+            show_message(&app,
+                         "\x1b[31mno shell found: pwsh.exe, powershell.exe "
+                         "and cmd.exe are all missing\x1b[0m\r\n");
+        } else {
+            app.pty = pty_spawn(command, (uint16_t)app.columns,
+                                (uint16_t)app.rows, on_pty_output, &app,
+                                error, sizeof error);
+            free(command);
+            if (!app.pty) {
+                char message[400];
+
+                SDL_snprintf(message, sizeof message,
+                             "\x1b[31mcould not start a shell: %s"
+                             "\x1b[0m\r\n", error);
+                show_message(&app, message);
+            }
+        }
+    }
 
     app.blink_timer = SDL_AddTimer(500, on_blink_timer, &app);
 
@@ -878,6 +981,10 @@ int main(int argc, char **argv)
             }
         } while (app.running && SDL_PollEvent(&event));
 
+        /* Drain the program's output: the pty event, but also the blink
+         * timer, which is what notices an exit that produced no output. */
+        pump_shell(&app);
+
         /* The program changed the window title with an OSC sequence. */
         if (app.term.title_changed) {
             app.term.title_changed = false;
@@ -894,9 +1001,11 @@ int main(int argc, char **argv)
 
 cleanup:
     /* Every step is safe on a partly initialised app, so a failure in the
-     * middle of setup leaks nothing either. */
+     * middle of setup leaks nothing either. Close the pty before the
+     * terminal: the terminal's write callback goes through it. */
     if (app.blink_timer)
         SDL_RemoveTimer(app.blink_timer);
+    pty_close(app.pty);
     term_free(&app.term);
     panel_free(&app.panel);
     glyphs_close(&app.glyphs);

@@ -23,13 +23,24 @@
 #include <stddef.h>
 #include <stdint.h>
 
-typedef struct Term {
+typedef struct Term Term;
+
+/* Called when the terminal needs bytes written back to the program. */
+typedef void (*TermWriteFn)(void *userdata, const void *data, size_t length);
+
+struct Term {
     GhosttyTerminal               handle;        /* the screen state      */
     GhosttyRenderState            render_state;  /* the frame we draw     */
     GhosttyRenderStateRowIterator row_iterator;  /* walks the rows        */
     GhosttyRenderStateRowCells    cell_iterator; /* walks a row's cells   */
     GhosttyKeyEncoder             key_encoder;   /* key press -> bytes    */
     GhosttyKeyEvent               key_event;     /* the event we fill in  */
+
+    /* Where the terminal's replies go: device status reports, mode
+     * queries, XTWINOPS. Called synchronously, on the thread that wrote
+     * into the terminal. */
+    TermWriteFn writer;
+    void       *writer_userdata;
 
     uint16_t columns;
     uint16_t rows;
@@ -40,7 +51,10 @@ typedef struct Term {
      * this up and applies it to the window. */
     bool title_changed;
     char title[128];
-} Term;
+};
+
+/* Install the sink for term_write replies (usually pty_write). */
+void term_set_writer(Term *term, TermWriteFn writer, void *userdata);
 
 /* Create the terminal and everything around it. False on failure. */
 bool term_init(Term *term, uint16_t columns, uint16_t rows);
@@ -63,6 +77,16 @@ void term_resize(Term *term, uint16_t columns, uint16_t rows,
 size_t term_encode_key(Term *term, GhosttyKeyAction action, GhosttyKey key,
                        GhosttyMods modifiers, uint32_t unshifted_codepoint,
                        uint8_t *buffer, size_t capacity);
+
+/* Paste clipboard text the way the program asked for it: bracketed by
+ * \x1b[200~ / \x1b[201~ when mode 2004 is set, or as a kitty paste event
+ * when the clipboard protocol is on. Then the text goes to the writer.
+ *
+ * Unsafe text (line breaks outside bracketed paste, an embedded paste-end
+ * sequence) is refused unless allow_unsafe is set; *rejected says so.
+ * Returns false when nothing was written. */
+bool term_paste(Term *term, const char *text, size_t length,
+                bool allow_unsafe, bool *rejected);
 
 /* Run the self test from the docs. Returns the number of failures. */
 int term_selftest(void);
