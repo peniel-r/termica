@@ -38,14 +38,103 @@ FetchContent_Declare(SDL3_ttf
 FetchContent_MakeAvailable(SDL3)
 FetchContent_MakeAvailable(SDL3_ttf)
 
+# ---- libghostty-vt -----------------------------------------------------------
+# Docs: https://lib.ghostty.org/vt/installing.html
+#
+# On Windows there is an official prebuilt zip, so no Zig is needed. Everywhere
+# else the library is built from source (that does need Zig 0.17) and found
+# through CMAKE_PREFIX_PATH / ghostty-vt_DIR.
+set(GHOSTTY_VERSION "1.0.1" CACHE STRING "libghostty-vt release version")
+if(WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|aarch64")
+    set(GHOSTTY_ARCH "aarch64" CACHE STRING "libghostty-vt Windows arch")
+else()
+    set(GHOSTTY_ARCH "x86_64" CACHE STRING "libghostty-vt Windows arch")
+endif()
+
+if(WIN32)
+    set(ghostty_zip "${CMAKE_BINARY_DIR}/ghostty-vt-${GHOSTTY_VERSION}-${GHOSTTY_ARCH}-windows-gnu.zip")
+    set(ghostty_root "${CMAKE_BINARY_DIR}/ghostty-vt-${GHOSTTY_VERSION}-${GHOSTTY_ARCH}-windows-gnu/ghostty-vt-${GHOSTTY_VERSION}-${GHOSTTY_ARCH}-windows-gnu")
+
+    # The checksum of the release we default to. A pinned GHOSTTY_VERSION
+    # that we have no checksum for is downloaded unverified (and CMake says
+    # so), so bumping the version does not mean editing this file first.
+    set(ghostty_hash_args)
+    if(GHOSTTY_VERSION STREQUAL "1.0.1")
+        set(ghostty_hash_args EXPECTED_HASH SHA256=8e2eb9e1822e85d786b456c8beb86f49d09c318c91f0c2913f91e7ffa12cda29)
+    endif()
+
+    if(NOT EXISTS "${ghostty_root}/lib/cmake/ghostty-vt")
+        file(DOWNLOAD
+            https://release.files.ghostty.org/libghostty-vt/${GHOSTTY_VERSION}/ghostty-vt-${GHOSTTY_VERSION}-${GHOSTTY_ARCH}-windows-gnu.zip
+            ${ghostty_zip}
+            ${ghostty_hash_args}
+            STATUS ghostty_dl_status SHOW_PROGRESS)
+        list(GET ghostty_dl_status 0 ghostty_dl_err)
+        if(NOT ghostty_dl_err EQUAL 0)
+            message(FATAL_ERROR "Failed to download libghostty-vt: ${ghostty_dl_status}")
+        endif()
+        file(ARCHIVE_EXTRACT INPUT ${ghostty_zip} DESTINATION ${ghostty_root})
+    endif()
+    list(APPEND CMAKE_PREFIX_PATH ${ghostty_root})
+    find_package(ghostty-vt CONFIG REQUIRED)
+else()
+    find_package(ghostty-vt CONFIG QUIET)
+    if(NOT TARGET ghostty-vt::ghostty-vt)
+        message(FATAL_ERROR
+            "libghostty-vt not found. This milestone needs it; only Windows has a "
+            "prebuilt release. Build it from source (needs Zig 0.17):\n"
+            "  zig build -Doptimize=ReleaseFast --prefix <dir>\n"
+            "then configure with -DCMAKE_PREFIX_PATH=<dir>.\n"
+            "See https://lib.ghostty.org/vt/installing.html")
+    endif()
+endif()
+
 # ---- The demo program --------------------------------------------------------
-add_executable(termica src/main.c)
+add_executable(termica
+    src/main.c
+    src/term.c
+    src/selftest.c
+    src/glyph.c
+    src/style.c
+    src/panel.c
+    src/geometry.c
+    src/window.c
+    src/term.h
+    src/glyph.h
+    src/style.h
+    src/panel.h
+    src/geometry.h
+    src/window.h)
 target_link_libraries(termica PRIVATE SDL3_ttf::SDL3_ttf SDL3::SDL3)
+target_link_libraries(termica PRIVATE ghostty-vt::ghostty-vt)
+
+if(WIN32)
+    # ghostty-vt.dll must sit next to the exe (or on PATH).
+    add_custom_command(TARGET termica POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:ghostty-vt::ghostty-vt> $<TARGET_FILE_DIR:termica>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE_DIR:ghostty-vt::ghostty-vt>/ghostty-vt.pdb" $<TARGET_FILE_DIR:termica>
+        VERBATIM)
+endif()
 
 if(MSVC)
     target_compile_options(termica PRIVATE /W4)
 else()
     target_compile_options(termica PRIVATE -Wall -Wextra -pedantic)
+endif()
+
+# ---- Sanitizers --------------------------------------------------------------
+# -DTERMICA_SANITIZE=ON builds with AddressSanitizer and
+# UndefinedBehaviorSanitizer: buffer overflows, use after free, double frees,
+# misaligned access and other undefined behaviour are reported at run time.
+# LeakSanitizer does not exist for the windows-gnu target, so leaks are not
+# reported; the self test and the app free everything they own.
+option(TERMICA_SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+if(TERMICA_SANITIZE)
+    target_compile_options(termica PRIVATE
+        -fsanitize=address,undefined -fno-omit-frame-pointer -g)
+    target_link_options(termica PRIVATE -fsanitize=address,undefined)
 endif()
 
 if(WIN32)

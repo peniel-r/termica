@@ -55,3 +55,6 @@ dkms.conf
 *.dwo
 
 build/
+
+# Scratch area for screenshots and probe programs
+.probe/
