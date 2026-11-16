@@ -7,17 +7,14 @@
     name, cell size, bold/italic faces) shows up inline - there is no
     separate console window, because the exe inherits this console.
 
-    The font argument is optional: if none is given, a Nerd Font Mono is
-    looked up in this order:
-      1. the per-user Windows font folder (*NerdFontMono-*, MapleMono-NF-*)
-      2. the Scoop nerd-fonts package (Maple-Mono-NF)
-      3. C:\Windows\Fonts\consola.ttf (no icons, and no CJK)
+    No font is needed: the exe carries Google Sans Code NF Mono and uses it
+    unless -Font names a different .ttf.
 
     With -SelfTest the terminal half is checked without opening a window
     (this is the documented libghostty-vt flow, see README).
 
 .PARAMETER Font
-    Path to a .ttf. Defaults to auto-detection.
+    Optional path to a .ttf. The built-in Nerd Font is the default.
 
 .PARAMETER Size
     Point size. Default 16.
@@ -55,27 +52,12 @@ if ($SelfTest) {
     exit $LASTEXITCODE
 }
 
-if (-not $Font) {
-    $userFonts = "$env:LOCALAPPDATA\Microsoft\Windows\Fonts"
-    $scoopFonts = "$env:USERPROFILE\scoop\apps\Maple-Mono-NF\current"
-
-    $candidates = @(
-        (Get-ChildItem $userFonts -Filter '*NerdFontMono-Regular.ttf' -ErrorAction SilentlyContinue |
-            Select-Object -First 1 -ExpandProperty FullName)
-        (Get-ChildItem $userFonts -Filter 'MapleMono-NF-Regular.ttf' -ErrorAction SilentlyContinue |
-            Select-Object -First 1 -ExpandProperty FullName)
-        (Get-ChildItem $scoopFonts -Filter 'MapleMono-NF-Regular.ttf' -ErrorAction SilentlyContinue |
-            Select-Object -First 1 -ExpandProperty FullName)
-        (Get-ChildItem 'C:\Windows\Fonts' -Filter '*NerdFontMono-Regular.ttf' -ErrorAction SilentlyContinue |
-            Select-Object -First 1 -ExpandProperty FullName)
-        'C:\Windows\Fonts\consola.ttf'
-    ) | Where-Object { $_ -and (Test-Path $_) }
-
-    $Font = $candidates | Select-Object -First 1
+if ($Font) {
+    Write-Host "font: $Font (override)" -ForegroundColor DarkGray
+} else {
+    Write-Host "font: Google Sans Code NF (built in)" -ForegroundColor DarkGray
 }
-
-Write-Host "font: $Font" -ForegroundColor DarkGray
 Write-Host "size: $Size" -ForegroundColor DarkGray
 Write-Host ""
 
-& $exe $Font $Size
+if ($Font) { & $exe $Font $Size } else { & $exe $Size }

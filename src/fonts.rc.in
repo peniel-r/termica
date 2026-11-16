@@ -1,0 +1,17 @@
+/*
+ * termica - fonts embedded in the executable.
+ *
+ * CMake configures this file into the build directory and compiles it with
+ * the Windows resource compiler. The RCDATA resource IDs must stay in step
+ * with EmbeddedFontFace in embed.h.
+ *
+ * The files are the "Mono" Nerd Font variants (single-width icons) of
+ * Google Sans Code 7.001, Nerd Fonts release 3.5.1, SIL OFL 1.1.
+ */
+
+#include <windows.h>
+
+1 RCDATA "@TERMICA_FONT_DIR@/GoogleSansCodeNerdFontMono-Regular.ttf"
+2 RCDATA "@TERMICA_FONT_DIR@/GoogleSansCodeNerdFontMono-Bold.ttf"
+3 RCDATA "@TERMICA_FONT_DIR@/GoogleSansCodeNerdFontMono-Italic.ttf"
+4 RCDATA "@TERMICA_FONT_DIR@/GoogleSansCodeNerdFontMono-BoldItalic.ttf"

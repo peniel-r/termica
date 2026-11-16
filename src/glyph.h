@@ -6,10 +6,15 @@
  * Multilingual Plane, which is enough for ASCII, box drawing and Nerd Font
  * icons.
  *
- * SDL_ttf does the rasterising. A bold, italic or bold-italic face is
- * looked up next to the regular one (consola.ttf -> consolab.ttf, "... Nerd
- * Font.ttf" -> "... Nerd Font Bold.ttf"); when there is no bold face the
- * glyph is simply drawn twice, one pixel apart.
+ * The default font is Google Sans Code NF Mono, compiled into the
+ * executable. A path passed on the command line still wins; if it cannot be
+ * opened, the built-in family is used instead, and its regular face also
+ * fills in codepoints the chosen font lacks.
+ *
+ * SDL_ttf does the rasterising. For a font from disk, bold, italic or
+ * bold-italic faces are looked up next to the regular one (consola.ttf ->
+ * consolab.ttf, "... Nerd Font.ttf" -> "... Nerd Font Bold.ttf"); when
+ * there is no bold face the glyph is simply drawn twice, one pixel apart.
  *
  * Strict C99.
  */
@@ -47,6 +52,15 @@ typedef struct Glyphs {
     TTF_Font *italic;
     TTF_Font *bold_italic;
 
+    /* The built-in regular face, used for codepoints the chosen font does
+     * not carry (Nerd icons in Consolas, for example). NULL when the
+     * built-in family is the main font. */
+    TTF_Font *fallback;
+
+    /* True when the main family is the font compiled into the executable
+     * (no path, or the requested path could not be opened). */
+    bool built_in;
+
     /* [GLYPH_STYLE_COUNT][GLYPH_MAX_CODEPOINT], heap allocated because it
      * is several megabytes. */
     Glyph *cache;
@@ -56,8 +70,10 @@ typedef struct Glyphs {
     int cell_height;
 } Glyphs;
 
-/* Load the font and its optional faces. `point_size` is in points and is
- * scaled by `display_scale`. False on failure (with SDL's error set). */
+/* Load the font and its optional faces. `font_path` may be NULL to use the
+ * built-in family; a path that cannot be opened falls back to it too.
+ * `point_size` is in points and is scaled by `display_scale`. False on
+ * failure (with SDL's error set). */
 bool glyphs_open(Glyphs *glyphs, SDL_Renderer *renderer, const char *font_path,
                  float point_size, float display_scale);
 

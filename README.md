@@ -60,27 +60,40 @@ Check: `x86_64-w64-mingw32-clang --version`, `cmake --version`, `ninja --version
 **Zig is still not needed.** CMake downloads the prebuilt libghostty-vt release
 zip for Windows, so the library is linked without a Zig toolchain.
 
-## 2. Get a Nerd Font
+## 2. Fonts: Google Sans Code NF is built in
 
-The icons are private-use-area glyphs, so you need a font that contains them. Use a **"Nerd Font Mono"**
-variant (single-width icons), for example JetBrainsMono Nerd Font Mono or Hack Nerd Font Mono, from
-nerdfonts.com. Note the path of the `.ttf` file. (Fonts installed for your user usually live in
-`%LOCALAPPDATA%\Microsoft\Windows\Fonts`.)
+The executable carries **Google Sans Code Nerd Font Mono** - regular, bold, italic and
+bold-italic, Nerd Fonts release 3.5.1, SIL OFL 1.1 - linked in as Windows resources. There
+is nothing to install and no font path to pass: prompt symbols, box drawing and Nerd icons
+render out of the box. The program prints `font: Google Sans Code NF (built in)`.
 
-Without one the program falls back to Consolas: ASCII and box drawing still work, but the
-icons do not, and neither does anything the font lacks (a CJK character needs a font that
-has it - there is no font fallback yet).
+A path on the command line still wins:
 
-The program looks for a matching bold, italic and bold-italic face next to the regular
-one (`consola.ttf` -> `consolab.ttf`, `... Nerd Font.ttf` -> `... Nerd Font Bold.ttf`).
-If it cannot find a bold face it fakes bold by drawing the glyph twice, one pixel apart.
+```
+build\llvm-mingw\termica.exe "C:\path\to\AnotherNerdFontMono-Regular.ttf" 16
+```
+
+If that file cannot be opened, the built-in family is used instead. With a font from disk
+that lacks a codepoint (Consolas has no Nerd icons), the built-in regular face draws that
+glyph, so icons keep working. There is no further fallback: CJK or emoji that neither face
+has are still blank.
+
+For a font from disk the program looks for matching bold, italic and bold-italic faces next
+to the regular one (`consola.ttf` -> `consolab.ttf`, `... Nerd Font.ttf` -> `... Nerd Font
+Bold.ttf`), and fakes bold by drawing the glyph twice when there is no bold face. The
+built-in family has all four real faces.
+
+The TTFs live in `assets/fonts/` with their `OFL.txt`; CMake embeds them through
+`src/fonts.rc.in`. That is where roughly 10 MB of the executable's size goes.
 
 ## 3. Build and run
 
 ```
 cmake --preset llvm-mingw
 cmake --build --preset llvm-mingw
-build\llvm-mingw\termica.exe "C:\path\to\JetBrainsMonoNerdFontMono-Regular.ttf" 16
+build\llvm-mingw\termica.exe              # built-in font, 16 pt
+build\llvm-mingw\termica.exe 18           # point size only
+build\llvm-mingw\termica.exe C:\path\to\Font.ttf 16
 ```
 
 Or, from PowerShell 7 / WezTerm:
@@ -246,6 +259,8 @@ The app itself only does the parts the library leaves to the embedder:
 | `src/main.c` | the app: event loop, keyboard and paste, spawning and draining the shell, one frame |
 | `src/term.{h,c}` | the libghostty-vt wrapper: screen, render state, key encoder, replies, paste |
 | `src/pty.{h,c}` | ConPTY: pipes, the child process, the reader thread, resize, teardown |
+| `src/embed.{h,c}` | the Google Sans Code NF bytes linked into the executable |
+| `src/fonts.rc.in` | the Windows resource script that carries those bytes |
 | `src/glyph.{h,c}` | fonts, the glyph cache, drawing a cell's text (bold/italic faces) |
 | `src/style.{h,c}` | a terminal cell style -> colors and decorations for the renderer |
 | `src/panel.{h,c}` | the rounded translucent panel and its antialiased corner masks |
@@ -260,9 +275,9 @@ easy to reason about on their own.
 
 - **ConPTY only.** The shell needs Windows 10 1809 or later. `pty.c` has a stub for other
   platforms, so the app still builds there, but no shell starts.
-- Glyph cache covers the Basic Multilingual Plane only, and there is no font fallback: a
-  character the chosen font lacks is blank. Fine for ASCII, box drawing and Nerd icons, not
-  for CJK or emoji.
+- Glyph cache covers the Basic Multilingual Plane. The fallback covers only the built-in
+  face: a character neither the chosen font nor Google Sans Code NF has (most CJK, colour
+  emoji) is blank.
 - One font scale chosen at startup. Moving the window between monitors with different DPI
   will not rescale (the corner masks would need a rebuild too).
 - The Mica/Acrylic backdrops need Windows 11 22H2 or later; below that the app stays on the

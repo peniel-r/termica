@@ -26,11 +26,10 @@ pwsh -File ./run.ps1               # launch it
 | Ninja | `ninja` | `Ninja-build.Ninja` | the build backend |
 | git | `git` | `Git.Git` | `FetchContent` clones SDL3 with it |
 | **llvm-mingw** | `mingw-mstorsjo-llvm-ucrt` | *(no official id; grab the release zip from github.com/mstorsjo/llvm-mingw)* | **clang 23 + lld + MinGW-w64 headers + llvm-windres + llvm-ar** |
-| Nerd Font | `Maple-Mono-NF` | *(nerd-fonts bucket)* | a monospace font with Nerd Font glyphs |
 | Zig | `zig` | `zig.zig` | only needed later, for `libghostty-vt` |
 
 ```powershell
-scoop install cmake ninja git mingw-mstorsjo-llvm-ucrt Maple-Mono-NF
+scoop install cmake ninja git mingw-mstorsjo-llvm-ucrt
 ```
 
 ### Why llvm-mingw and not plain LLVM
@@ -102,10 +101,9 @@ terminal.
 pwsh -File ./run.ps1
 ```
 
-`run.ps1` picks a Nerd Font Mono for you - the per-user Windows font folder
-first (`*NerdFontMono-*`, `MapleMono-NF-*`), then the Scoop `Maple-Mono-NF`
-package, then `consola.ttf` as a last resort - and launches the exe in the
-current console.
+`run.ps1` passes no font by default: the exe carries Google Sans Code NF
+Mono and uses it, so nothing has to be installed. Pass `-Font` to use a
+different `.ttf`.
 
 Because the program is a console-subsystem app launched from an existing
 terminal, it **inherits your current terminal emulator tab** - no second console window pops up,
@@ -113,12 +111,13 @@ and the renderer/cell-size output lands inline in your prompt.
 
 ```
 renderer: direct3d11
-font: C:\Users\...\Fonts\VictorMonoNerdFontMono-Regular.ttf  cell: 8x23 px  scale: 1.00  nerd icons: yes
+font: Google Sans Code NF (built in)  cell: 9x21 px  scale: 1.00  bold: yes  italic: yes
 ```
 
 Override the font or the size:
 
 ```powershell
+pwsh -File ./run.ps1 -Size 18
 pwsh -File ./run.ps1 -Font C:\Windows\Fonts\consola.ttf -Size 18
 ```
 

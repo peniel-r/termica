@@ -4,6 +4,8 @@
 
 #include "glyph.h"
 
+#include "embed.h"
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -73,22 +75,38 @@ static SDL_Texture *bake_texture(SDL_Renderer *renderer, TTF_Font *font,
     return texture;
 }
 
-/* The cached texture for one codepoint, or NULL when the font lacks it. */
-static Glyph *glyph_lookup(Glyphs *glyphs, int slot, Uint32 codepoint)
+/* The face that can draw this codepoint: the style's face when it has it,
+ * otherwise the built-in face, which is what makes Nerd icons and box
+ * drawing work under a system font such as Consolas. */
+static TTF_Font *font_with_glyph(const Glyphs *glyphs, int slot,
+                                 Uint32 codepoint)
 {
     TTF_Font *font = font_for_slot(glyphs, slot);
+
+    if (font && TTF_FontHasGlyph(font, codepoint))
+        return font;
+    if (glyphs->fallback && TTF_FontHasGlyph(glyphs->fallback, codepoint))
+        return glyphs->fallback;
+    return NULL;
+}
+
+/* The cached texture for one codepoint, or NULL when no face has it. */
+static Glyph *glyph_lookup(Glyphs *glyphs, int slot, Uint32 codepoint)
+{
+    TTF_Font *font;
     Glyph *glyph;
     char utf8[8];
     char *end;
 
-    if (codepoint >= GLYPH_MAX_CODEPOINT || !font)
+    if (codepoint >= GLYPH_MAX_CODEPOINT)
         return NULL;
     glyph = &glyphs->cache[(size_t)slot * GLYPH_MAX_CODEPOINT + codepoint];
     if (glyph->tried)
         return glyph->texture ? glyph : NULL;
     glyph->tried = true;
 
-    if (!TTF_FontHasGlyph(font, codepoint))
+    font = font_with_glyph(glyphs, slot, codepoint);
+    if (!font)
         return NULL;
 
     end = SDL_UCS4ToUTF8(codepoint, utf8);
@@ -145,6 +163,35 @@ static TTF_Font *open_variant(const char *font_path, float point_size,
     return NULL;
 }
 
+/* Open one face from the executable's resources. Null when this build has
+ * no embedded font or the resource is missing. */
+static TTF_Font *open_embedded(EmbeddedFontFace face, float point_size)
+{
+    const void *data = NULL;
+    size_t size = 0;
+    SDL_IOStream *stream;
+
+    if (!embedded_font(face, &data, &size) || !data || size == 0)
+        return NULL;
+    stream = SDL_IOFromConstMem(data, size);
+    if (!stream)
+        return NULL;
+    /* TTF_OpenFontIO closes the stream itself when loading fails. */
+    return TTF_OpenFontIO(stream, true, point_size);
+}
+
+/* The built-in family. False when the executable does not carry it. */
+static bool open_embedded_family(Glyphs *glyphs, float point_size)
+{
+    glyphs->regular = open_embedded(EMBEDDED_FONT_REGULAR, point_size);
+    if (!glyphs->regular)
+        return false;
+    glyphs->bold = open_embedded(EMBEDDED_FONT_BOLD, point_size);
+    glyphs->italic = open_embedded(EMBEDDED_FONT_ITALIC, point_size);
+    glyphs->bold_italic = open_embedded(EMBEDDED_FONT_BOLD_ITALIC, point_size);
+    return true;
+}
+
 bool glyphs_open(Glyphs *glyphs, SDL_Renderer *renderer, const char *font_path,
                  float point_size, float display_scale)
 {
@@ -160,17 +207,31 @@ bool glyphs_open(Glyphs *glyphs, SDL_Renderer *renderer, const char *font_path,
     if (!glyphs->cache)
         return false;
 
-    glyphs->regular = TTF_OpenFont(font_path, scaled_size);
+    if (font_path) {
+        glyphs->regular = TTF_OpenFont(font_path, scaled_size);
+        if (glyphs->regular) {
+            glyphs->bold = open_variant(font_path, scaled_size, BOLD_SUFFIXES);
+            glyphs->italic = open_variant(font_path, scaled_size,
+                                          ITALIC_SUFFIXES);
+            glyphs->bold_italic = open_variant(font_path, scaled_size,
+                                               BOLD_ITALIC_SUFFIXES);
+        }
+    }
+
     if (!glyphs->regular) {
-        glyphs_close(glyphs);
-        return false;
+        /* No path, or the requested font could not be opened: the built-in
+         * family is both the default and the fallback. */
+        if (!open_embedded_family(glyphs, scaled_size)) {
+            glyphs_close(glyphs);
+            return false;
+        }
+        glyphs->built_in = true;
+    } else {
+        /* A font from disk may lack symbols in the output; its regular
+         * built-in counterpart fills those codepoints in. */
+        glyphs->fallback = open_embedded(EMBEDDED_FONT_REGULAR, scaled_size);
     }
     TTF_SetFontHinting(glyphs->regular, TTF_HINTING_LIGHT);
-
-    glyphs->bold = open_variant(font_path, scaled_size, BOLD_SUFFIXES);
-    glyphs->italic = open_variant(font_path, scaled_size, ITALIC_SUFFIXES);
-    glyphs->bold_italic = open_variant(font_path, scaled_size,
-                                       BOLD_ITALIC_SUFFIXES);
 
     /* The cell is as wide as 'M' advances and as tall as the line. */
     if (!TTF_GetStringSize(glyphs->regular, "M", 0, &advance, &height) ||
@@ -199,6 +260,8 @@ void glyphs_close(Glyphs *glyphs)
         }
         free(glyphs->cache);
     }
+    if (glyphs->fallback)
+        TTF_CloseFont(glyphs->fallback);
     if (glyphs->bold_italic)
         TTF_CloseFont(glyphs->bold_italic);
     if (glyphs->italic)
@@ -246,11 +309,13 @@ void glyphs_draw_text(Glyphs *glyphs, const char *text, size_t length,
     /* A grapheme cluster (a base character plus combining marks, an emoji
      * with a ZWJ, ...): render the whole cluster, uncached. */
     {
-        TTF_Font *font = font_for_slot(glyphs, slot);
+        TTF_Font *font = font_with_glyph(glyphs, slot, first_codepoint);
         SDL_Texture *texture;
         float width = 0.0f;
         float height = 0.0f;
 
+        if (!font)
+            return;
         texture = bake_texture(glyphs->renderer, font, text, length,
                                &width, &height);
         if (!texture)

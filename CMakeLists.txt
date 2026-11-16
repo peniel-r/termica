@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.21)
 project(termica LANGUAGES C)
 
+# The font is embedded as Windows RCDATA resources.
+if(WIN32)
+    enable_language(RC)
+endif()
+
 # Your own code is strict C99.
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -94,6 +99,7 @@ add_executable(termica
     src/main.c
     src/term.c
     src/pty.c
+    src/embed.c
     src/selftest.c
     src/glyph.c
     src/style.c
@@ -102,11 +108,21 @@ add_executable(termica
     src/window.c
     src/term.h
     src/pty.h
+    src/embed.h
     src/glyph.h
     src/style.h
     src/panel.h
     src/geometry.h
     src/window.h)
+
+# Google Sans Code NF Mono, built into the executable. Configured rather
+# than checked in so the .rc always points at this checkout.
+if(WIN32)
+    set(TERMICA_FONT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts")
+    configure_file(src/fonts.rc.in
+                   "${CMAKE_CURRENT_BINARY_DIR}/termica_fonts.rc" @ONLY)
+    target_sources(termica PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/termica_fonts.rc")
+endif()
 target_link_libraries(termica PRIVATE SDL3_ttf::SDL3_ttf SDL3::SDL3)
 target_link_libraries(termica PRIVATE ghostty-vt::ghostty-vt)
 

@@ -38,6 +38,7 @@
 #include <SDL3/SDL_main.h>
 #include <SDL3_ttf/SDL_ttf.h>
 
+#include "embed.h"
 #include "glyph.h"
 #include "panel.h"
 #include "pty.h"
@@ -768,7 +769,23 @@ static void draw_frame(App *app)
 /* Setup                                                                      */
 /* ------------------------------------------------------------------------- */
 
-static const char *pick_font(int argc, char **argv)
+/* Is this argument a point size rather than a font path? */
+static bool is_point_size(const char *text, float *out)
+{
+    char *end = NULL;
+    double value = strtod(text, &end);
+
+    if (!end || end == text || *end != '\0' || value <= 0.0 || value > 200.0)
+        return false;
+    if (out)
+        *out = (float)value;
+    return true;
+}
+
+/* The font is optional: no path means the built-in Google Sans Code NF.
+ * A build without the embedded font (anything but Windows) falls back to a
+ * monospace font from the system. */
+static const char *pick_font(const char *requested)
 {
     static const char *fallbacks[] = {
         "C:\\Windows\\Fonts\\consola.ttf",
@@ -777,8 +794,10 @@ static const char *pick_font(int argc, char **argv)
     };
     int index;
 
-    if (argc > 1)
-        return argv[1];
+    if (requested)
+        return requested;
+    if (embedded_font_available())
+        return NULL;
     for (index = 0; fallbacks[index]; index++) {
         SDL_IOStream *probe = SDL_IOFromFile(fallbacks[index], "rb");
         if (probe) {
@@ -848,8 +867,11 @@ int main(int argc, char **argv)
 {
     App app;
     const char *font_path;
+    const char *font_label;
+    const char *requested_font = NULL;
     float point_size = 16.0f;
     int exit_code = 1;
+    int index;
 
     if (argc > 1 && strcmp(argv[1], "--selftest") == 0)
         return term_selftest() == 0 ? 0 : 1;
@@ -859,14 +881,22 @@ int main(int argc, char **argv)
     app.panel_opacity = 0.80f;
     app.cursor_lit = true;
 
-    font_path = pick_font(argc, argv);
-    if (!font_path) {
-        fprintf(stderr, "usage: %s [--selftest] path\\to\\font.ttf "
+    for (index = 1; index < argc; index++) {
+        float size;
+
+        if (is_point_size(argv[index], &size))
+            point_size = size;
+        else if (!requested_font)
+            requested_font = argv[index];
+    }
+
+    font_path = pick_font(requested_font);
+    if (!font_path && !embedded_font_available()) {
+        fprintf(stderr, "usage: %s [--selftest] [path\\to\\font.ttf] "
                 "[point-size]\n", argv[0]);
         return 1;
     }
-    if (argc > 2)
-        point_size = (float)SDL_atof(argv[2]);
+    font_label = font_path ? font_path : "Google Sans Code NF (built in)";
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
@@ -897,11 +927,13 @@ int main(int argc, char **argv)
 
     if (!glyphs_open(&app.glyphs, app.renderer, font_path, point_size,
                      app.display_scale)) {
-        fprintf(stderr, "font: %s: %s\n", font_path, SDL_GetError());
+        fprintf(stderr, "font: %s: %s\n", font_label, SDL_GetError());
         goto cleanup;
     }
+    if (app.glyphs.built_in)
+        font_label = "Google Sans Code NF (built in)";
     printf("font: %s  cell: %dx%d px  scale: %.2f  bold: %s  italic: %s\n",
-           font_path, app.glyphs.cell_width, app.glyphs.cell_height,
+           font_label, app.glyphs.cell_width, app.glyphs.cell_height,
            (double)app.display_scale, app.glyphs.bold ? "yes" : "no",
            app.glyphs.italic ? "yes" : "no");
     fflush(stdout);

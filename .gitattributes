@@ -5,3 +5,7 @@
 # `text=auto` lets Git detect binary files by content and leave them alone;
 # `eol=lf` forces LF in the working tree even on Windows.
 * text=auto eol=lf
+
+# Fonts are binary; never normalize their line endings.
+*.ttf binary
+*.otf binary
