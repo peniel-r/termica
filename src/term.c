@@ -4,6 +4,7 @@
 
 #include "term.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 /* The program asked for a new window title (OSC 0 or OSC 2). The title
@@ -74,6 +75,11 @@ bool term_init(Term *term, uint16_t columns, uint16_t rows)
         goto done;
     if (ghostty_key_event_new(NULL, &term->key_event) != GHOSTTY_SUCCESS)
         goto done;
+    if (ghostty_mouse_encoder_new(NULL, &term->mouse_encoder) != GHOSTTY_SUCCESS)
+        goto done;
+    if (ghostty_mouse_event_new(NULL, &term->mouse_event) != GHOSTTY_SUCCESS)
+        goto done;
+    term->mouse_size = GHOSTTY_INIT_SIZED(GhosttyMouseEncoderSize);
 
     /* The only effect we act on so far is the window title; replies go
      * through the writer, which the app points at the pty. */
@@ -94,6 +100,8 @@ void term_free(Term *term)
 {
     /* The render state borrows the terminal, and the iterators borrow the
      * render state, so free in that order. */
+    ghostty_mouse_event_free(term->mouse_event);
+    ghostty_mouse_encoder_free(term->mouse_encoder);
     ghostty_key_event_free(term->key_event);
     ghostty_key_encoder_free(term->key_encoder);
     ghostty_render_state_row_cells_free(term->cell_iterator);
@@ -207,4 +215,353 @@ bool term_paste(Term *term, const char *text, size_t length,
         return false;
     }
     return result == GHOSTTY_SUCCESS && pasted;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Mouse reporting                                                            */
+/* ------------------------------------------------------------------------- */
+
+/* The encoder turns surface-space pixels into the cell coordinates a
+ * program expects, so it has to know where the grid is. Cell size is the
+ * one term_resize already keeps. */
+void term_set_geometry(Term *term, uint32_t screen_width,
+                       uint32_t screen_height, uint32_t padding_left,
+                       uint32_t padding_top, uint32_t padding_right,
+                       uint32_t padding_bottom)
+{
+    if (!term->mouse_encoder)
+        return;
+
+    term->mouse_size.screen_width = screen_width;
+    term->mouse_size.screen_height = screen_height;
+    term->mouse_size.cell_width = term->cell_width > 0 ? term->cell_width : 1;
+    term->mouse_size.cell_height =
+        term->cell_height > 0 ? term->cell_height : 1;
+    term->mouse_size.padding_left = padding_left;
+    term->mouse_size.padding_top = padding_top;
+    term->mouse_size.padding_right = padding_right;
+    term->mouse_size.padding_bottom = padding_bottom;
+
+    ghostty_mouse_encoder_set(term->mouse_encoder,
+                              GHOSTTY_MOUSE_ENCODER_OPT_SIZE,
+                              &term->mouse_size);
+}
+
+/* Whether a button is held changes what a motion event means (a drag is
+ * reported, a hover only under any-event tracking), so the encoder has to
+ * be told. Letting go also clears the last-cell deduplication. */
+void term_set_mouse_button(Term *term, bool pressed)
+{
+    if (!term->mouse_encoder)
+        return;
+    ghostty_mouse_encoder_set(term->mouse_encoder,
+                              GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED,
+                              &pressed);
+    if (!pressed)
+        ghostty_mouse_encoder_reset(term->mouse_encoder);
+}
+
+size_t term_encode_mouse(Term *term, GhosttyMouseAction action,
+                         GhosttyMouseButton button, GhosttyMods modifiers,
+                         float x, float y, uint8_t *buffer, size_t capacity)
+{
+    GhosttyMousePosition position;
+    size_t byte_count = 0;
+
+    if (!term->mouse_encoder || !term->mouse_event)
+        return 0;
+
+    /* Tracking mode and output format belong to the program: set them from
+     * the terminal before every event, the same way the key encoder is
+     * refreshed. */
+    ghostty_mouse_encoder_set_from_terminal(term->mouse_encoder,
+                                            term->handle);
+
+    if (ghostty_mouse_event_set_action(term->mouse_event, action)
+            != GHOSTTY_SUCCESS)
+        return 0;
+    if (button == GHOSTTY_MOUSE_BUTTON_UNKNOWN)
+        ghostty_mouse_event_clear_button(term->mouse_event);
+    else if (ghostty_mouse_event_set_button(term->mouse_event, button)
+                 != GHOSTTY_SUCCESS)
+        return 0;
+    ghostty_mouse_event_set_mods(term->mouse_event, modifiers);
+
+    position.x = x;
+    position.y = y;
+    ghostty_mouse_event_set_position(term->mouse_event, position);
+
+    if (ghostty_mouse_encoder_encode(term->mouse_encoder, term->mouse_event,
+                                     buffer, capacity, &byte_count)
+            != GHOSTTY_SUCCESS)
+        return 0;
+    return byte_count;
+}
+
+bool term_mouse_tracking(Term *term)
+{
+    bool tracking = false;
+
+    if (!term->handle)
+        return false;
+    if (ghostty_terminal_get(term->handle,
+                             GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING,
+                             &tracking) != GHOSTTY_SUCCESS)
+        return false;
+    return tracking;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Focus reporting                                                            */
+/* ------------------------------------------------------------------------- */
+
+bool term_focus_reporting(Term *term)
+{
+    GhosttyTerminalModeConfig config;
+
+    if (!term->handle)
+        return false;
+    config.mode = GHOSTTY_MODE_FOCUS_EVENT;
+    config.value = false;
+    if (ghostty_terminal_get(term->handle, GHOSTTY_TERMINAL_DATA_MODE,
+                             &config) != GHOSTTY_SUCCESS)
+        return false;
+    return config.value;
+}
+
+size_t term_encode_focus(Term *term, bool gained, uint8_t *buffer,
+                         size_t capacity)
+{
+    size_t written = 0;
+
+    (void)term;
+    if (ghostty_focus_encode(gained ? GHOSTTY_FOCUS_GAINED
+                                    : GHOSTTY_FOCUS_LOST,
+                             buffer, capacity, &written) != GHOSTTY_SUCCESS)
+        return 0;
+    return written;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Scrollback                                                                 */
+/* ------------------------------------------------------------------------- */
+
+static void scroll_viewport(Term *term, GhosttyTerminalScrollViewport scroll)
+{
+    if (!term->handle)
+        return;
+    ghostty_terminal_scroll_viewport(term->handle, scroll);
+}
+
+void term_scroll_rows(Term *term, intptr_t delta)
+{
+    GhosttyTerminalScrollViewport scroll = { 0 };
+
+    scroll.tag = GHOSTTY_TERMINAL_SCROLL_VIEWPORT_DELTA;
+    scroll.value.delta = delta;
+    scroll_viewport(term, scroll);
+}
+
+void term_scroll_top(Term *term)
+{
+    GhosttyTerminalScrollViewport scroll = { 0 };
+
+    scroll.tag = GHOSTTY_TERMINAL_SCROLL_VIEWPORT_TOP;
+    scroll_viewport(term, scroll);
+}
+
+void term_scroll_bottom(Term *term)
+{
+    GhosttyTerminalScrollViewport scroll = { 0 };
+
+    scroll.tag = GHOSTTY_TERMINAL_SCROLL_VIEWPORT_BOTTOM;
+    scroll_viewport(term, scroll);
+}
+
+bool term_viewport_at_bottom(Term *term)
+{
+    bool active = true;
+
+    if (!term->handle)
+        return true;
+    if (ghostty_terminal_get(term->handle,
+                             GHOSTTY_TERMINAL_DATA_VIEWPORT_ACTIVE,
+                             &active) != GHOSTTY_SUCCESS)
+        return true;
+    return active;
+}
+
+bool term_scrollbar(Term *term, GhosttyTerminalScrollbar *out)
+{
+    if (!term->handle || !out)
+        return false;
+    return ghostty_terminal_get(term->handle,
+                                GHOSTTY_TERMINAL_DATA_SCROLLBAR,
+                                out) == GHOSTTY_SUCCESS;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Selection                                                                  */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Grid references are snapshots: they are only valid until the next call
+ * that changes the terminal. So every gesture resolves fresh viewport
+ * points here and nothing is cached; a selection that has to survive new
+ * output is rebuilt by the caller.
+ */
+
+static bool viewport_ref(Term *term, int x, int y, GhosttyGridRef *out_ref)
+{
+    GhosttyPoint point = { 0 };
+
+    if (!term->handle || x < 0 || y < 0)
+        return false;
+    point.tag = GHOSTTY_POINT_TAG_VIEWPORT;
+    point.value.coordinate.x = (uint16_t)x;
+    point.value.coordinate.y = (uint32_t)y;
+
+    return ghostty_terminal_grid_ref(term->handle, point, out_ref)
+           == GHOSTTY_SUCCESS;
+}
+
+static bool install_selection(Term *term, const GhosttySelection *selection)
+{
+    if (!term->handle)
+        return false;
+    return ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_SELECTION,
+                                selection) == GHOSTTY_SUCCESS;
+}
+
+void term_selection_clear(Term *term)
+{
+    if (!term->handle)
+        return;
+    ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_SELECTION, NULL);
+}
+
+bool term_selection_cells(Term *term, int start_x, int start_y, int end_x,
+                          int end_y, bool rectangle)
+{
+    GhosttySelection selection = { 0 };
+
+    if (!viewport_ref(term, start_x, start_y, &selection.start) ||
+        !viewport_ref(term, end_x, end_y, &selection.end))
+        return false;
+    selection.rectangle = rectangle;
+    return install_selection(term, &selection);
+}
+
+bool term_selection_word(Term *term, int x, int y)
+{
+    GhosttyTerminalSelectWordOptions options =
+        GHOSTTY_INIT_SIZED(GhosttyTerminalSelectWordOptions);
+    GhosttySelection selection = { 0 };
+
+    if (!viewport_ref(term, x, y, &options.ref))
+        return false;
+    if (ghostty_terminal_select_word(term->handle, &options, &selection)
+            != GHOSTTY_SUCCESS)
+        return false;
+    return install_selection(term, &selection);
+}
+
+/* The word range under an anchor and the drag point. Asking for the
+ * nearest word between the two instead of only the one under the pointer
+ * is what keeps a word drag from collapsing when the pointer passes
+ * between words. */
+bool term_selection_word_between(Term *term, int x1, int y1, int x2, int y2)
+{
+    GhosttyTerminalSelectWordBetweenOptions options =
+        GHOSTTY_INIT_SIZED(GhosttyTerminalSelectWordBetweenOptions);
+    GhosttySelection selection = { 0 };
+
+    if (!viewport_ref(term, x1, y1, &options.start) ||
+        !viewport_ref(term, x2, y2, &options.end))
+        return false;
+    if (ghostty_terminal_select_word_between(term->handle, &options,
+                                             &selection) != GHOSTTY_SUCCESS)
+        return false;
+    return install_selection(term, &selection);
+}
+
+bool term_selection_line(Term *term, int x, int y)
+{
+    GhosttyTerminalSelectLineOptions options =
+        GHOSTTY_INIT_SIZED(GhosttyTerminalSelectLineOptions);
+    GhosttySelection selection = { 0 };
+
+    if (!viewport_ref(term, x, y, &options.ref))
+        return false;
+    if (ghostty_terminal_select_line(term->handle, &options, &selection)
+            != GHOSTTY_SUCCESS)
+        return false;
+    return install_selection(term, &selection);
+}
+
+bool term_selection_has(Term *term)
+{
+    GhosttySelection selection = { 0 };
+
+    if (!term->handle)
+        return false;
+    return ghostty_terminal_get(term->handle,
+                                GHOSTTY_TERMINAL_DATA_SELECTION,
+                                &selection) == GHOSTTY_SUCCESS;
+}
+
+char *term_selection_text(Term *term, size_t *out_length)
+{
+    GhosttySelection selection = { 0 };
+    GhosttyFormatter formatter = NULL;
+    GhosttyFormatterFormat emit = GHOSTTY_FORMATTER_FORMAT_PLAIN;
+    bool trim = true;
+    uint8_t *buffer = NULL;
+    size_t length = 0;
+    char *text;
+
+    if (out_length)
+        *out_length = 0;
+    if (!term->handle)
+        return NULL;
+    if (ghostty_terminal_get(term->handle,
+                             GHOSTTY_TERMINAL_DATA_SELECTION,
+                             &selection) != GHOSTTY_SUCCESS)
+        return NULL;
+
+    /* The formatter reads the terminal's own selection, so a wrapped line
+     * comes out as the rows the user saw, without the padding. */
+    if (ghostty_formatter_terminal_new(NULL, &formatter, term->handle)
+            != GHOSTTY_SUCCESS)
+        return NULL;
+    if (ghostty_formatter_set(formatter, GHOSTTY_FORMATTER_OPT_EMIT, &emit)
+            != GHOSTTY_SUCCESS ||
+        ghostty_formatter_set(formatter, GHOSTTY_FORMATTER_OPT_TRIM, &trim)
+            != GHOSTTY_SUCCESS ||
+        ghostty_formatter_set(formatter, GHOSTTY_FORMATTER_OPT_SELECTION,
+                              &selection) != GHOSTTY_SUCCESS ||
+        ghostty_formatter_format_alloc(formatter, NULL, &buffer, &length)
+            != GHOSTTY_SUCCESS) {
+        ghostty_formatter_free(formatter);
+        return NULL;
+    }
+    ghostty_formatter_free(formatter);
+
+    text = (char *)malloc(length + 1);
+    if (!text) {
+        ghostty_free(NULL, buffer, length);
+        return NULL;
+    }
+    if (length > 0)
+        memcpy(text, buffer, length);
+    text[length] = '\0';
+    ghostty_free(NULL, buffer, length);
+
+    if (out_length)
+        *out_length = length;
+    if (length == 0) {
+        free(text);
+        return NULL;
+    }
+    return text;
 }

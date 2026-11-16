@@ -493,6 +493,261 @@ static void test_pty(void)
 }
 #endif /* _WIN32 */
 
+/* The text of one viewport row, as the render state reports it, with the
+ * trailing blanks removed. */
+static void row_text(GhosttyRenderState render_state, int row, char *out,
+                     size_t capacity)
+{
+    GhosttyRenderStateRowIterator rows = NULL;
+    GhosttyRenderStateRowCells cells = NULL;
+    size_t used = 0;
+
+    out[0] = '\0';
+    if (ghostty_render_state_row_iterator_new(NULL, &rows) != GHOSTTY_SUCCESS)
+        return;
+    if (ghostty_render_state_row_cells_new(NULL, &cells) != GHOSTTY_SUCCESS) {
+        ghostty_render_state_row_iterator_free(rows);
+        return;
+    }
+    ghostty_render_state_get(render_state,
+                             GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &rows);
+
+    while (ghostty_render_state_row_iterator_next(rows)) {
+        int32_t row_position = 0;
+
+        ghostty_render_state_row_get(rows,
+                                     GHOSTTY_RENDER_STATE_ROW_DATA_VIEWPORT_Y,
+                                     &row_position);
+        if (row_position != row)
+            continue;
+        ghostty_render_state_row_get(rows,
+                                     GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
+                                     &cells);
+        while (ghostty_render_state_row_cells_next(cells)) {
+            uint8_t bytes[64];
+            GhosttyBuffer grapheme = { .ptr = bytes, .cap = sizeof bytes };
+
+            ghostty_render_state_row_cells_get(
+                cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_UTF8,
+                &grapheme);
+            if (grapheme.len > 0 && used + grapheme.len + 1 < capacity) {
+                memcpy(out + used, grapheme.ptr, grapheme.len);
+                used += grapheme.len;
+                out[used] = '\0';
+            }
+        }
+        break;
+    }
+    while (used > 0 && out[used - 1] == ' ')
+        out[--used] = '\0';
+
+    ghostty_render_state_row_cells_free(cells);
+    ghostty_render_state_row_iterator_free(rows);
+}
+
+/* The viewport shows the bottom of the screen; scrolling moves it into the
+ * history without the program writing anything. */
+static void test_scrollback(void)
+{
+    Term term;
+    GhosttyRenderState render_state = NULL;
+    GhosttyTerminalScrollbar bar;
+    char line[16];
+    char text[128];
+    int index;
+
+    if (!term_init(&term, 80, 24) ||
+        ghostty_render_state_new(NULL, &render_state) != GHOSTTY_SUCCESS) {
+        check(false, "scrollback terminal created");
+        return;
+    }
+
+    /* Exactly 30 rows, so 6 of them are history for a 24-row grid. */
+    for (index = 1; index <= 30; index++) {
+        snprintf(line, sizeof line, "L%02d", index);
+        term_write(&term, line, strlen(line));
+        if (index < 30)
+            term_write(&term, "\r\n", 2);
+    }
+
+    check(term_viewport_at_bottom(&term), "the viewport follows the bottom");
+    ghostty_render_state_update(render_state, term.handle);
+    row_text(render_state, 0, text, sizeof text);
+    check(strcmp(text, "L07") == 0, "the bottom viewport starts at L07");
+    if (strcmp(text, "L07") != 0)
+        printf("      row 0 was: %s\n", text);
+
+    term_scroll_rows(&term, -3);
+    check(!term_viewport_at_bottom(&term), "scrolling up leaves the bottom");
+    ghostty_render_state_update(render_state, term.handle);
+    row_text(render_state, 0, text, sizeof text);
+    check(strcmp(text, "L04") == 0, "three rows up shows L04");
+    if (strcmp(text, "L04") != 0)
+        printf("      row 0 was: %s\n", text);
+
+    if (term_scrollbar(&term, &bar)) {
+        check(bar.total >= 30 && bar.len == 24 && bar.offset == 3,
+              "the scrollbar reports total, length and offset");
+        if (!(bar.total >= 30 && bar.len == 24 && bar.offset == 3))
+            printf("      total=%llu len=%llu offset=%llu\n",
+                   (unsigned long long)bar.total,
+                   (unsigned long long)bar.len,
+                   (unsigned long long)bar.offset);
+    } else {
+        check(false, "the scrollbar reports total, length and offset");
+    }
+
+    term_scroll_top(&term);
+    ghostty_render_state_update(render_state, term.handle);
+    row_text(render_state, 0, text, sizeof text);
+    check(strcmp(text, "L01") == 0, "scroll to top shows the first row");
+
+    term_scroll_bottom(&term);
+    check(term_viewport_at_bottom(&term), "scroll to bottom follows again");
+    ghostty_render_state_update(render_state, term.handle);
+    row_text(render_state, 0, text, sizeof text);
+    check(strcmp(text, "L07") == 0, "the bottom viewport is back");
+
+    ghostty_render_state_free(render_state);
+    term_free(&term);
+}
+
+/* Selecting cells, words and lines, and reading the text back out. */
+static void test_selection(void)
+{
+    Term term;
+    char *text;
+
+    if (!term_init(&term, 80, 24)) {
+        check(false, "selection terminal created");
+        return;
+    }
+    term_write(&term, "hello world second\r\n", 20);
+
+    check(!term_selection_has(&term), "nothing is selected at first");
+
+    if (term_selection_cells(&term, 0, 0, 4, 0, false)) {
+        check(term_selection_has(&term), "a cell range is installed");
+        text = term_selection_text(&term, NULL);
+        check(text && strcmp(text, "hello") == 0, "cells 0..4 copy as hello");
+        if (text && strcmp(text, "hello") != 0)
+            printf("      selection text: %s\n", text);
+        free(text);
+    } else {
+        check(false, "a cell range is installed");
+    }
+
+    if (term_selection_word(&term, 6, 0)) {
+        text = term_selection_text(&term, NULL);
+        check(text && strcmp(text, "world") == 0,
+              "a double click copies the whole word");
+        free(text);
+    } else {
+        check(false, "a word can be selected");
+    }
+
+    if (term_selection_line(&term, 13, 0)) {
+        text = term_selection_text(&term, NULL);
+        check(text && strcmp(text, "hello world second") == 0,
+              "a triple click copies the whole line");
+        free(text);
+    } else {
+        check(false, "a line can be selected");
+    }
+
+    /* A rectangular selection takes only the columns inside the block:
+     * row 0 "hello world second" columns 1..3 is "ell", row 1 "abcdef"
+     * columns 1..3 is "bcd". */
+    term_write(&term, "abcdef\r\n", 8);
+    if (term_selection_cells(&term, 1, 0, 3, 1, true)) {
+        text = term_selection_text(&term, NULL);
+        check(text && strcmp(text, "ell\nbcd") == 0,
+              "a block selection takes the columns only");
+        if (text && strcmp(text, "ell\nbcd") != 0)
+            printf("      block text: %s\n", text);
+        free(text);
+    } else {
+        check(false, "a block can be selected");
+    }
+
+    term_selection_clear(&term);
+    check(!term_selection_has(&term), "clearing removes the selection");
+    check(term_selection_text(&term, NULL) == NULL,
+          "an empty selection has no text");
+
+    term_free(&term);
+}
+
+/* The mouse encoder follows the program's tracking modes, and focus
+ * events come from mode 1004. */
+static void test_mouse_and_focus(void)
+{
+    Term term;
+    uint8_t buffer[128];
+    size_t bytes;
+
+    if (!term_init(&term, 80, 24)) {
+        check(false, "mouse terminal created");
+        return;
+    }
+
+    check(!term_mouse_tracking(&term), "no mouse tracking by default");
+    check(!term_focus_reporting(&term), "no focus reporting by default");
+
+    /* Normal tracking, SGR coordinates, focus events. */
+    write_string(term.handle, "\x1b[?1000h\x1b[?1006h\x1b[?1004h");
+    check(term_mouse_tracking(&term), "mode 1000 turns tracking on");
+    check(term_focus_reporting(&term), "mode 1004 turns focus reporting on");
+
+    /* One cell is 8x16 pixels and the grid fills the window, so the
+     * pointer at (8.5, 16.5) sits in column 2, row 2 (1-based). */
+    term_resize(&term, 80, 24, 8, 16);
+    term_set_geometry(&term, 640, 384, 0, 0, 0, 0);
+    term_set_mouse_button(&term, true);
+
+    bytes = term_encode_mouse(&term, GHOSTTY_MOUSE_ACTION_PRESS,
+                              GHOSTTY_MOUSE_BUTTON_LEFT, 0, 8.5f, 16.5f,
+                              buffer, sizeof buffer);
+    check(bytes > 0 && memcmp(buffer, "\x1b[<0;2;2M", 9) == 0,
+          "a press is SGR-encoded with the right cell");
+    if (!(bytes > 0 && memcmp(buffer, "\x1b[<0;2;2M", 9) == 0)) {
+        if (bytes > 0 && bytes < sizeof buffer) {
+            buffer[bytes] = '\0';
+            printf("      press bytes: %s\n", (char *)buffer);
+        } else {
+            printf("      press produced %lu bytes\n",
+                   (unsigned long)bytes);
+        }
+    }
+
+    bytes = term_encode_mouse(&term, GHOSTTY_MOUSE_ACTION_RELEASE,
+                              GHOSTTY_MOUSE_BUTTON_LEFT, 0, 8.5f, 16.5f,
+                              buffer, sizeof buffer);
+    check(bytes > 0 && memcmp(buffer, "\x1b[<0;2;2m", 9) == 0,
+          "a release ends with the lowercase code");
+
+    term_set_mouse_button(&term, false);
+    bytes = term_encode_mouse(&term, GHOSTTY_MOUSE_ACTION_MOTION,
+                              GHOSTTY_MOUSE_BUTTON_UNKNOWN, 0, 24.0f, 40.0f,
+                              buffer, sizeof buffer);
+    check(bytes == 0, "a hover motion is not reported under mode 1000");
+
+    term_write(&term, "\x1b[?1003h", 8);
+    bytes = term_encode_mouse(&term, GHOSTTY_MOUSE_ACTION_MOTION,
+                              GHOSTTY_MOUSE_BUTTON_UNKNOWN, 0, 24.0f, 40.0f,
+                              buffer, sizeof buffer);
+    check(bytes > 0, "any-event tracking reports motion");
+
+    bytes = term_encode_focus(&term, true, buffer, sizeof buffer);
+    check(bytes == 3 && memcmp(buffer, "\x1b[I", 3) == 0,
+          "focus gained is CSI I");
+    bytes = term_encode_focus(&term, false, buffer, sizeof buffer);
+    check(bytes == 3 && memcmp(buffer, "\x1b[O", 3) == 0,
+          "focus lost is CSI O");
+
+    term_free(&term);
+}
+
 int term_selftest(void)
 {
     printf("termica self test (libghostty-vt)\n\n");
@@ -504,6 +759,9 @@ int term_selftest(void)
     test_key_encoding();
     test_resize();
     test_title();
+    test_scrollback();
+    test_selection();
+    test_mouse_and_focus();
 #ifdef _WIN32
     test_pty();
 #endif

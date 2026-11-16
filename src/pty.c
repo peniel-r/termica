@@ -301,10 +301,12 @@ static wchar_t *child_environment(void)
             continue;
         chars += wcslen(cursor) + 1;
     }
+    /* Each appended entry needs room for its own NUL as well; the block's
+     * final NUL is already counted in `chars`. */
     if (replace_term)
-        chars += sizeof term_entry / sizeof term_entry[0] - 1;
+        chars += sizeof term_entry / sizeof term_entry[0];
     if (replace_colorterm)
-        chars += sizeof colorterm_entry / sizeof colorterm_entry[0] - 1;
+        chars += sizeof colorterm_entry / sizeof colorterm_entry[0];
 
     result = (wchar_t *)malloc(chars * sizeof *result);
     if (!result) {
@@ -325,14 +327,16 @@ static wchar_t *child_environment(void)
     }
     FreeEnvironmentStringsW(block);
 
+    /* Every entry, original or appended, ends with its own NUL; the last
+     * NUL of the block is written after them all. */
     if (replace_term) {
-        size_t length = sizeof term_entry / sizeof term_entry[0] - 1;
+        size_t length = sizeof term_entry / sizeof term_entry[0];
 
         memcpy(result + offset, term_entry, length * sizeof *result);
         offset += length;
     }
     if (replace_colorterm) {
-        size_t length = sizeof colorterm_entry / sizeof colorterm_entry[0] - 1;
+        size_t length = sizeof colorterm_entry / sizeof colorterm_entry[0];
 
         memcpy(result + offset, colorterm_entry, length * sizeof *result);
         offset += length;

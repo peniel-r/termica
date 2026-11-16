@@ -45,7 +45,7 @@ void style_resolve(CellStyle *out,
                    bool has_background, GhosttyColorRgb background,
                    const GhosttyRenderStateColors *state_colors,
                    SDL_Color default_foreground, SDL_Color default_background,
-                   float background_alpha)
+                   float background_alpha, bool selected)
 {
     bool inverse;
     GhosttyColorRgb decoration_color;
@@ -57,7 +57,7 @@ void style_resolve(CellStyle *out,
     out->background = has_background ? style_color(background, background_alpha)
                                      : default_background;
 
-    inverse = (style->flags & GHOSTTY_STYLE_FLAG_INVERSE) != 0;
+    inverse = (style->flags & GHOSTTY_STYLE_FLAG_INVERSE) != 0 || selected;
     out->has_background = has_background || inverse;
     if (inverse) {
         SDL_Color swap = out->foreground;

@@ -1,11 +1,13 @@
-# termica: milestone 2
+# termica: milestone 3
 
-A tiny SDL3 terminal that answers three questions:
+A tiny SDL3 terminal that answers four questions:
 
 1. **Does the stack produce the borderless, translucent, Nerd-Font look from your WezTerm
    screenshot?** (milestone 0 - yes)
 2. **Can libghostty-vt drive a real terminal grid behind that look?** (milestone 1 - yes)
-3. **Can it run a real shell?** (milestone 2 - this one)
+3. **Can it run a real shell?** (milestone 2 - yes)
+4. **Can a program use the pointer, and can the reader reach what scrolled away?**
+   (milestone 3 - yes: mouse reporting, scrollback, selection and copy, focus events)
 
 What it draws: a borderless window with a translucent dark panel, opaque text on a fixed
 cell grid, a block cursor and a status line. Text goes through a one-texture-per-codepoint
@@ -28,9 +30,23 @@ process tree.
 | typing, arrows, Home/End/PgUp/PgDn, F1-F12 | encoded by libghostty-vt and written to the shell |
 | Enter / Backspace / Esc | go to the shell; the shell echoes them, not the app |
 | Ctrl+V or Ctrl+Shift+V | paste; bracketed paste when the program enabled it |
+| wheel | scrollback by 3 rows per notch, unless the program asked for the mouse |
+| Shift + wheel or drag | take the pointer back from the program, for scrolling and selecting |
+| Shift+PgUp / Shift+PgDn | scroll a full page |
+| Ctrl+Shift+Up / Down, Home, End | scroll one row, to the top, to the bottom |
+| drag / double click / triple click | select cells / a word / a line; Alt+drag is a block |
+| Ctrl+Shift+C | copy the selection to the clipboard |
 | Alt+Up / Alt+Down | panel opacity (text must stay fully opaque) |
 | Alt+M | cycle the backdrop: panel, Mica, Mica Alt, Acrylic |
 | Ctrl+Shift+Q | quit |
+
+Mouse, history and focus (milestone 3): a program that asks for the pointer
+(modes 9, 1000, 1002, 1003, with 1005/1006/1015/1016 formats) gets encoded
+pointer events, `fzf` included. Output that scrolls off the top stays
+reachable in scrollback with a thumb on the right edge; selecting text
+highlights it by swapping its colors and copies with `Ctrl+Shift+C`; and
+programs that enabled focus reporting (mode 1004) learn when the window comes
+and goes.
 
 > **On Windows:** PowerShell 7 + WezTerm, everything from Scoop. See
 > [README-powershell.md](README-powershell.md) - llvm-mingw (clang + lld +
@@ -122,9 +138,11 @@ Terminal](https://lib.ghostty.org/vt/first-terminal.html), formats the screen ba
 text with a `GhosttyFormatter`, and checks the result. Then it checks the parts the app
 depends on: resolved colors, bold/underline, the cursor position, erase, wide characters
 (head cell + spacer tail), key encoding (arrows, Ctrl+letter, Enter, Backspace), resize and
-the OSC window title. The last check starts a real ConPTY, runs `cmd.exe /c
-"echo termica-pty-ok"`, and verifies the text came back through the pipes and the exit code
-is 0. Exit code is the number of failures.
+the OSC window title; the history and pointer half (scrolling by rows, to the top and to the
+bottom, the scrollbar figures, cell / word / line / block selections, the copied text, mouse
+and focus encoders against a terminal that enabled the modes). The last check starts a real
+ConPTY, runs `cmd.exe /c "echo termica-pty-ok"`, and verifies the text came back through the
+pipes and the exit code is 0. Exit code is the number of failures.
 
 ### Memory safety
 
@@ -178,6 +196,18 @@ half way, so an early `return` cannot leak either.
 10. **Console output.** The program prints the renderer name (you want `direct3d11` or
     `direct3d12`), the cell size and whether it found bold/italic faces. Closing the window
     while the shell runs must leave no `conhost.exe` or shell behind in Task Manager.
+11. **Scrollback.** Run something long (`dir C:\Windows\System32 -Name`), then scroll the
+    wheel up: the thumb on the right edge shows where you are, `Ctrl+Shift+End` / `Home` go
+    to the ends, and typing anything returns to the live view.
+12. **Selection and copy.** Drag across text (double click for a word, triple for a line,
+    Alt+drag for a block) and press `Ctrl+Shift+C`; paste it back with `Ctrl+V` and it should
+    arrive unchanged.
+13. **Mouse reporting.** `dir C:\Windows\System32 -Name | fzf` takes the pointer: a click
+    moves the selection inside fzf instead of selecting terminal cells, and holding Shift
+    while dragging takes the pointer back for selecting.
+14. **Focus reporting.** A program that sets mode 1004 (vim with `reportFocus`, or
+    `\x1b[?1004h` from a script) receives `CSI I` / `CSI O` when this window gains or loses
+    focus.
 
 ## 6. Window chrome: the corners and the backdrops
 
@@ -251,6 +281,13 @@ The app itself only does the parts the library leaves to the embedder:
   protocol and the unsafe-paste check are the library's rules, not reimplemented ones
 - resizes with `ResizePseudoConsole`, and kills the process tree with a kill-on-close job
   object when the window closes
+- turns pointer events into bytes with `ghostty_mouse_encoder` (geometry in pixels, tracking
+  mode and format taken from the terminal), and focus events with `ghostty_focus_encode`
+- owns the gestures and the history UI: click counts and drags become `GhosttySelection`s
+  through `ghostty_terminal_grid_ref` / `select_word` / `select_word_between` /
+  `select_line`, the copy goes through a formatter restricted to that selection, and the
+  viewport moves with `ghostty_terminal_scroll_viewport` (`GHOSTTY_TERMINAL_DATA_SCROLLBAR`
+  drives the thumb)
 
 ## Where the code lives
 
@@ -285,16 +322,18 @@ easy to reason about on their own.
   click-through outside the region means the very corners cannot start a resize.
 - macOS also draws a shadow that follows the window shape; DWM draws its own, so the shadow is
   Windows' and is not part of this.
-- No mouse reporting, no scrollback scrolling UI, no selection/copy, no hyperlinks, no kitty
-  graphics, no focus events, no IME composition window at the cursor, no OSC 52 clipboard
-  writes. Mouse, scrollback and selection are the next milestone.
+- No hyperlinks (OSC 8), no kitty graphics, no OSC 52 clipboard writes, no desktop
+  notifications or progress reporting, and no IME composition window placed at the cursor.
+  Mouse *shapes* (`GhosttyMouseShape`) are not applied either: the pointer stays an arrow.
 - A very large paste blocks the UI thread while it is written to the console; the pipe is
   synchronous and there is no writer queue yet.
 - **Verified on Windows 11 25H2 (build 26200)**: llvm-mingw clang 23.1.5 + lld + Ninja,
-  `direct3d11` renderer, translucent panel, Nerd Font icons, a live `pwsh` 7 shell in ConPTY
-  (a typed command and its output appear on the grid, the window title comes from the
-  shell's OSC sequence), closing the window while the shell runs leaves no `conhost.exe` or
-  shell behind, and `--selftest`'s ConPTY round trip passes. No warnings from the project's
-  own sources under `-Wall -Wextra -pedantic`.
+  `direct3d11` renderer, translucent panel, built-in Google Sans Code NF icons, a live
+  `pwsh` 7 / `cmd` shell in ConPTY (a typed command and its output appear on the grid, the
+  window title comes from the shell's OSC sequence), wheel and `Ctrl+Shift+*` scrolling with
+  the thumb drawn, drag/word/line selection copied to the clipboard, `fzf` taking the pointer
+  when it asks for it, and closing the window while the shell runs leaves no `conhost.exe` or
+  shell behind. `--selftest` runs 33 checks (including the ConPTY round trip) with no
+  warnings from the project's own sources under `-Wall -Wextra -pedantic`.
 - SDL3 enables C++ on Windows for its own sources, which is why the presets also set a C++
   compiler. Your own code stays C99.

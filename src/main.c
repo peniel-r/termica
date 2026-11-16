@@ -1,9 +1,10 @@
 /*
- * termica - milestone 2: a real shell behind the grid.
+ * termica - milestone 3: the pointer, the history and focus.
  *
  * Milestone 0 proved the look (borderless, translucent, rounded, glyph
- * cache). Milestone 1 put a real terminal behind it. This milestone puts a
- * real program behind that:
+ * cache). Milestone 1 put a real terminal behind it, milestone 2 a real
+ * shell behind that. This milestone hands the shell what it asks for and
+ * keeps the rest usable:
  *
  *   1. libghostty-vt owns the screen state. vt_write() parses every
  *      escape sequence (SGR colors and attributes, cursor movement,
@@ -12,21 +13,30 @@
  *   2. pty.c starts a shell in a ConPTY. Keys and pastes go into the
  *      pseudoconsole, its UTF-8 output comes back through a reader thread
  *      and is fed to the terminal. The program echoes, not us.
- *   3. every frame is drawn from a GhosttyRenderState: rows, cells,
- *      resolved colors, attributes, the cursor, on the fixed cell grid.
+ *   3. pointer events go to the program when it enabled mouse tracking
+ *      (encoded by the library from surface pixels), and to the app
+ *      otherwise: dragging selects, Shift reclaims the pointer, and the
+ *      wheel or the Ctrl+Shift+* keys move the viewport through scrollback
+ *      with a thumb on the right edge. Focus follows mode 1004.
+ *   4. every frame is drawn from a GhosttyRenderState: rows, cells,
+ *      resolved colors, attributes, the cursor, selection and the bar.
  *
  * The pieces live in their own files:
- *   term.c      the libghostty-vt wrapper (screen, key encoder, replies)
+ *   term.c      the libghostty-vt wrapper (screen, encoders, replies,
+ *               scrolling, selection)
  *   pty.c       ConPTY: the child process, the pipes, the reader thread
+ *   embed.c     the font compiled into the executable
  *   glyph.c     fonts, the glyph cache, drawing text
  *   style.c     terminal cell style -> colors and flags
  *   panel.c     the rounded translucent panel
  *   geometry.c  the squircle corner curve
  *   window.c    the SDL window and the Windows 11 chrome
  *
- * Usage:  termica [--selftest] [path\to\NerdFont.ttf] [point-size]
- * Keys:   type, arrows, Enter, Backspace and the rest go to the shell;
- *         Ctrl+V pastes, Ctrl+Shift+Q quits,
+ * Usage:  termica [--selftest] [path\to\font.ttf] [point-size]
+ * Keys:   typing, arrows, PgUp/PgDn, Enter, Backspace, Esc and the rest go
+ *         to the shell; Ctrl+V pastes, Ctrl+Shift+C copies the selection,
+ *         Ctrl+Shift+Q quits, wheel / Shift+wheel / Ctrl+Shift+Up-Down-Home-End
+ *         scroll the history, drag / double / triple select text,
  *         Alt+Up/Down = panel opacity,
  *         Alt+M = cycle the window backdrop (panel, Mica, Mica Alt,
  *         Acrylic)
@@ -60,6 +70,26 @@ static const SDL_Color PANEL_BACKGROUND = { 14, 18, 22, 255 };
 static const SDL_Color PANEL_BORDER = { 90, 100, 112, PANEL_BORDER_ALPHA };
 static const SDL_Color STATUS_TEXT = { 130, 138, 148, 255 };
 
+/* What a left-drag means: single cells, whole words, or whole lines. */
+enum {
+    SELECT_CELLS = 0,
+    SELECT_WORDS = 1,
+    SELECT_LINES = 2
+};
+
+/* A left-button gesture. Coordinates are viewport cells, so a selection
+ * stays where it is while the user scrolls through history. */
+typedef struct SelectionDrag {
+    bool dragging;
+    bool moved;
+    bool rectangle;
+    int  mode;
+    int  anchor_x;
+    int  anchor_y;
+    int  focus_x;
+    int  focus_y;
+} SelectionDrag;
+
 typedef struct App {
     SDL_Window   *window;
     SDL_Renderer *renderer;
@@ -76,6 +106,9 @@ typedef struct App {
     int            grid_top;
     int            columns;
     int            rows;
+
+    SelectionDrag  select;
+    bool           mouse_held;      /* a button is down over the grid   */
 
     bool           running;
     bool           needs_redraw;
@@ -105,6 +138,7 @@ typedef struct CellPaint {
     const uint8_t *text;
     size_t         text_length;
     bool           at_cursor;
+    bool           selected;
 } CellPaint;
 
 /* ------------------------------------------------------------------------- */
@@ -214,7 +248,7 @@ static void draw_cell(const FrameContext *frame, const CellPaint *cell)
                   cell->has_foreground, cell->foreground,
                   cell->has_background, cell->background,
                   &frame->colors, frame->default_foreground, PANEL_BACKGROUND,
-                  app->panel_opacity);
+                  app->panel_opacity, cell->selected);
 
     if (style.has_background)
         fill_rectangle(app, x, y, width, height, style.background);
@@ -384,6 +418,27 @@ static void send_to_shell(void *userdata, const void *data, size_t length)
         pty_write(app->pty, data, length);
 }
 
+/* Anything the user types is meant for the live view, so a scrolled-back
+ * viewport snaps to the bottom first. The library ignores it when the
+ * viewport already follows the active area. */
+static void jump_to_bottom(App *app)
+{
+    if (!term_viewport_at_bottom(&app->term))
+        term_scroll_bottom(&app->term);
+}
+
+/* Copy the selection to the clipboard. */
+static void copy_selection(App *app)
+{
+    char *text = term_selection_text(&app->term, NULL);
+
+    if (!text)
+        return;
+    if (!SDL_SetClipboardText(text))
+        fprintf(stderr, "clipboard: %s\n", SDL_GetError());
+    free(text);
+}
+
 /* Send text to the program (layout text, an IME commit). SDL reports Enter
  * as "\r" in SDL_EVENT_TEXT_INPUT as well as on the key event, and the key
  * encoder already sent it, so the carriage returns are dropped here instead
@@ -395,6 +450,7 @@ static void send_text(App *app, const char *text)
 
     if (!text)
         return;
+    jump_to_bottom(app);
     start = text;
     cursor = text;
     while (*cursor) {
@@ -446,6 +502,7 @@ static void paste_clipboard(App *app)
     if (!clipboard)
         return;
     length = strlen(clipboard);
+    jump_to_bottom(app);
     if (!term_paste(&app->term, clipboard, length, false, &rejected) &&
         rejected && confirm_unsafe_paste(app))
         term_paste(&app->term, clipboard, length, true, NULL);
@@ -484,6 +541,9 @@ static void write_key(App *app, const SDL_KeyboardEvent *event)
                                                : GHOSTTY_KEY_ACTION_PRESS,
                                  key, ghostty_modifiers_for(event->mod),
                                  (uint32_t)unshifted, encoded, sizeof encoded);
+    if (byte_count == 0)
+        return;
+    jump_to_bottom(app);
     send_to_shell(app, encoded, byte_count);
 }
 
@@ -495,8 +555,300 @@ static void handle_text_input(App *app, const SDL_TextInputEvent *event)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Pointer and focus                                                          */
+/* ------------------------------------------------------------------------- */
+
+/* Rows moved by one wheel notch. */
+#define SCROLL_ROWS_PER_NOTCH 3
+
+/* The cell under a pointer position, or false when the position is not on
+ * the grid. The drag strip and the resize borders are app chrome: a click
+ * there is not a click on text. */
+static bool cell_at(const App *app, float x, float y, int *out_x, int *out_y)
+{
+    int column;
+    int row;
+
+    if (x < (float)app->grid_left || y < (float)app->grid_top)
+        return false;
+    column = (int)((x - app->grid_left) / (float)app->glyphs.cell_width);
+    row = (int)((y - app->grid_top) / (float)app->glyphs.cell_height);
+    if (column < 0 || row < 0 || column >= app->columns || row >= app->rows)
+        return false;
+    *out_x = column;
+    *out_y = row;
+    return true;
+}
+
+/* The same, but clamped to the grid: a drag that leaves the window keeps
+ * extending the selection to the last row instead of freezing. */
+static void cell_clamped(const App *app, float x, float y, int *out_x,
+                         int *out_y)
+{
+    int column = (int)((x - app->grid_left) / (float)app->glyphs.cell_width);
+    int row = (int)((y - app->grid_top) / (float)app->glyphs.cell_height);
+
+    if (column < 0)
+        column = 0;
+    if (row < 0)
+        row = 0;
+    if (column > app->columns - 1)
+        column = app->columns - 1;
+    if (row > app->rows - 1)
+        row = app->rows - 1;
+    *out_x = column;
+    *out_y = row;
+}
+
+static GhosttyMouseButton mouse_button_for(Uint8 button)
+{
+    switch (button) {
+    case SDL_BUTTON_LEFT:   return GHOSTTY_MOUSE_BUTTON_LEFT;
+    case SDL_BUTTON_MIDDLE: return GHOSTTY_MOUSE_BUTTON_MIDDLE;
+    case SDL_BUTTON_RIGHT:  return GHOSTTY_MOUSE_BUTTON_RIGHT;
+    case SDL_BUTTON_X1:     return GHOSTTY_MOUSE_BUTTON_FOUR;
+    case SDL_BUTTON_X2:     return GHOSTTY_MOUSE_BUTTON_FIVE;
+    default:                return GHOSTTY_MOUSE_BUTTON_UNKNOWN;
+    }
+}
+
+/* SDL reports modifiers on key events only; a pointer event needs the
+ * current state. */
+static SDL_Keymod mouse_modifiers(void)
+{
+    return SDL_GetModState();
+}
+
+/* Whether the pointer belongs to the program. A program that asked for
+ * mouse tracking gets it; holding Shift takes it back for the app, which
+ * is how every terminal keeps selection and scrollback reachable. */
+static bool pointer_belongs_to_shell(App *app, SDL_Keymod modifiers)
+{
+    if (modifiers & SDL_KMOD_SHIFT)
+        return false;
+    return term_mouse_tracking(&app->term);
+}
+
+static void report_mouse(App *app, GhosttyMouseAction action,
+                         GhosttyMouseButton button, SDL_Keymod modifiers,
+                         float x, float y)
+{
+    uint8_t encoded[128];
+    size_t bytes;
+
+    bytes = term_encode_mouse(&app->term, action, button,
+                              ghostty_modifiers_for(modifiers), x, y,
+                              encoded, sizeof encoded);
+    send_to_shell(app, encoded, bytes);
+}
+
+/* Rebuild the selection from the current gesture. The library owns the
+ * semantics (word boundaries, line extents); this only says what the
+ * gesture was. */
+static void selection_update(App *app)
+{
+    SelectionDrag *drag = &app->select;
+
+    switch (drag->mode) {
+    case SELECT_WORDS:
+        /* The nearest word between the anchor and the pointer, so a drag
+         * that passes between words does not collapse to nothing. */
+        if (!term_selection_word_between(&app->term, drag->anchor_x,
+                                         drag->anchor_y, drag->focus_x,
+                                         drag->focus_y))
+            term_selection_word(&app->term, drag->focus_x, drag->focus_y);
+        break;
+    case SELECT_LINES:
+        term_selection_line(&app->term, drag->anchor_x, drag->anchor_y);
+        break;
+    default:
+        term_selection_cells(&app->term, drag->anchor_x, drag->anchor_y,
+                             drag->focus_x, drag->focus_y, drag->rectangle);
+        break;
+    }
+    app->needs_redraw = true;
+}
+
+static void handle_mouse_button(App *app, const SDL_MouseButtonEvent *event)
+{
+    bool pressed = event->down;
+    SDL_Keymod modifiers = mouse_modifiers();
+    int cell_x = 0;
+    int cell_y = 0;
+    bool inside = cell_at(app, event->x, event->y, &cell_x, &cell_y);
+
+    if (pointer_belongs_to_shell(app, modifiers)) {
+        /* Coordinates outside the grid are still worth sending while a
+         * button is down, so the program sees the release. */
+        if (!inside && !app->mouse_held && pressed)
+            return;
+        app->mouse_held = pressed;
+        term_set_mouse_button(&app->term, pressed);
+        report_mouse(app, pressed ? GHOSTTY_MOUSE_ACTION_PRESS
+                                  : GHOSTTY_MOUSE_ACTION_RELEASE,
+                     mouse_button_for(event->button), modifiers,
+                     event->x, event->y);
+        return;
+    }
+
+    if (event->button != SDL_BUTTON_LEFT)
+        return;
+
+    if (pressed) {
+        if (!inside)
+            return;
+        app->select.dragging = true;
+        app->select.moved = false;
+        app->select.rectangle = (modifiers & SDL_KMOD_ALT) != 0;
+        app->select.anchor_x = cell_x;
+        app->select.anchor_y = cell_y;
+        app->select.focus_x = cell_x;
+        app->select.focus_y = cell_y;
+        /* Click count decides the gesture: one click selects cells, two a
+         * word, three a line. */
+        if (event->clicks >= 3)
+            app->select.mode = SELECT_LINES;
+        else if (event->clicks == 2)
+            app->select.mode = SELECT_WORDS;
+        else
+            app->select.mode = SELECT_CELLS;
+
+        if (app->select.mode == SELECT_WORDS)
+            term_selection_word(&app->term, cell_x, cell_y);
+        else if (app->select.mode == SELECT_LINES)
+            term_selection_line(&app->term, cell_x, cell_y);
+        else
+            term_selection_clear(&app->term);
+        app->needs_redraw = true;
+        return;
+    }
+
+    if (!app->select.dragging)
+        return;
+    app->select.dragging = false;
+    /* A click that never moved selects nothing: it only clears. */
+    if (!app->select.moved && app->select.mode == SELECT_CELLS) {
+        term_selection_clear(&app->term);
+        app->needs_redraw = true;
+    }
+}
+
+static void handle_mouse_motion(App *app, const SDL_MouseMotionEvent *event)
+{
+    /* SDL does not carry the modifier state on motion events. */
+    SDL_Keymod modifiers = SDL_GetModState();
+    int cell_x = 0;
+    int cell_y = 0;
+    bool inside = cell_at(app, event->x, event->y, &cell_x, &cell_y);
+
+    if (pointer_belongs_to_shell(app, modifiers)) {
+        if (inside || app->mouse_held)
+            report_mouse(app, GHOSTTY_MOUSE_ACTION_MOTION,
+                         GHOSTTY_MOUSE_BUTTON_UNKNOWN, modifiers,
+                         event->x, event->y);
+        return;
+    }
+
+    if (!app->select.dragging)
+        return;
+    cell_clamped(app, event->x, event->y, &cell_x, &cell_y);
+    if (cell_x == app->select.focus_x && cell_y == app->select.focus_y)
+        return;
+    app->select.moved = true;
+    app->select.focus_x = cell_x;
+    app->select.focus_y = cell_y;
+    selection_update(app);
+}
+
+static void handle_mouse_wheel(App *app, const SDL_MouseWheelEvent *event)
+{
+    SDL_Keymod modifiers = mouse_modifiers();
+    float ticks = event->integer_y != 0 ? (float)event->integer_y
+                                        : event->y;
+    intptr_t delta;
+
+    if (ticks == 0.0f)
+        return;
+    if (event->direction == SDL_MOUSEWHEEL_FLIPPED)
+        ticks = -ticks;
+    /* Scrolling up (positive, away from the user) shows older lines, which
+     * is a negative row delta. */
+    delta = (ticks > 0.0f ? -1 : 1) * SCROLL_ROWS_PER_NOTCH;
+
+    /* A program that tracks the mouse gets the wheel as button 4/5 presses
+     * unless it enabled alternate scroll, in which case the encoder
+     * produces nothing and the wheel scrolls the viewport. */
+    if (pointer_belongs_to_shell(app, modifiers)) {
+        GhosttyMouseButton button = ticks > 0.0f ? GHOSTTY_MOUSE_BUTTON_FOUR
+                                                 : GHOSTTY_MOUSE_BUTTON_FIVE;
+        uint8_t encoded[128];
+        size_t bytes;
+
+        bytes = term_encode_mouse(&app->term, GHOSTTY_MOUSE_ACTION_PRESS,
+                                  button, ghostty_modifiers_for(modifiers),
+                                  event->mouse_x, event->mouse_y,
+                                  encoded, sizeof encoded);
+        if (bytes > 0) {
+            send_to_shell(app, encoded, bytes);
+            bytes = term_encode_mouse(&app->term, GHOSTTY_MOUSE_ACTION_RELEASE,
+                                      button,
+                                      ghostty_modifiers_for(modifiers),
+                                      event->mouse_x, event->mouse_y,
+                                      encoded, sizeof encoded);
+            send_to_shell(app, encoded, bytes);
+            return;
+        }
+    }
+
+    term_scroll_rows(&app->term, delta);
+    app->needs_redraw = true;
+}
+
+/* Focus reporting (mode 1004): programs that draw a status line or watch
+ * for a remote shell want to know when the window comes and goes. */
+static void handle_focus(App *app, bool gained)
+{
+    uint8_t encoded[32];
+    size_t bytes;
+
+    if (!term_focus_reporting(&app->term))
+        return;
+    bytes = term_encode_focus(&app->term, gained, encoded, sizeof encoded);
+    send_to_shell(app, encoded, bytes);
+}
+
+/* ------------------------------------------------------------------------- */
 /* Terminal lifecycle and geometry                                            */
 /* ------------------------------------------------------------------------- */
+
+/* Tell the mouse encoder where the grid is, in window pixels. A resize
+ * moves every cell, so the selection is dropped: its ends would now name
+ * different text. */
+static void update_geometry(App *app)
+{
+    int pixel_width;
+    int pixel_height;
+    int grid_right;
+    int grid_bottom;
+
+    SDL_GetWindowSizeInPixels(app->window, &pixel_width, &pixel_height);
+    grid_right = app->grid_left + app->columns * app->glyphs.cell_width;
+    grid_bottom = app->grid_top + app->rows * app->glyphs.cell_height;
+
+    term_set_geometry(&app->term, (uint32_t)pixel_width,
+                      (uint32_t)pixel_height, (uint32_t)app->grid_left,
+                      (uint32_t)app->grid_top,
+                      (uint32_t)(pixel_width > grid_right
+                                     ? pixel_width - grid_right
+                                     : 0),
+                      (uint32_t)(pixel_height > grid_bottom
+                                     ? pixel_height - grid_bottom
+                                     : 0));
+    term_selection_clear(&app->term);
+    app->select.dragging = false;
+    app->mouse_held = false;
+    term_set_mouse_button(&app->term, false);
+}
 
 /* Fit the grid to the window: below the drag strip, above the status line,
  * inside the side padding. Resizes the terminal when the grid changed. */
@@ -534,6 +886,7 @@ static void fit_grid(App *app)
     }
     /* The window region follows the window size. */
     window_sync_chrome(app->window, app->backdrop, app->panel.radius);
+    update_geometry(app);
     app->needs_redraw = true;
 }
 
@@ -639,6 +992,44 @@ static void draw_status_line(App *app, int row, int cursor_column,
     }
 }
 
+/* A thin bar on the right edge while the viewport is not at the bottom:
+ * the thumb's size and position come straight from the terminal's own
+ * scrollbar, so it says exactly which rows are on screen. Nothing is
+ * drawn when the whole history fits. */
+static void draw_scrollbar(App *app)
+{
+    GhosttyTerminalScrollbar bar;
+    float track_height;
+    float thumb_height;
+    float thumb_top;
+    SDL_Color color = { 150, 158, 168, 190 };
+    int pixel_width;
+    int pixel_height;
+
+    if (!term_scrollbar(&app->term, &bar) || bar.total <= bar.len)
+        return;
+    if (term_viewport_at_bottom(&app->term))
+        return;
+
+    SDL_GetWindowSizeInPixels(app->window, &pixel_width, &pixel_height);
+    track_height = (float)app->rows * (float)app->glyphs.cell_height;
+    if (track_height <= 0.0f)
+        return;
+
+    thumb_height = track_height * ((float)bar.len / (float)bar.total);
+    if (thumb_height < 16.0f)
+        thumb_height = 16.0f;
+    if (bar.total > bar.len)
+        thumb_top = (track_height - thumb_height) *
+                    ((float)bar.offset / (float)(bar.total - bar.len));
+    else
+        thumb_top = 0.0f;
+
+    fill_rectangle(app, (float)(pixel_width - 5 - (int)(4.0f * app->display_scale)),
+                   app->grid_top + thumb_top,
+                   4.0f * app->display_scale, thumb_height, color);
+}
+
 /* The translucent window forces a full redraw every frame, so per-row dirty
  * flags do not buy anything here: every row of the viewport is visited. */
 static void draw_frame(App *app)
@@ -702,6 +1093,10 @@ static void draw_frame(App *app)
     while (ghostty_render_state_row_iterator_next(app->term.row_iterator)) {
         int32_t row_position = 0;
         int column = 0;
+        int selection_start = -1;
+        int selection_end = -1;
+        GhosttyRenderStateRowSelection row_selection =
+            GHOSTTY_INIT_SIZED(GhosttyRenderStateRowSelection);
 
         ghostty_render_state_row_get(app->term.row_iterator,
                                      GHOSTTY_RENDER_STATE_ROW_DATA_VIEWPORT_Y,
@@ -709,6 +1104,17 @@ static void draw_frame(App *app)
         ghostty_render_state_row_get(app->term.row_iterator,
                                      GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
                                      &app->term.cell_iterator);
+
+        /* The row-local selected range, so highlighting is a comparison
+         * per cell instead of one library call per cell. GHOSTTY_NO_VALUE
+         * when this row is not touched by the selection. */
+        if (ghostty_render_state_row_get(
+                app->term.row_iterator,
+                GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION,
+                &row_selection) == GHOSTTY_SUCCESS) {
+            selection_start = row_selection.start_x;
+            selection_end = row_selection.end_x;
+        }
 
         while (ghostty_render_state_row_cells_next(app->term.cell_iterator)) {
             CellPaint cell;
@@ -750,6 +1156,8 @@ static void draw_frame(App *app)
             cell.text_length = cell.text ? grapheme.len : 0;
             cell.at_cursor = cursor_drawn && column == cursor_column &&
                              row_position == cursor_row;
+            cell.selected = selection_start >= 0 && column >= selection_start &&
+                            column <= selection_end;
 
             draw_cell(&frame, &cell);
             column++;
@@ -759,7 +1167,10 @@ static void draw_frame(App *app)
     /* 6. The frame is drawn, so the next one only reports new changes. */
     ghostty_render_state_clean(app->term.render_state);
 
-    /* 7. Status line, one row below the grid. */
+    /* 7. The scrollback indicator, over the right edge of the grid. */
+    draw_scrollbar(app);
+
+    /* 8. Status line, one row below the grid. */
     draw_status_line(app, app->rows, cursor_column, cursor_row);
 
     SDL_RenderPresent(renderer);
@@ -826,30 +1237,82 @@ static Uint32 SDLCALL on_blink_timer(void *userdata, SDL_TimerID timer_id,
 
 static void handle_key_down(App *app, const SDL_KeyboardEvent *event)
 {
+    /* Scancodes, not keycodes: a keycode carries the shifted symbol, so
+     * "SDLK_C with Shift held" is a different value from "SDLK_C". The
+     * bindings below hold Shift and should work on any layout.
+     *
+     * SDL3 reports modifiers per side (LSHIFT, LCTRL, ...), so KMOD_SHIFT
+     * and KMOD_CTRL are unions of two bits. Test each union on its own:
+     * comparing the combined mask for equality would ask for all four
+     * bits and never match. */
+    bool ctrl_shift = (event->mod & SDL_KMOD_CTRL) != 0 &&
+                      (event->mod & SDL_KMOD_SHIFT) != 0;
+
     /* Esc belongs to the program now (vim, PSReadLine). Quit with
      * Ctrl+Shift+Q or the window's close button. */
-    if (event->key == SDLK_Q && !event->repeat &&
-        (event->mod & (SDL_KMOD_CTRL | SDL_KMOD_SHIFT)) ==
-            (SDL_KMOD_CTRL | SDL_KMOD_SHIFT)) {
+    if (event->scancode == SDL_SCANCODE_Q && !event->repeat && ctrl_shift) {
         app->running = false;
         return;
     }
+    /* Copy needs the selection to stay put, so it is handled before the
+     * key reaches the shell. Plain Ctrl+C still interrupts the program. */
+    if (event->scancode == SDL_SCANCODE_C && !event->repeat && ctrl_shift) {
+        copy_selection(app);
+        return;
+    }
+    /* History. Shift+Home/End stay with the shell (readline line start and
+     * end); Ctrl+Shift+Home/End and Ctrl+Shift+Up/Down are ours. */
+    if (ctrl_shift && !event->repeat) {
+        switch (event->scancode) {
+        case SDL_SCANCODE_UP:
+            term_scroll_rows(&app->term, -1);
+            app->needs_redraw = true;
+            return;
+        case SDL_SCANCODE_DOWN:
+            term_scroll_rows(&app->term, 1);
+            app->needs_redraw = true;
+            return;
+        case SDL_SCANCODE_HOME:
+            term_scroll_top(&app->term);
+            app->needs_redraw = true;
+            return;
+        case SDL_SCANCODE_END:
+            term_scroll_bottom(&app->term);
+            app->needs_redraw = true;
+            return;
+        default:
+            break;
+        }
+    }
+    if ((event->mod & SDL_KMOD_SHIFT) && !(event->mod & SDL_KMOD_CTRL) &&
+        !event->repeat) {
+        if (event->scancode == SDL_SCANCODE_PAGEUP) {
+            term_scroll_rows(&app->term, -app->rows);
+            app->needs_redraw = true;
+            return;
+        }
+        if (event->scancode == SDL_SCANCODE_PAGEDOWN) {
+            term_scroll_rows(&app->term, app->rows);
+            app->needs_redraw = true;
+            return;
+        }
+    }
     if (event->mod & SDL_KMOD_ALT) {
-        if (event->key == SDLK_UP) {
+        if (event->scancode == SDL_SCANCODE_UP) {
             app->panel_opacity += 0.05f;
             if (app->panel_opacity > 1.0f)
                 app->panel_opacity = 1.0f;
             app->needs_redraw = true;
             return;
         }
-        if (event->key == SDLK_DOWN) {
+        if (event->scancode == SDL_SCANCODE_DOWN) {
             app->panel_opacity -= 0.05f;
             if (app->panel_opacity < 0.0f)
                 app->panel_opacity = 0.0f;
             app->needs_redraw = true;
             return;
         }
-        if (event->key == SDLK_M && !event->repeat) {
+        if (event->scancode == SDL_SCANCODE_M && !event->repeat) {
             WindowBackdrop next =
                 (WindowBackdrop)((app->backdrop + 1) % WINDOW_BACKDROP_COUNT);
             /* The OS may not know the material; the window says so and the
@@ -1004,6 +1467,24 @@ int main(int argc, char **argv)
                 break;
             case SDL_EVENT_TEXT_INPUT:
                 handle_text_input(&app, &event.text);
+                break;
+            case SDL_EVENT_MOUSE_MOTION:
+                handle_mouse_motion(&app, &event.motion);
+                break;
+            case SDL_EVENT_MOUSE_BUTTON_DOWN:
+                handle_mouse_button(&app, &event.button);
+                break;
+            case SDL_EVENT_MOUSE_BUTTON_UP:
+                handle_mouse_button(&app, &event.button);
+                break;
+            case SDL_EVENT_MOUSE_WHEEL:
+                handle_mouse_wheel(&app, &event.wheel);
+                break;
+            case SDL_EVENT_WINDOW_FOCUS_GAINED:
+                handle_focus(&app, true);
+                break;
+            case SDL_EVENT_WINDOW_FOCUS_LOST:
+                handle_focus(&app, false);
                 break;
             case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
                 fit_grid(&app);

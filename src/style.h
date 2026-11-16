@@ -37,14 +37,18 @@ typedef struct CellStyle {
  * `has_foreground` / `has_background` say whether the render state resolved
  * a color for the cell; when it did not, the defaults are used. Backgrounds
  * are drawn with `background_alpha` (the window's panel opacity) so text
- * stays opaque while the surface behind it can be translucent. */
+ * stays opaque while the surface behind it can be translucent.
+ *
+ * `selected` highlights the cell the way inverse video does: the terminal
+ * has no selection color of its own, and swapping the two colors the cell
+ * already has works on any background. */
 void style_resolve(CellStyle *out,
                    const GhosttyStyle *style,
                    bool has_foreground, GhosttyColorRgb foreground,
                    bool has_background, GhosttyColorRgb background,
                    const GhosttyRenderStateColors *state_colors,
                    SDL_Color default_foreground, SDL_Color default_background,
-                   float background_alpha);
+                   float background_alpha, bool selected);
 
 /* A terminal color as an SDL color with the given alpha. */
 SDL_Color style_color(GhosttyColorRgb color, float alpha);
