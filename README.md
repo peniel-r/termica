@@ -466,10 +466,11 @@ easy to reason about on their own.
   that round trip is a `--selftest` check, not a screenshot),
   wheel and `Ctrl+Shift+*` scrolling with a draggable thumb (the thumb appeared, a track
   click and a thumb drag changed the view, and a sampled band matched the live view),
-  drag/word/line selection highlighting the right text and still naming the same text after
-  a resize, `fzf` taking the pointer when it asks for it, five distinguishable underline
-  kinds, no console window when started by double-click, and closing the window while the
-  shell runs leaves no `conhost.exe` or shell behind.
+  drag/word/line selection highlighting the right text, and the selection still naming the
+  same text after scrolling and after reflow (measured against the library headlessly, before
+  the app stopped clearing it), `fzf` taking the pointer when it asks for it, five
+  distinguishable underline kinds, no console window when started by double-click, and closing
+  the window while the shell runs leaves no `conhost.exe` or shell behind.
   `--selftest` runs 92 checks, all passing: the ConPTY round trips, the settings parser and
   its format round trip, and the OSC 52 path both from a literal byte string and from a real
   `powershell.exe` child under ConPTY. Settings are read at startup and written on exit -
