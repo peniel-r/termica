@@ -216,6 +216,27 @@ whoever is logged in, which is deliberate: the features that can only be exercis
 user (IME composition, pointer shape, selection autoscroll, the OSC 52 prompt) are listed
 under "What to check" as manual checks rather than claimed as tested.
 
+### How the windowed checks are counted as evidence
+
+Some behaviour only shows up in a live window, so it has been checked by driving one. That
+needs a rule about what counts:
+
+- **In the self test** - headless, no window, no input: counts.
+- **A change seen in termica's own pixels** (a screenshot, or a sampled band of the window):
+  counts, because only input that actually reached the window can have caused it. This is
+  how the five underline kinds, the scrollbar thumb and track, `fzf` taking the pointer and
+  `Ctrl+Shift+=` changing the opacity were confirmed.
+- **Messages posted to termica's `HWND`** (`PostMessage`/`SendMessage`): counts, they cannot
+  land anywhere else.
+- **Keystrokes or mouse events injected desktop-wide** (`SendKeys`, `keybd_event`,
+  `mouse_event`, `SetCursorPos`) with the only proof *outside* the window - clipboard
+  contents, a dialog that did not appear: does not count, because that input goes to
+  whichever window the desktop has focused, and it disturbs the session doing it. The same
+  goes for any negative result ("this key changed nothing"), which cannot tell a refused
+  key from a misdelivered one. Those checks are re-listed as manual.
+
+See PLAN's "Harness notes" for the same rule with the specific claims it applies to.
+
 ### Memory safety
 
 A second configuration builds the app with AddressSanitizer and
@@ -440,12 +461,15 @@ easy to reason about on their own.
   synchronous and there is no writer queue yet.
 - **Verified on Windows 11 25H2 (build 26200)**: llvm-mingw clang 23.1.5 + lld + Ninja,
   `direct3d11` renderer, translucent panel, built-in Maple Mono NF icons, a live
-  `pwsh` 7 / `cmd` shell in ConPTY (a typed command and its output appear on the grid, the
-  window title comes from the shell's OSC sequence), wheel and `Ctrl+Shift+*` scrolling with
-  a draggable thumb, drag/word/line selection copied to the clipboard and still naming the
-  same text after a resize, `fzf` taking the pointer when it asks for it, five distinguishable
-  underline kinds, no console window when started by double-click, and closing the window
-  while the shell runs leaves no `conhost.exe` or shell behind.
+  `pwsh` 7 / `cmd` shell in ConPTY (the window title comes from the shell's OSC sequence,
+  and a command handed to the child comes back through the pipes as UTF-8 with exit code 0 -
+  that round trip is a `--selftest` check, not a screenshot),
+  wheel and `Ctrl+Shift+*` scrolling with a draggable thumb (the thumb appeared, a track
+  click and a thumb drag changed the view, and a sampled band matched the live view),
+  drag/word/line selection highlighting the right text and still naming the same text after
+  a resize, `fzf` taking the pointer when it asks for it, five distinguishable underline
+  kinds, no console window when started by double-click, and closing the window while the
+  shell runs leaves no `conhost.exe` or shell behind.
   `--selftest` runs 92 checks, all passing: the ConPTY round trips, the settings parser and
   its format round trip, and the OSC 52 path both from a literal byte string and from a real
   `powershell.exe` child under ConPTY. Settings are read at startup and written on exit -
@@ -456,6 +480,14 @@ easy to reason about on their own.
   copy-on-select, selection autoscroll at the grid edge, the OSC 22 pointer shape, the
   OSC 52 `ask` dialog, and IME preedit drawing. The code paths are wired and compile; the
   behaviour is listed above as manual checks.
+- Also not machine-verified, for a method reason rather than a feature reason: anything
+  whose only proof was a clipboard read driven by desktop-wide synthetic keys -
+  `Ctrl+Shift+C` reaching the app, the `shell = cmd` setting reaching the child, and the
+  `osc52 = allow` write landing on the clipboard. Synthetic keystrokes go to whichever
+  window the desktop has focused, so a changed clipboard does not show that termica
+  received them; see PLAN's "Harness notes". The selection-to-text path underneath them
+  *is* tested headlessly: `--selftest` formats the library's selection and checks the
+  copied characters, cell / word / line / block.
 - The executable is GUI-subsystem, so it has no console of its own: `src/console.c` reattaches
   to the launching console for diagnostics and leaves a redirected stdout alone.
 - SDL3 enables C++ on Windows for its own sources, which is why the presets also set a C++

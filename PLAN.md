@@ -1,10 +1,13 @@
 # termica plan
 
-Status: milestones 2, 3, 4 and 5 are implemented; milestone 5 is the section
-at the end. Each section keeps the design that was written before the code,
-with the measured results folded into it, and closes with what actually
-verified - including, where a feature could not be verified without a real
-keyboard, mouse or input method, that plain statement. What is left is under
+Status: milestones 2, 3, 4 and 5 are implemented, committed and pushed -
+`origin/main` is `05a1af1` ("milestones 4 and 5"), on top of `3825ca1` (the
+built-in font) and `bddc1d2` (milestone 3). Milestone 4 was reported as
+committed before it had been, so its work and milestone 5's share one commit.
+Each section keeps the design that was written before the code, with the
+measured results folded into it, and closes with what actually verified -
+including, where a feature could not be verified without a real keyboard,
+mouse or input method, that plain statement. What is left is under
 "Still not done".
 
 ---
@@ -322,11 +325,20 @@ explicitly, because a GUI-subsystem launch returns immediately.
 
 ## Verification (done)
 
-- `--selftest`: 59 checks, no failures. New: SGR 4 / 4:2 / 4:3 / 4:4 / 4:5
+- `--selftest`: 59 checks, no failures - that was the suite's size at this
+  milestone; it is 92 now, see milestone 5. New: SGR 4 / 4:2 / 4:3 / 4:4 / 4:5
   resolve to single / double / curly / dotted / dashed, reset leaves no
   underline behind, and the non-ASCII ConPTY round trip.
 - Screenshot of `type build\under.txt` in `cmd`: five visibly different
   decorations under `single curly dotted dashed double`.
+- **A3, the basis for "every `Alt+*` reaches the shell"**: no key binding in
+  `main.c` tests `SDL_KMOD_ALT` positively - the only Alt mention in the key
+  path is the paste guard, which fires *without* Alt (`key == V && CTRL &&
+  !(ALT | GUI)`), and Alt+drag block selection is a mouse gesture - while
+  `ghostty_modifiers_for` copies Alt into `GHOSTTY_MODS_ALT` (with the
+  right-side flag) for the encoder. So the claim is a code fact plus the
+  encoder test, not a keystroke test: `Alt+b` moving a word in readline stays
+  a manual check (README item 17).
 - Scrollbar: 10 wheel notches showed the thumb; a click near the top of the
   track changed the view; dragging the thumb back down produced a sampled band
   **identical to the live view** with the bar hidden. With the strip still
@@ -340,13 +352,51 @@ explicitly, because a GUI-subsystem launch returns immediately.
 
 ## Harness notes, because they cost real time
 
+Synthetic input comes in two flavours, and only one of them is evidence.
+Milestone 5 found this the hard way; it is stated once here and applies to
+every GUI claim in this file.
+
+- **Window-targeted** - `PostMessage` / `SendMessage` to termica's `HWND`, and
+  screenshots of its own window. The message cannot land anywhere else, and a
+  screenshot of the grid showing the effect proves the bytes reached that
+  window. Trustworthy. (SDL's hit test swallows anything within 8 px of the
+  edge, so client coordinates have to account for it.)
+- **Desktop-wide** - `SendKeys`, `keybd_event`, `mouse_event`, `SetCursorPos`.
+  These go to whatever the desktop has focused, which may not be termica, and
+  they move or type into the user's own session while doing so. They stopped
+  being used in milestone 5 for that second reason alone. A result from these
+  is only evidence when it was read out of termica's window (a screenshot),
+  never when the only proof was an external side effect - the clipboard, or a
+  dialog that did not appear.
+
+So the test is whether the effect was seen **inside termica's own window**. A
+change in its pixels can only have been caused by input that reached it:
+the five distinguishable underline kinds, the thumb appearing after wheel
+notches, a track click and a thumb drag changing the view, the sampled band
+identical to the live view, `fzf` moving its selection on a click, the panel
+band changing under `Ctrl+Shift+=` - all stand. `--selftest` and the headless
+probes cover the rest: the underline kinds resolving from SGR, selection text
+surviving reflow (measured before any GUI code changed), the scrollbar
+figures, the OSC 52 decode from both a literal string and a real child.
+
+What does not stand: a result whose only proof was something outside the
+window - the clipboard contents, the absence of a dialog - or any negative
+result ("`Alt+M` changed nothing"), because input that never arrived looks
+exactly like input that arrived and was refused. Those are re-listed as manual
+checks: `Ctrl+Shift+C` filling the clipboard, `copy_on_select`, the
+`osc52 = allow` write, and the `Alt` keys genuinely reaching the shell.
+
+The technical notes that survive:
+
 - `WM_MOUSEWHEEL` goes to the window **under the pointer**, so synthetic wheel
-  messages need a real `SetCursorPos` into the window first.
+  messages need a real `SetCursorPos` into the window first - and that moves
+  the user's cursor, which is exactly the disturbance to avoid.
 - `SendMessage(WM_LBUTTONDOWN)` takes client coordinates, and SDL's hit test
   swallows anything within 8 px of the window edge.
 - In PowerShell's `SendKeys`, `%` means Alt and `{=}` / `{EQUALS}` are not
-  valid keys - drive `keybd_event` with the real scan code instead
-  (`Ctrl+Shift+=` is VK_OEM_PLUS, scan 0x0D).
+  valid keys - which is why `Ctrl+Shift+=` (VK_OEM_PLUS, scan 0x0D) was typed
+  with `keybd_event`: a window-targeted way to press a held modifier
+  combination does not exist in Win32.
 
 ---
 
@@ -417,6 +467,10 @@ pointer shape honest, and show uncommitted IME text instead of nothing.
   goes to whatever window the desktop has focused, and keys started landing
   in the session's own terminal instead of in termica - useless as evidence
   and rude to run. The README lists them as manual checks.
+- The throwaway PowerShell harnesses used for the windowed checks were deleted
+  with the other build-time scratch files, so nothing here is re-runnable
+  except `--selftest`. Rebuilding one should use `PostMessage` / `SendMessage`
+  and screenshots of the window only; the reason is above.
 
 ## Still not done
 
