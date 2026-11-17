@@ -1,9 +1,11 @@
 # termica plan
 
 Status: milestones 2, 3, 4 and 5 are implemented, committed and pushed -
-`origin/main` is `05a1af1` ("milestones 4 and 5"), on top of `3825ca1` (the
-built-in font) and `bddc1d2` (milestone 3). Milestone 4 was reported as
-committed before it had been, so its work and milestone 5's share one commit.
+the code is in `05a1af1` ("milestones 4 and 5"), `bddc1d2` (milestone 3),
+`2f4792e` (milestone 2) and `19c8523` (milestone 1), with the built-in font
+commits interleaved; documentation commits sit on top, so `origin/main` is
+ahead of the shas named here. Milestone 4 was reported as committed before it
+had been, so its work and milestone 5's share one commit.
 Each section keeps the design that was written before the code, with the
 measured results folded into it, and closes with what actually verified -
 including, where a feature could not be verified without a real keyboard,
