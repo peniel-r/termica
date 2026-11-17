@@ -1662,7 +1662,7 @@ static int utf8_codepoint_count(const char *text, size_t length)
 /* Draw one styled run with the status bar font, advancing past it. */
 static float statusbar_draw_text(App *app, const char *text, size_t length,
                                  float x, float y, bool bold, bool italic,
-                                 SDL_Color color)
+                                 SDL_Color color, float scale)
 {
     const char *p = text;
     const char *end = text + length;
@@ -1676,8 +1676,9 @@ static float statusbar_draw_text(App *app, const char *text, size_t length,
             break;
         term = SDL_UCS4ToUTF8(codepoint, utf8);
         *term = '\0';
-        glyphs_draw_text(&app->statusbar_glyphs, utf8, (size_t)(term - utf8),
-                         x, y, bold, italic, color);
+        glyphs_draw_text_scaled(&app->statusbar_glyphs, utf8,
+                                (size_t)(term - utf8), x, y, bold, italic,
+                                color, scale);
         x += (float)app->statusbar_glyphs.cell_width;
     }
     return x;
@@ -1696,6 +1697,7 @@ static void statusbar_draw_runs(App *app, const char *line,
                                             : app->statusbar.bar_fg;
         bool bold = run->style.bold;
         bool italic = run->style.italic;
+        float scale = run->scale > 0.0f ? run->scale : 1.0f;
         int width = utf8_codepoint_count(line + run->start,
                                          (size_t)run->length) *
                     app->statusbar_glyphs.cell_width;
@@ -1711,7 +1713,7 @@ static void statusbar_draw_runs(App *app, const char *line,
                            run->style.bg);
 
         x = statusbar_draw_text(app, line + run->start, (size_t)run->length,
-                                x, y, bold, italic, color);
+                                x, y, bold, italic, color, scale);
     }
 }
 
@@ -1775,8 +1777,10 @@ static void statusbar_fill_state(App *app, StatusbarState *state,
             state->busy.symbol = app->busy_frames[app->busy_frame_index];
         else if (busy->idle[0])
             state->busy.symbol = busy->idle;
-        else
+        else {
             state->busy.symbol = statusbar_busy_idle_default();
+            state->busy.scale = statusbar_busy_idle_scale();
+        }
     }
 }
 

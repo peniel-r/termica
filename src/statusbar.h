@@ -172,6 +172,12 @@ int statusbar_busy_frames(char frames[][8], int max_frames);
 /* The fixed resting icon shown when idle and `[busy] idle` is not set. */
 const char *statusbar_busy_idle_default(void);
 
+/* The scale the fixed resting icon is drawn at. That glyph's ink box is
+ * narrower than the Font Awesome icons used elsewhere in the bar (the
+ * folder symbol, for one), so it is enlarged to match their optical size.
+ * A `[busy] idle` override is drawn at its natural size. */
+float statusbar_busy_idle_scale(void);
+
 /* ------------------------------------------------------------------------- */
 /* Rendering                                                                  */
 /* ------------------------------------------------------------------------- */
@@ -182,6 +188,7 @@ typedef struct StatusbarModuleValue {
     const char *value;         /* substituted for $value, NULL = ""   */
     const char *symbol;        /* substituted for $symbol, NULL = module's */
     const StatusbarStyle *style;
+    float scale;               /* glyph scale, 0 = natural size       */
 } StatusbarModuleValue;
 
 typedef struct StatusbarState {
@@ -200,6 +207,7 @@ typedef struct StatusbarRun {
     int start;
     int length;
     StatusbarStyle style;
+    float scale;               /* glyph scale, 0 = natural size       */
 } StatusbarRun;
 
 /* Render `format` (a `$module`/literal string) into `out` and record the

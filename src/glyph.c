@@ -120,14 +120,20 @@ static Glyph *glyph_lookup(Glyphs *glyphs, int slot, Uint32 codepoint)
 }
 
 static void draw_texture(Glyphs *glyphs, SDL_Texture *texture, float x, float y,
-                         float width, float height, SDL_Color color)
+                         float width, float height, SDL_Color color,
+                         float scale)
 {
     SDL_FRect destination;
+    float drawn_width = width * scale;
+    float drawn_height = height * scale;
 
-    destination.x = x;
-    destination.y = y;
-    destination.w = width;
-    destination.h = height;
+    /* Scaling happens about the texture's centre: the glyph stays on the
+     * baseline and inside its cell's optical middle while the advance is
+     * unchanged. */
+    destination.x = x - (drawn_width - width) / 2.0f;
+    destination.y = y - (drawn_height - height) / 2.0f;
+    destination.w = drawn_width;
+    destination.h = drawn_height;
     SDL_SetTextureColorMod(texture, color.r, color.g, color.b);
     SDL_SetTextureAlphaMod(texture, color.a);
     SDL_RenderTexture(glyphs->renderer, texture, NULL, &destination);
@@ -307,15 +313,17 @@ void glyphs_close(Glyphs *glyphs)
     memset(glyphs, 0, sizeof *glyphs);
 }
 
-void glyphs_draw_text(Glyphs *glyphs, const char *text, size_t length,
-                      float x, float y, bool bold, bool italic,
-                      SDL_Color color)
+void glyphs_draw_text_scaled(Glyphs *glyphs, const char *text, size_t length,
+                             float x, float y, bool bold, bool italic,
+                             SDL_Color color, float scale)
 {
     const char *cursor;
     Uint32 first_codepoint;
     int slot;
     Glyph *glyph;
 
+    if (scale <= 0.0f)
+        scale = 1.0f;
     if (length == 0)
         return;
     cursor = text;
@@ -332,11 +340,11 @@ void glyphs_draw_text(Glyphs *glyphs, const char *text, size_t length,
         if (!glyph)
             return;
         draw_texture(glyphs, glyph->texture, x, y, glyph->width, glyph->height,
-                     color);
+                     color, scale);
         if (bold && !glyphs->bold) {
             /* No bold face: fake it with a second copy one pixel over. */
             draw_texture(glyphs, glyph->texture, x + 1.0f, y, glyph->width,
-                         glyph->height, color);
+                         glyph->height, color, scale);
         }
         return;
     }
@@ -356,7 +364,15 @@ void glyphs_draw_text(Glyphs *glyphs, const char *text, size_t length,
                                &width, &height);
         if (!texture)
             return;
-        draw_texture(glyphs, texture, x, y, width, height, color);
+        draw_texture(glyphs, texture, x, y, width, height, color, scale);
         SDL_DestroyTexture(texture);
     }
+}
+
+void glyphs_draw_text(Glyphs *glyphs, const char *text, size_t length,
+                      float x, float y, bool bold, bool italic,
+                      SDL_Color color)
+{
+    glyphs_draw_text_scaled(glyphs, text, length, x, y, bold, italic, color,
+                            1.0f);
 }

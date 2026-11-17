@@ -790,3 +790,19 @@ status and duration, a busy spinner and the clock, in its own smaller font
   path and the live shell integration are manual checks (need a real window,
   `git` and the profile snippet), as with the earlier input-dependent
   milestones.
+
+## Follow-up: the resting icon's optical size
+
+The fixed resting icon (U+F1807) rendered 11 px wide beside the 14 px folder
+glyph at the bar's 13 pt size. That is the fonts, not a bug: the Material
+Design glyph's ink is 832 units wide where the Font Awesome folder's is
+1039, both in the same 1000-unit em. A run now carries an optional glyph
+scale, and the bar draws the built-in resting icon at 1.25x (1039 / 832);
+the measured result was 13 px wide against the folder's 14 px. A
+`[busy] idle` override keeps its natural size, because it is the user's own
+glyph. The self test covers the scale reaching the run, and a screenshot of
+the status bar was inspected.
+
+That check also exposed a bad literal: `"\uF1807"` is U+F180 followed by a
+literal `7`, because a C universal character name takes exactly four hex
+digits. It is now `"\U000F1807"`, so the 204-check suite is green again.

@@ -34,14 +34,20 @@
 
 /* The spinner is fixed: these are the only frames it shows, and this is the
  * resting icon when the user has not set `[busy] idle`. U+F1807 is a
- * Material Design icon in the Symbols set; it lives above U+FFFF so it is
- * drawn through the Symbols Nerd Font Mono fallback, not the BMP cache. */
+ * Material Design icon; it lives above U+FFFF so it is drawn uncached, and
+ * Symbols Nerd Font Mono supplies it when the bar's face lacks it. */
 static const char *const BUSY_FRAMES[] = {
     "\u280B", "\u2819", "\u2839", "\u2838", "\u283C",
     "\u2834", "\u2826", "\u2827", "\u2807", "\u280F"
 };
 #define BUSY_FRAME_COUNT ((int)(sizeof BUSY_FRAMES / sizeof BUSY_FRAMES[0]))
 #define BUSY_IDLE_DEFAULT "󱠇"
+
+/* The resting icon is a Material Design glyph, and Material ink sits in a
+ * narrower box than the Font Awesome icons around it (the folder in
+ * particular). Scaling it by the folder's ink width / this glyph's ink
+ * width, 1039 / 832, makes the two read as the same size. */
+#define BUSY_IDLE_SCALE 1.25f
 
 static bool loaded_file_seen;
 static uint64_t loaded_file_hash;
@@ -1071,6 +1077,11 @@ const char *statusbar_busy_idle_default(void)
     return BUSY_IDLE_DEFAULT;
 }
 
+float statusbar_busy_idle_scale(void)
+{
+    return BUSY_IDLE_SCALE;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Rendering                                                                  */
 /* ------------------------------------------------------------------------- */
@@ -1103,7 +1114,7 @@ static StatusbarStyle module_style(const StatusbarModule *module,
 }
 
 static void render_append(RenderOut *out, const char *text, size_t length,
-                          StatusbarStyle style)
+                          StatusbarStyle style, float scale)
 {
     if (!out || !out->buf || out->cap == 0 || length == 0)
         return;
@@ -1116,6 +1127,7 @@ static void render_append(RenderOut *out, const char *text, size_t length,
         out->runs[out->run_count].start = (int)out->used;
         out->runs[out->run_count].length = (int)length;
         out->runs[out->run_count].style = style;
+        out->runs[out->run_count].scale = scale;
         out->run_count++;
     }
     out->used += length;
@@ -1156,6 +1168,7 @@ static bool render_module(const Statusbar *sb, const StatusbarModule *module,
     const char *content = value && value->value ? value->value : "";
     StatusbarStyle mod_style = module_style(module, value);
     StatusbarStyle plain = bar_default_style(sb);
+    float scale = value && value->scale > 0.0f ? value->scale : 1.0f;
     bool emitted = false;
     const char *p = template_;
 
@@ -1164,7 +1177,7 @@ static bool render_module(const Statusbar *sb, const StatusbarModule *module,
             const char *close = strchr(p + 1, ']');
 
             if (!close) {
-                render_append(out, p, strlen(p), plain);
+                render_append(out, p, strlen(p), plain, scale);
                 return true;
             }
             {
@@ -1204,7 +1217,7 @@ static bool render_module(const Statusbar *sb, const StatusbarModule *module,
                         }
                     }
                     render_append(out, substituted, strlen(substituted),
-                                  style);
+                                  style, scale);
                     emitted = true;
                     p = after;
                     continue;
@@ -1225,7 +1238,7 @@ static bool render_module(const Statusbar *sb, const StatusbarModule *module,
             while (*p && *p != '[')
                 p++;
             if (p > start) {
-                render_append(out, start, (size_t)(p - start), plain);
+                render_append(out, start, (size_t)(p - start), plain, scale);
                 emitted = true;
             }
         }
@@ -1277,7 +1290,7 @@ int statusbar_render(const Statusbar *sb, const StatusbarState *state,
             }
             name[n] = '\0';
             if (n == 0) {
-                render_append(&ro, p, 1, bar_default_style(sb));
+                render_append(&ro, p, 1, bar_default_style(sb), 1.0f);
                 p++;
                 continue;
             }
@@ -1299,7 +1312,7 @@ int statusbar_render(const Statusbar *sb, const StatusbarState *state,
                 p++;
             if (p > start)
                 render_append(&ro, start, (size_t)(p - start),
-                              bar_default_style(sb));
+                              bar_default_style(sb), 1.0f);
         }
     }
     return ro.run_count;

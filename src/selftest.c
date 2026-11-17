@@ -1368,6 +1368,15 @@ static void test_statusbar_render(void)
                              sizeof out, runs, 32);
     check(strcmp(out, "12:00:00") == 0,
           "an empty busy placeholder collapses with its space");
+
+    /* The fixed resting icon is enlarged to match the bar's Font Awesome
+     * icons; the scale reaches the run that carries it. */
+    memset(&state, 0, sizeof state);
+    state.busy.symbol = ".";
+    state.busy.scale = 1.25f;
+    count = statusbar_render(&sb, &state, "$busy", out, sizeof out, runs, 32);
+    check(count == 1 && runs[0].scale == 1.25f,
+          "the resting icon's scale reaches its run");
 }
 
 /* The pure statusbar helpers. */
@@ -1421,8 +1430,10 @@ static void test_statusbar_helpers(void)
     count = statusbar_busy_frames(frames, 16);
     check(count == 10, "ten fixed spinner frames");
     check(strcmp(frames[0], "\u280B") == 0, "the first spinner frame");
-    check(strcmp(statusbar_busy_idle_default(), "\uF1807") == 0,
+    check(strcmp(statusbar_busy_idle_default(), "\U000F1807") == 0,
           "the resting icon default is fixed");
+    check(statusbar_busy_idle_scale() > 1.0f,
+          "the resting icon is enlarged to match the folder icon");
 }
 
 /* The git porcelain-v2 parser. */

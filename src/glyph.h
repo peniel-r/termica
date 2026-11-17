@@ -90,4 +90,12 @@ void glyphs_draw_text(Glyphs *glyphs, const char *text, size_t length,
                       float x, float y, bool bold, bool italic,
                       SDL_Color color);
 
+/* The same, with the glyph's ink scaled about its centre. A `scale` of 1
+ * draws exactly like glyphs_draw_text; a larger value enlarges the glyph
+ * within (and slightly past) its cell without changing the cell's advance.
+ * A non-positive scale is treated as 1. */
+void glyphs_draw_text_scaled(Glyphs *glyphs, const char *text, size_t length,
+                             float x, float y, bool bold, bool italic,
+                             SDL_Color color, float scale);
+
 #endif /* TERMICA_GLYPH_H */

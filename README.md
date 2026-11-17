@@ -347,11 +347,15 @@ right-aligned, lualine-style).
 
 The `[busy]` spinner is fixed: the ten braille frames (U+2800 block) and the
 resting icon (U+F1807, a Material Design spinner) are built in and cannot be
-changed, so there is no `symbols` or `symbol` to get wrong. The slot always
-keeps its cell - a frame while a command runs, the resting icon at idle - so
-the bar does not reflow. `[busy] idle` is the one knob: set it to a glyph to
-override the resting icon at idle (leave it empty or remove the line for the
-built-in U+F1807).
+changed, so there is no `symbols` or `symbol` to get wrong. The resting icon
+is drawn at 1.25x its natural size: its Material Design ink box is narrower
+than the Font Awesome glyphs around it (the folder symbol, for one), and the
+scale makes it read as the same size as the folder. The slot always keeps its
+cell - a frame while a command runs, the resting icon at idle - so the bar
+does not reflow. `[busy] idle` is the one knob: set it to a glyph to override
+the resting icon at idle (leave it empty or remove the line for the built-in
+U+F1807). An override is drawn at its natural size, because a glyph the user
+picked does not need the built-in icon's correction.
 
 Symbol glyphs like these live above U+FFFF, which the glyph cache does not
 cover; termica draws them uncached and, when the terminal font lacks one,
