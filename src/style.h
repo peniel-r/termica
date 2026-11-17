@@ -26,7 +26,8 @@ typedef struct CellStyle {
     bool      bold;
     bool      italic;
     bool      hidden;          /* invisible text                       */
-    bool      underline;
+    bool      underline;       /* any underline at all                 */
+    int       underline_style; /* GHOSTTY_SGR_UNDERLINE_*              */
     bool      overline;
     bool      strikethrough;
     SDL_Color decoration;      /* underline / strike / overline color  */
@@ -38,6 +39,10 @@ typedef struct CellStyle {
  * a color for the cell; when it did not, the defaults are used. Backgrounds
  * are drawn with `background_alpha` (the window's panel opacity) so text
  * stays opaque while the surface behind it can be translucent.
+ *
+ * `underline_style` carries the SGR underline kind (single, double, curly,
+ * dotted, dashed) so the renderer can tell a spell-check wave from a hard
+ * error; `underline` stays the "is there any underline" test.
  *
  * `selected` highlights the cell the way inverse video does: the terminal
  * has no selection color of its own, and swapping the two colors the cell

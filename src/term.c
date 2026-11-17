@@ -52,6 +52,101 @@ void term_set_writer(Term *term, TermWriteFn writer, void *userdata)
     term->writer_userdata = userdata;
 }
 
+/* A program asked for the clipboard (OSC 52, iTerm2 OSC 1337, kitty OSC
+ * 5522). The library has already decoded the payload and normalized it to
+ * MIME representations; the app decides what to do, and the answer has to
+ * reach the library before this callback returns.
+ *
+ * The text is copied out of the borrowed representation so the app handler
+ * gets a NUL-terminated string it can hand straight to the clipboard API.
+ * Anything past the cap is dropped rather than reallocating inside a
+ * callback that must not block. */
+#define CLIPBOARD_TEXT_MAX 65536
+
+static void on_clipboard_write(GhosttyTerminal terminal, void *userdata,
+                               const GhosttyClipboardWrite *write)
+{
+    Term *term = (Term *)userdata;
+    GhosttyClipboardWriteReply reply =
+        GHOSTTY_INIT_SIZED(GhosttyClipboardWriteReply);
+    static char text[CLIPBOARD_TEXT_MAX];
+    char name[128];
+    size_t index;
+    size_t chosen = 0;
+    size_t length = 0;
+    TermClipboardResult result;
+
+    (void)terminal;
+    if (!term || !term->clipboard_write || !write)
+        return;
+
+    /* Prefer an explicit text/plain, then the first other text subtype,
+     * then whatever came first. */
+    for (index = 0; index < write->contents_len; index++) {
+        const GhosttyClipboardContent *content = &write->contents[index];
+
+        if (content->mime.len == strlen("text/plain") &&
+            memcmp(content->mime.ptr, "text/plain", content->mime.len) == 0) {
+            chosen = index;
+            break;
+        }
+        if (content->mime.len > 5 &&
+            memcmp(content->mime.ptr, "text/", 5) == 0)
+            chosen = index;
+    }
+    if (write->contents_len == 0) {
+        /* A request to clear the clipboard: no payload to hand over. */
+        result = term->clipboard_write(term->clipboard_userdata, "", 0, "");
+    } else {
+        const GhosttyClipboardContent *content = &write->contents[chosen];
+
+        length = content->data.len;
+        if (length >= sizeof text)
+            length = sizeof text - 1;
+        if (length > 0)
+            memcpy(text, content->data.ptr, length);
+        text[length] = '\0';
+
+        if (write->name.len > 0 && write->name.ptr) {
+            size_t copy = write->name.len < sizeof name - 1
+                              ? write->name.len
+                              : sizeof name - 1;
+
+            memcpy(name, write->name.ptr, copy);
+            name[copy] = '\0';
+        } else {
+            name[0] = '\0';
+        }
+        result = term->clipboard_write(term->clipboard_userdata, text, length,
+                                       name);
+    }
+
+    switch (result) {
+    case TERM_CLIPBOARD_ALLOWED:
+        reply.result = GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS;
+        break;
+    case TERM_CLIPBOARD_UNSUPPORTED:
+        reply.result = GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED;
+        break;
+    case TERM_CLIPBOARD_DENIED:
+    default:
+        reply.result = GHOSTTY_CLIPBOARD_WRITE_RESULT_DENIED;
+        break;
+    }
+    reply.remember = false;
+    if (write->reply)
+        write->reply(write, &reply);
+}
+
+void term_set_clipboard_write(Term *term, TermClipboardWriteFn write,
+                              void *userdata)
+{
+    if (!term)
+        return;
+    term->clipboard_write = write;
+    term->clipboard_userdata = userdata;
+}
+
 bool term_init(Term *term, uint16_t columns, uint16_t rows)
 {
     bool ok = false;
@@ -88,6 +183,10 @@ bool term_init(Term *term, uint16_t columns, uint16_t rows)
                          (const void *)on_title_changed);
     ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_WRITE_PTY,
                          (const void *)on_write_pty);
+    /* Only useful once the app installs a handler; registering it always is
+     * what lets the kitty protocol know this terminal can answer at all. */
+    ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE,
+                         (const void *)on_clipboard_write);
     ok = true;
 
 done:
@@ -100,6 +199,7 @@ void term_free(Term *term)
 {
     /* The render state borrows the terminal, and the iterators borrow the
      * render state, so free in that order. */
+    term_selection_drag_end(term);
     ghostty_mouse_event_free(term->mouse_event);
     ghostty_mouse_encoder_free(term->mouse_encoder);
     ghostty_key_event_free(term->key_event);
@@ -311,6 +411,19 @@ bool term_mouse_tracking(Term *term)
     return tracking;
 }
 
+bool term_mouse_shape(Term *term, GhosttyMouseShape *out_shape)
+{
+    GhosttyMouseShape shape = GHOSTTY_MOUSE_SHAPE_DEFAULT;
+
+    if (!term->handle || !out_shape)
+        return false;
+    if (ghostty_terminal_get(term->handle, GHOSTTY_TERMINAL_DATA_MOUSE_SHAPE,
+                             &shape) != GHOSTTY_SUCCESS)
+        return false;
+    *out_shape = shape;
+    return true;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Focus reporting                                                            */
 /* ------------------------------------------------------------------------- */
@@ -375,6 +488,15 @@ void term_scroll_bottom(Term *term)
     GhosttyTerminalScrollViewport scroll = { 0 };
 
     scroll.tag = GHOSTTY_TERMINAL_SCROLL_VIEWPORT_BOTTOM;
+    scroll_viewport(term, scroll);
+}
+
+void term_scroll_row(Term *term, uint32_t row)
+{
+    GhosttyTerminalScrollViewport scroll = { 0 };
+
+    scroll.tag = GHOSTTY_TERMINAL_SCROLL_VIEWPORT_ROW;
+    scroll.value.row = (size_t)row;
     scroll_viewport(term, scroll);
 }
 
@@ -497,6 +619,100 @@ bool term_selection_line(Term *term, int x, int y)
             != GHOSTTY_SUCCESS)
         return false;
     return install_selection(term, &selection);
+}
+
+/* ------------------------------------------------------------------------- */
+/* A drag in progress                                                         */
+/* ------------------------------------------------------------------------- */
+
+/* Create the tracked anchor for a fresh gesture. Nothing is selected yet: a
+ * press that never moves should only clear, so the app decides when the
+ * first range appears. */
+bool term_selection_drag_start(Term *term, int x, int y)
+{
+    GhosttyPoint point = { 0 };
+
+    if (!term->handle || x < 0 || y < 0)
+        return false;
+    term_selection_drag_end(term);
+
+    point.tag = GHOSTTY_POINT_TAG_VIEWPORT;
+    point.value.coordinate.x = (uint16_t)x;
+    point.value.coordinate.y = (uint32_t)y;
+    return ghostty_terminal_grid_ref_track(term->handle, point,
+                                           &term->drag_anchor)
+           == GHOSTTY_SUCCESS;
+}
+
+/* Cells from the anchor to the focus. The anchor comes from the tracked
+ * reference, so output arriving mid-drag moves it with the text; the focus
+ * is the cell under the pointer, which is exactly what the user sees. */
+bool term_selection_drag_cells(Term *term, int focus_x, int focus_y,
+                               bool rectangle)
+{
+    GhosttySelection selection = { 0 };
+
+    if (!term->drag_anchor ||
+        ghostty_tracked_grid_ref_snapshot(term->drag_anchor,
+                                          &selection.start) != GHOSTTY_SUCCESS)
+        return false;
+    if (!viewport_ref(term, focus_x, focus_y, &selection.end))
+        return false;
+    selection.rectangle = rectangle;
+    return install_selection(term, &selection);
+}
+
+/* The nearest word between the anchor's current cell and the pointer's. */
+bool term_selection_drag_words(Term *term, int focus_x, int focus_y)
+{
+    GhosttyTerminalSelectWordBetweenOptions options =
+        GHOSTTY_INIT_SIZED(GhosttyTerminalSelectWordBetweenOptions);
+    GhosttyPointCoordinate anchor;
+    GhosttySelection selection = { 0 };
+
+    if (!term->drag_anchor ||
+        ghostty_tracked_grid_ref_point(term->drag_anchor,
+                                       GHOSTTY_POINT_TAG_VIEWPORT,
+                                       &anchor) != GHOSTTY_SUCCESS)
+        return false;
+    if (!viewport_ref(term, (int)anchor.x, (int)anchor.y, &options.start) ||
+        !viewport_ref(term, focus_x, focus_y, &options.end))
+        return false;
+    if (ghostty_terminal_select_word_between(term->handle, &options,
+                                             &selection) != GHOSTTY_SUCCESS)
+        return false;
+    return install_selection(term, &selection);
+}
+
+/* The whole line the anchor sits on, wherever that line has moved to. */
+bool term_selection_drag_line(Term *term)
+{
+    GhosttyTerminalSelectLineOptions options =
+        GHOSTTY_INIT_SIZED(GhosttyTerminalSelectLineOptions);
+    GhosttyPointCoordinate anchor;
+    GhosttySelection selection = { 0 };
+
+    if (!term->drag_anchor ||
+        ghostty_tracked_grid_ref_point(term->drag_anchor,
+                                       GHOSTTY_POINT_TAG_VIEWPORT,
+                                       &anchor) != GHOSTTY_SUCCESS)
+        return false;
+    if (!viewport_ref(term, (int)anchor.x, (int)anchor.y, &options.ref))
+        return false;
+    if (ghostty_terminal_select_line(term->handle, &options, &selection)
+            != GHOSTTY_SUCCESS)
+        return false;
+    return install_selection(term, &selection);
+}
+
+/* The gesture is over. The selection itself stays: the terminal owns its
+ * own tracked copy of it. */
+void term_selection_drag_end(Term *term)
+{
+    if (!term || !term->drag_anchor)
+        return;
+    ghostty_tracked_grid_ref_free(term->drag_anchor);
+    term->drag_anchor = NULL;
 }
 
 bool term_selection_has(Term *term)

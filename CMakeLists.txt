@@ -100,6 +100,8 @@ add_executable(termica
     src/term.c
     src/pty.c
     src/embed.c
+    src/console.c
+    src/settings.c
     src/selftest.c
     src/glyph.c
     src/style.c
@@ -109,13 +111,23 @@ add_executable(termica
     src/term.h
     src/pty.h
     src/embed.h
+    src/console.h
+    src/settings.h
     src/glyph.h
     src/style.h
     src/panel.h
     src/geometry.h
     src/window.h)
 
-# Google Sans Code NF Mono, built into the executable. Configured rather
+if(WIN32)
+    # A GUI-subsystem executable: starting termica from Explorer or a
+    # shortcut no longer flashes a console window first. src/console.c
+    # reclaims the launching console so the diagnostics still show up when
+    # it is started from a shell.
+    set_target_properties(termica PROPERTIES WIN32_EXECUTABLE TRUE)
+endif()
+
+# Maple Mono NF, built into the executable. Configured rather
 # than checked in so the .rc always points at this checkout.
 if(WIN32)
     set(TERMICA_FONT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts")

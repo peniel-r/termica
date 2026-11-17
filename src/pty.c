@@ -541,36 +541,69 @@ done:
 /* Shell discovery                                                            */
 /* ------------------------------------------------------------------------- */
 
-wchar_t *pty_default_shell(void)
+/* Build a quoted command line for one located program: PowerShell gets
+ * -NoLogo, cmd needs nothing to be interactive. */
+static wchar_t *shell_line(const wchar_t *path, int candidate)
 {
-    static const wchar_t *candidates[] = {
+    size_t needed = wcslen(path) + 32;
+    wchar_t *line = (wchar_t *)malloc(needed * sizeof *line);
+
+    if (!line)
+        return NULL;
+    if (candidate < 2)
+        swprintf(line, needed, L"\"%ls\" -NoLogo", path);
+    else
+        swprintf(line, needed, L"\"%ls\"", path);
+    return line;
+}
+
+/* candidate is the index into CANDIDATES; a negative value means "try each
+ * in turn until one is found". */
+static wchar_t *find_shell(int candidate)
+{
+    static const wchar_t *const CANDIDATES[] = {
         L"pwsh.exe",         /* PowerShell 7+                        */
         L"powershell.exe",   /* Windows PowerShell                   */
-        L"cmd.exe"           /* always present, through %COMSPEC%    */
+        L"cmd.exe"           /* always present                       */
     };
+    const size_t count = sizeof CANDIDATES / sizeof CANDIDATES[0];
     wchar_t path[1024];
-    size_t  index;
+    size_t index;
+    size_t first;
+    size_t last;
 
-    for (index = 0; index < sizeof candidates / sizeof candidates[0]; index++) {
-        DWORD length = SearchPathW(NULL, candidates[index], NULL,
+    if (candidate >= 0) {
+        if ((size_t)candidate >= count)
+            return NULL;
+        first = (size_t)candidate;
+        last = first + 1;
+    } else {
+        first = 0;
+        last = count;
+    }
+
+    for (index = first; index < last; index++) {
+        DWORD length = SearchPathW(NULL, CANDIDATES[index], NULL,
                                    (DWORD)(sizeof path / sizeof path[0]),
                                    path, NULL);
-        wchar_t *line;
-        size_t   needed;
 
         if (length == 0 || length >= sizeof path / sizeof path[0])
             continue;
-        needed = wcslen(path) + 32;
-        line = (wchar_t *)malloc(needed * sizeof *line);
-        if (!line)
-            return NULL;
-        if (index < 2)
-            swprintf(line, needed, L"\"%ls\" -NoLogo", path);
-        else
-            swprintf(line, needed, L"\"%ls\"", path);
-        return line;
+        return shell_line(path, (int)index);
     }
     return NULL;
+}
+
+wchar_t *pty_default_shell(void)
+{
+    return find_shell(-1);
+}
+
+wchar_t *pty_shell_for(int which)
+{
+    if (which <= 0)
+        return pty_default_shell();
+    return find_shell(which - 1);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -737,6 +770,12 @@ struct Pty {
 
 wchar_t *pty_default_shell(void)
 {
+    return NULL;
+}
+
+wchar_t *pty_shell_for(int which)
+{
+    (void)which;
     return NULL;
 }
 

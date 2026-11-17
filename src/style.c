@@ -70,7 +70,8 @@ void style_resolve(CellStyle *out,
     out->bold = (style->flags & GHOSTTY_STYLE_FLAG_BOLD) != 0;
     out->italic = (style->flags & GHOSTTY_STYLE_FLAG_ITALIC) != 0;
     out->hidden = (style->flags & GHOSTTY_STYLE_FLAG_INVISIBLE) != 0;
-    out->underline = GHOSTTY_STYLE_UNDERLINE(*style) != GHOSTTY_SGR_UNDERLINE_NONE;
+    out->underline_style = GHOSTTY_STYLE_UNDERLINE(*style);
+    out->underline = out->underline_style != GHOSTTY_SGR_UNDERLINE_NONE;
     out->overline = (style->flags & GHOSTTY_STYLE_FLAG_OVERLINE) != 0;
     out->strikethrough = (style->flags & GHOSTTY_STYLE_FLAG_STRIKETHROUGH) != 0;
 

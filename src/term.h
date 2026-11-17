@@ -28,6 +28,23 @@ typedef struct Term Term;
 /* Called when the terminal needs bytes written back to the program. */
 typedef void (*TermWriteFn)(void *userdata, const void *data, size_t length);
 
+/* What the app did with a program's clipboard write request (OSC 52,
+ * iTerm2 OSC 1337 and the kitty protocol all arrive here normalized). */
+typedef enum {
+    TERM_CLIPBOARD_ALLOWED,
+    TERM_CLIPBOARD_DENIED,
+    TERM_CLIPBOARD_UNSUPPORTED
+} TermClipboardResult;
+
+/* `text` is the first textual representation, NUL-terminated for
+ * convenience; `length` excludes that NUL. `name` is the program's own
+ * label and may be empty. The app decides - ask, allow or deny - and
+ * answers so the library can reply to the program. */
+typedef TermClipboardResult (*TermClipboardWriteFn)(void *userdata,
+                                                    const char *text,
+                                                    size_t length,
+                                                    const char *name);
+
 struct Term {
     GhosttyTerminal               handle;        /* the screen state      */
     GhosttyRenderState            render_state;  /* the frame we draw     */
@@ -45,6 +62,16 @@ struct Term {
     TermWriteFn writer;
     void       *writer_userdata;
 
+    /* The cell where the left button went down, tracked while the drag is
+     * in progress. NULL when there is no drag. */
+    GhosttyTrackedGridRef drag_anchor;
+
+    /* A program asked to put text on the clipboard. The app answers; the
+     * library's reply is sent from inside the callback, so this must not
+     * outlive it. */
+    TermClipboardWriteFn clipboard_write;
+    void                *clipboard_userdata;
+
     uint16_t columns;
     uint16_t rows;
     uint32_t cell_width;
@@ -58,6 +85,11 @@ struct Term {
 
 /* Install the sink for term_write replies (usually pty_write). */
 void term_set_writer(Term *term, TermWriteFn writer, void *userdata);
+
+/* Install the handler for program clipboard writes. Without one the
+ * library's requests are ignored (and the kitty protocol answers ENOSYS). */
+void term_set_clipboard_write(Term *term, TermClipboardWriteFn write,
+                              void *userdata);
 
 /* Create the terminal and everything around it. False on failure. */
 bool term_init(Term *term, uint16_t columns, uint16_t rows);
@@ -121,6 +153,12 @@ size_t term_encode_mouse(Term *term, GhosttyMouseAction action,
  * to the program unless the user holds Shift. */
 bool term_mouse_tracking(Term *term);
 
+/* The pointer shape the program asked for (OSC 22). Initially
+ * GHOSTTY_MOUSE_SHAPE_TEXT, which over a cell grid is what an I-beam is
+ * for. False when the terminal has nothing to say, in which case the app
+ * keeps its own cursor. */
+bool term_mouse_shape(Term *term, GhosttyMouseShape *out_shape);
+
 /* ------------------------------------------------------------------------- */
 /* Focus reporting (milestone 3)                                              */
 /* ------------------------------------------------------------------------- */
@@ -140,6 +178,11 @@ size_t term_encode_focus(Term *term, bool gained, uint8_t *buffer,
 void term_scroll_rows(Term *term, intptr_t delta);
 void term_scroll_top(Term *term);
 void term_scroll_bottom(Term *term);
+
+/* Scroll so that `row` becomes the first visible row. The row space is the
+ * same one GhosttyTerminalScrollbar reports as `offset`, which is what makes
+ * a scrollbar drag land where the thumb was. */
+void term_scroll_row(Term *term, uint32_t row);
 
 /* Whether the viewport is following the active area (at the bottom). */
 bool term_viewport_at_bottom(Term *term);
@@ -161,6 +204,19 @@ bool term_selection_cells(Term *term, int start_x, int start_y, int end_x,
 bool term_selection_word(Term *term, int x, int y);
 bool term_selection_word_between(Term *term, int x1, int y1, int x2, int y2);
 bool term_selection_line(Term *term, int x, int y);
+/* An in-progress drag. The anchor is a tracked reference, so output that
+ * scrolls or reflows the screen while the button is held keeps the
+ * selection anchored to the text it started on instead of sliding onto
+ * whatever moved into those viewport cells. Call drag_start on press, one of
+ * the three update functions while the pointer moves, and drag_end on
+ * release. */
+bool term_selection_drag_start(Term *term, int x, int y);
+bool term_selection_drag_cells(Term *term, int focus_x, int focus_y,
+                               bool rectangle);
+bool term_selection_drag_words(Term *term, int focus_x, int focus_y);
+bool term_selection_drag_line(Term *term);
+void term_selection_drag_end(Term *term);
+
 bool term_selection_has(Term *term);
 
 /* The selected text as UTF-8, trailing spaces of each line trimmed. The

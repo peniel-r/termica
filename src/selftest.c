@@ -12,6 +12,8 @@
 
 #include "term.h"
 #include "pty.h"
+#include "settings.h"
+#include "style.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -435,34 +437,33 @@ static void test_title(void)
 }
 
 #ifdef _WIN32
-/* The only test that touches a real child process: start cmd.exe with one
- * command through ConPTY, read the output back, check the exit code. This
- * is what proves the pipes, the reader thread and the close path work. */
-static void test_pty(void)
+/* Run one command through a real ConPTY and collect what came back. The
+ * shared helper is what lets the checks below stay small: spawn, drain,
+ * report. Returns false when the child could not be started, with the
+ * failure text in error. */
+static bool pty_run(const wchar_t *command, char *output, size_t capacity,
+                    uint32_t *exit_code, char *error, size_t error_size)
 {
-    char     error[256] = "";
-    Pty     *pty;
-    char     output[4096];
-    size_t   used = 0;
-    uint32_t exit_code = 0;
-    bool     exited = false;
-    int      spins;
+    Pty    *pty;
+    size_t  used = 0;
+    uint32_t code = 0;
+    bool    exited = false;
+    int     spins;
 
-    pty = pty_spawn(L"cmd.exe /c \"echo termica-pty-ok\"", 80, 24, NULL, NULL,
-                    error, sizeof error);
-    if (!pty) {
-        check(false, "pty spawn");
-        printf("      %s\n", error);
-        return;
-    }
     output[0] = '\0';
+    if (exit_code)
+        *exit_code = 0;
+
+    pty = pty_spawn(command, 80, 24, NULL, NULL, error, error_size);
+    if (!pty)
+        return false;
 
     for (spins = 0; spins < 200; spins++) {
         uint8_t chunk[2048];
         size_t  got = pty_read(pty, chunk, sizeof chunk);
 
         if (got > 0) {
-            size_t room = sizeof output - 1 - used;
+            size_t room = capacity - 1 - used;
             size_t take = got < room ? got : room;
 
             if (take > 0) {
@@ -471,7 +472,7 @@ static void test_pty(void)
                 output[used] = '\0';
             }
         }
-        if (pty_exit_code(pty, &exit_code))
+        if (pty_exit_code(pty, &code))
             exited = true;
         /* conhost keeps the pseudoconsole session (and its output pipe)
          * alive until ClosePseudoConsole, so EOF is not the exit signal:
@@ -483,13 +484,44 @@ static void test_pty(void)
             pty_wait(pty, 100);
     }
 
+    if (exit_code)
+        *exit_code = code;
+    pty_close(pty);
+    return exited;
+}
+
+/* The only tests that touch a real child process: they prove the pipes, the
+ * reader thread, the exit code and the close path work. */
+static void test_pty(void)
+{
+    char     error[256] = "";
+    char     output[4096];
+    uint32_t code = 0;
+    bool     ran;
+
+    ran = pty_run(L"cmd.exe /c \"echo termica-pty-ok\"", output,
+                  sizeof output, &code, error, sizeof error);
+    if (!ran && error[0]) {
+        check(false, "pty spawn");
+        printf("      %s\n", error);
+        return;
+    }
     check(strstr(output, "termica-pty-ok") != NULL,
           "pty output reaches the terminal");
-    check(exited && exit_code == 0, "pty child exits with code 0");
+    check(code == 0, "pty child exits with code 0");
     if (strstr(output, "termica-pty-ok") == NULL)
         printf("      output was: %s\n", output);
 
-    pty_close(pty);
+    /* The codepage question milestone 2 left open. A non-ASCII character
+     * that arrives in the child's command line has to come back as the same
+     * UTF-8 bytes, whatever the console's own codepage is; if it were
+     * translated through an OEM page the sequence below would not match. */
+    (void)pty_run(L"cmd.exe /c \"echo caf\u00E9\"", output, sizeof output,
+                  &code, error, sizeof error);
+    check(strstr(output, "caf\xC3\xA9") != NULL,
+          "a non-ASCII argument round-trips as UTF-8");
+    if (strstr(output, "caf\xC3\xA9") == NULL)
+        printf("      output was: %s\n", output);
 }
 #endif /* _WIN32 */
 
@@ -748,6 +780,267 @@ static void test_mouse_and_focus(void)
     term_free(&term);
 }
 
+/* The underline kind has to survive the style layer: a spell-check wave and
+ * a hard error are different things and must not draw the same. */
+static void test_underline_styles(void)
+{
+    Term term;
+    GhosttyRenderState render_state = NULL;
+    GhosttyRenderStateColors colors =
+        GHOSTTY_INIT_SIZED(GhosttyRenderStateColors);
+    struct { const char *sequence; int expect; const char *what; } cases[] = {
+        { "\x1b[4m",   GHOSTTY_SGR_UNDERLINE_SINGLE, "plain SGR 4 is a single line" },
+        { "\x1b[4:3m", GHOSTTY_SGR_UNDERLINE_CURLY,  "SGR 4:3 is curly" },
+        { "\x1b[4:4m", GHOSTTY_SGR_UNDERLINE_DOTTED, "SGR 4:4 is dotted" },
+        { "\x1b[4:5m", GHOSTTY_SGR_UNDERLINE_DASHED, "SGR 4:5 is dashed" },
+        { "\x1b[4:2m", GHOSTTY_SGR_UNDERLINE_DOUBLE, "SGR 4:2 is double" },
+    };
+    size_t index;
+
+    if (!term_init(&term, 80, 24) ||
+        ghostty_render_state_new(NULL, &render_state) != GHOSTTY_SUCCESS) {
+        check(false, "underline terminal created");
+        return;
+    }
+
+    for (index = 0; index < sizeof cases / sizeof cases[0]; index++) {
+        CellStyle style;
+        CellInfo cell;
+        bool passed;
+
+        memset(&style, 0, sizeof style);
+        /* Reset, home, then one character at (0,0): every case has to be
+         * read back from the same place. */
+        term_write(&term, "\x1b[0m\x1b[H", strlen("\x1b[0m\x1b[H"));
+        term_write(&term, cases[index].sequence, strlen(cases[index].sequence));
+        term_write(&term, "x", 1);
+        ghostty_render_state_update(render_state, term.handle);
+        ghostty_render_state_get(render_state,
+                                 GHOSTTY_RENDER_STATE_DATA_COLORS, &colors);
+
+        passed = cell_info(render_state, 0, 0, &cell);
+        if (passed) {
+            memset(&style, 0, sizeof style);
+            style_resolve(&style, &cell.style, cell.has_foreground,
+                          cell.foreground, cell.has_background,
+                          cell.background, &colors,
+                          style_color(colors.foreground, 1.0f),
+                          style_color(colors.background, 1.0f), 1.0f, false);
+            passed = style.underline &&
+                     style.underline_style == cases[index].expect;
+        }
+        check(passed, cases[index].what);
+        if (!passed)
+            printf("      got underline=%d style=%d, wanted %d\n",
+                   (int)style.underline, style.underline_style,
+                   cases[index].expect);
+    }
+
+    /* No underline at all must not leave a stale style behind. */
+    term_write(&term, "\x1b[0m\x1b[H", strlen("\x1b[0m\x1b[H"));
+    term_write(&term, "y", 1);
+    ghostty_render_state_update(render_state, term.handle);
+    ghostty_render_state_get(render_state, GHOSTTY_RENDER_STATE_DATA_COLORS,
+                             &colors);
+    {
+        CellStyle style;
+        CellInfo cell;
+
+        memset(&style, 0, sizeof style);
+        if (cell_info(render_state, 0, 0, &cell)) {
+            style_resolve(&style, &cell.style, cell.has_foreground,
+                          cell.foreground, cell.has_background,
+                          cell.background, &colors,
+                          style_color(colors.foreground, 1.0f),
+                          style_color(colors.background, 1.0f), 1.0f, false);
+            check(!style.underline, "reset clears the underline");
+        } else {
+            check(false, "reset clears the underline");
+        }
+    }
+
+    ghostty_render_state_free(render_state);
+    term_free(&term);
+}
+
+/* The settings file: parsing, the bounds that are refused, and a format
+ * round trip. Nothing here needs a window or the disk. */
+static void test_settings(void)
+{
+    Settings settings;
+    Settings again;
+    char text[2048];
+
+    settings_default(&settings);
+    check(settings.point_size == 16.0f, "default point size is 16");
+    check(settings.panel_opacity == 0.80f, "default opacity is 0.80");
+    check(settings.shell == SETTINGS_SHELL_AUTO, "default shell is auto");
+    check(settings.osc52 == SETTINGS_OSC52_ASK, "default osc52 is ask");
+    check(settings.font[0] == '\0', "default font is the built-in one");
+
+    check(settings_parse_line(&settings, "size = 13"), "size parses");
+    check(settings.point_size == 13.0f, "size is stored");
+    check(!settings_parse_line(&settings, "size = 0"), "a zero size is refused");
+    check(!settings_parse_line(&settings, "size = 900"), "a huge size is refused");
+    check(settings.point_size == 13.0f, "a refused value left it alone");
+
+    check(settings_parse_line(&settings, "opacity = 0.5"), "opacity parses");
+    check(!settings_parse_line(&settings, "opacity = 2"), "opacity bounds");
+    check(settings_parse_line(&settings, "CopyOnSelect = yes"),
+          "keys are case and dash insensitive");
+    check(settings.copy_on_select, "copy-on-select stored");
+    check(settings_parse_line(&settings, "shell = cmd"), "shell parses");
+    check(settings.shell == SETTINGS_SHELL_CMD, "shell stored");
+    check(settings_parse_line(&settings, "osc52 = deny"), "osc52 parses");
+    check(settings.osc52 == SETTINGS_OSC52_DENY, "osc52 stored");
+    check(!settings_parse_line(&settings, "osc52 = maybe"), "osc52 bounds");
+    check(!settings_parse_line(&settings, "nonsense = 1"), "unknown keys");
+    check(!settings_parse_line(&settings, "# a comment"), "comments");
+    check(settings_parse_line(&settings, "font = C:\\f.ttf"), "font parses");
+    check(strcmp(settings.font, "C:\\f.ttf") == 0, "font stored verbatim");
+
+    settings_format(&settings, text, sizeof text);
+    settings_default(&again);
+    {
+        char *line = text;
+        char *next;
+        size_t read = 0;
+
+        while (line && *line) {
+            next = strchr(line, '\n');
+            if (next)
+                *next = '\0';
+            if (settings_parse_line(&again, line))
+                read++;
+            line = next ? next + 1 : NULL;
+        }
+        check(read >= 6, "the formatted file reparses");
+    }
+    check(again.point_size == settings.point_size &&
+          again.panel_opacity == settings.panel_opacity &&
+          again.copy_on_select == settings.copy_on_select &&
+          again.shell == settings.shell && again.osc52 == settings.osc52 &&
+          strcmp(again.font, settings.font) == 0,
+          "every setting survives the round trip");
+}
+
+/* What a program asked for the clipboard. The library decodes the payload
+ * and hands the app the text, so this checks the copy, the clear request
+ * and that the app's answer is what reaches the terminal. */
+static char clipboard_text[512];
+static size_t clipboard_calls;
+static int clipboard_answer = TERM_CLIPBOARD_ALLOWED;
+
+static TermClipboardResult record_clipboard(void *userdata, const char *text,
+                                            size_t length, const char *name)
+{
+    (void)userdata;
+    (void)name;
+    clipboard_calls++;
+    if (length >= sizeof clipboard_text)
+        length = sizeof clipboard_text - 1;
+    memcpy(clipboard_text, text, length);
+    clipboard_text[length] = '\0';
+    return (TermClipboardResult)clipboard_answer;
+}
+
+static void term_write_text(Term *term, const char *text)
+{
+    term_write(term, text, strlen(text));
+}
+
+static void test_clipboard_write(void)
+{
+    Term term;
+
+    if (!term_init(&term, 80, 24)) {
+        check(false, "clipboard terminal created");
+        return;
+    }
+    term_set_clipboard_write(&term, record_clipboard, NULL);
+
+    clipboard_calls = 0;
+    clipboard_text[0] = '\0';
+    clipboard_answer = TERM_CLIPBOARD_ALLOWED;
+    term_write_text(&term, "\x1b]52;c;b3NjNTItd29ya3M=\x07");
+    check(clipboard_calls == 1, "an OSC 52 write reaches the app");
+    check(strcmp(clipboard_text, "osc52-works") == 0,
+          "the payload arrives decoded");
+    if (strcmp(clipboard_text, "osc52-works") != 0)
+        printf("      got: [%s]\n", clipboard_text);
+
+    /* Multiple lines survive the round trip. */
+    clipboard_calls = 0;
+    term_write_text(&term, "\x1b]52;c;dHdvDQpsaW5lcw==\x07");
+    check(clipboard_calls == 1 &&
+              strcmp(clipboard_text, "two\r\nlines") == 0,
+          "a multi-line payload is kept whole");
+
+    /* A clear request comes through as empty text, not as no call. */
+    clipboard_calls = 0;
+    clipboard_text[0] = 'x';
+    term_write_text(&term, "\x1b]52;c;\x07");
+    check(clipboard_calls == 1 && clipboard_text[0] == '\0',
+          "an empty payload asks to clear");
+
+    /* Denying must not crash: the library's reply path is what changes. */
+    clipboard_answer = TERM_CLIPBOARD_DENIED;
+    clipboard_calls = 0;
+    term_write_text(&term, "\x1b]52;c;b3NjNTItd29ya3M=\x07");
+    check(clipboard_calls == 1, "a denied write is still offered to the app");
+
+    /* Without a handler the request is ignored rather than fatal. */
+    term_set_clipboard_write(&term, NULL, NULL);
+    term_write_text(&term, "\x1b]52;c;b3NjNTItd29ya3M=\x07");
+    check(true, "no handler means no crash");
+
+    term_free(&term);
+}
+
+#ifdef _WIN32
+/* The same path, but with the bytes coming from a real ConPTY child rather
+ * than from a string in this test: a program asking for the clipboard over
+ * the pipes is the case that has to work. powershell writes the escape and
+ * the base64 payload as raw console output, so nothing here types keys or
+ * needs a window. */
+static void test_clipboard_write_conpty(void)
+{
+    char error[256] = "";
+    char output[8192];
+    Term term;
+    bool ran;
+
+    ran = pty_run(L"powershell.exe -NoProfile -Command "
+                  L"\"[Console]::Write([char]27+']52;c;ZnJvbS10aGUtcHJvZ3JhbQ=="
+                  L"'+[char]7)\"",
+                  output, sizeof output, NULL, error, sizeof error);
+    if (!ran) {
+        check(false, "the clipboard child started");
+        printf("      %s\n", error);
+        return;
+    }
+
+    if (!term_init(&term, 80, 24)) {
+        check(false, "conpty clipboard terminal created");
+        return;
+    }
+    term_set_clipboard_write(&term, record_clipboard, NULL);
+    clipboard_calls = 0;
+    clipboard_text[0] = '\0';
+    clipboard_answer = TERM_CLIPBOARD_ALLOWED;
+
+    term_write(&term, output, strlen(output));
+    check(clipboard_calls >= 1, "a program's OSC 52 through ConPTY reaches the app");
+    check(strcmp(clipboard_text, "from-the-program") == 0,
+          "the ConPTY payload arrives decoded");
+    if (strcmp(clipboard_text, "from-the-program") != 0)
+        printf("      got: [%s] after %d call(s)\n", clipboard_text,
+               (int)clipboard_calls);
+
+    term_free(&term);
+}
+#endif /* _WIN32 */
+
 int term_selftest(void)
 {
     printf("termica self test (libghostty-vt)\n\n");
@@ -762,8 +1055,12 @@ int term_selftest(void)
     test_scrollback();
     test_selection();
     test_mouse_and_focus();
+    test_underline_styles();
+    test_settings();
+    test_clipboard_write();
 #ifdef _WIN32
     test_pty();
+    test_clipboard_write_conpty();
 #endif
 
     printf("\n%s (%d failure%s)\n", failure_count ? "FAILED" : "OK",

@@ -33,12 +33,13 @@
  *   window.c    the SDL window and the Windows 11 chrome
  *
  * Usage:  termica [--selftest] [path\to\font.ttf] [point-size]
- * Keys:   typing, arrows, PgUp/PgDn, Enter, Backspace, Esc and the rest go
- *         to the shell; Ctrl+V pastes, Ctrl+Shift+C copies the selection,
+ * Keys:   typing, arrows, PgUp/PgDn, Enter, Backspace, Esc and every Alt+*
+ *         go to the shell; Ctrl+V pastes, Ctrl+Shift+C copies the selection,
  *         Ctrl+Shift+Q quits, wheel / Shift+wheel / Ctrl+Shift+Up-Down-Home-End
- *         scroll the history, drag / double / triple select text,
- *         Alt+Up/Down = panel opacity,
- *         Alt+M = cycle the window backdrop (panel, Mica, Mica Alt,
+ *         and the scrollbar move through the history, drag / double / triple
+ *         select text (Alt+drag is a block),
+ *         Ctrl+Shift+= / - = panel opacity,
+ *         Ctrl+Shift+B = cycle the window backdrop (panel, Mica, Mica Alt,
  *         Acrylic)
  *
  * Strict C99. Windows-only bits are behind #ifdef _WIN32.
@@ -48,10 +49,12 @@
 #include <SDL3/SDL_main.h>
 #include <SDL3_ttf/SDL_ttf.h>
 
+#include "console.h"
 #include "embed.h"
 #include "glyph.h"
 #include "panel.h"
 #include "pty.h"
+#include "settings.h"
 #include "style.h"
 #include "term.h"
 #include "window.h"
@@ -72,6 +75,11 @@ static const SDL_Color STATUS_TEXT = { 130, 138, 148, 255 };
 
 /* What the built-in family is called, for the startup line. */
 #define BUILT_IN_FONT "Maple Mono NF (built in)"
+
+/* Room for uncommitted IME text. SDL3 hands the string over for the
+ * duration of the event, so the app keeps its own copy; 128 bytes is
+ * several dozen composed characters. */
+#define COMPOSING_MAX 128
 
 /* What a left-drag means: single cells, whole words, or whole lines. */
 enum {
@@ -112,6 +120,22 @@ typedef struct App {
 
     SelectionDrag  select;
     bool           mouse_held;      /* a button is down over the grid   */
+    bool           bar_drag;        /* the scrollbar thumb is being dragged */
+    Settings       settings;
+
+    /* The pointer shape the program last asked for, and the cursor made
+     * from it. NULL cursor means the system default. */
+    GhosttyMouseShape shape;
+    SDL_Cursor      *cursor;
+
+    /* In-progress IME text, drawn at the cursor until it is committed.
+     * SDL hands the string over for the duration of the event only, so it
+     * is copied here. */
+    char             composing[COMPOSING_MAX];
+    int              composing_length;
+
+    int              autoscroll;    /* -1 up, 0 off, +1 down while dragging */
+    SDL_TimerID      autoscroll_timer;
 
     bool           running;
     bool           needs_redraw;
@@ -238,6 +262,56 @@ static void draw_cell_cursor(const FrameContext *frame, const CellPaint *cell,
     }
 }
 
+/* The decoration under a cell. Dotted and dashed patterns are phased from
+ * the cell's own x, so a run of underlined cells reads as one continuous
+ * line instead of one pattern per cell, and the curly kind gets exactly one
+ * period per cell - which is what a spell-check wave looks like. */
+static void draw_underline(App *app, float x, float base, float width,
+                           SDL_Color color, int style)
+{
+    float offset;
+    float phase;
+    int pixel;
+    int pixels;
+
+    switch (style) {
+    case GHOSTTY_SGR_UNDERLINE_DOUBLE:
+        fill_rectangle(app, x, base, width, 1.0f, color);
+        fill_rectangle(app, x, base - 3.0f, width, 1.0f, color);
+        break;
+    case GHOSTTY_SGR_UNDERLINE_CURLY:
+        pixels = (int)(width + 0.5f);
+        for (pixel = 0; pixel < pixels; pixel++) {
+            float wave = SDL_sinf((float)pixel / (float)pixels * 6.2831855f);
+            float y = base + (wave < 0.0f ? -1.0f : 0.0f);
+            fill_rectangle(app, x + (float)pixel, y, 1.0f, 1.0f, color);
+        }
+        break;
+    case GHOSTTY_SGR_UNDERLINE_DOTTED:
+        /* one pixel of ink, one pixel of gap, continuing across the row */
+        phase = (float)((int)SDL_fmod(x, 2.0));
+        for (offset = phase > 0.0f ? 2.0f - phase : 0.0f;
+             offset + 1.0f <= width; offset += 2.0f)
+            fill_rectangle(app, x + offset, base, 1.0f, 1.0f, color);
+        break;
+    case GHOSTTY_SGR_UNDERLINE_DASHED:
+        /* three pixels of ink, two of gap, continuing across the row */
+        phase = (float)((int)SDL_fmod(x, 5.0));
+        for (offset = phase > 0.0f ? 5.0f - phase : 0.0f; offset < width;
+             offset += 5.0f) {
+            float run = width - offset;
+            if (run > 3.0f)
+                run = 3.0f;
+            fill_rectangle(app, x + offset, base, run, 1.0f, color);
+        }
+        break;
+    case GHOSTTY_SGR_UNDERLINE_SINGLE:
+    default:
+        fill_rectangle(app, x, base, width, 2.0f, color);
+        break;
+    }
+}
+
 static void draw_cell(const FrameContext *frame, const CellPaint *cell)
 {
     App *app = frame->app;
@@ -259,8 +333,8 @@ static void draw_cell(const FrameContext *frame, const CellPaint *cell)
     draw_cell_glyph(frame, cell, &style, false);
 
     if (style.underline)
-        fill_rectangle(app, x, y + height - 2.0f, width, 2.0f,
-                       style.decoration);
+        draw_underline(app, x, y + height - 2.0f, width, style.decoration,
+                       style.underline_style);
     if (style.strikethrough)
         fill_rectangle(app, x, y + height / 2.0f, width, 1.0f,
                        style.decoration);
@@ -468,6 +542,66 @@ static void send_text(App *app, const char *text)
         send_to_shell(app, start, (size_t)(cursor - start));
 }
 
+/* Ask before a program replaces the clipboard. The message names the
+ * program when the protocol carried one, and Enter copies while Escape
+ * denies. */
+static bool confirm_clipboard_write(App *app, const char *name)
+{
+    static const SDL_MessageBoxButtonData buttons[] = {
+        { SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 1, "Deny" },
+        { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 0, "Copy" }
+    };
+    char detail[512];
+    const SDL_MessageBoxData box = {
+        SDL_MESSAGEBOX_WARNING,
+        app->window,
+        "Allow clipboard write?",
+        detail,
+        SDL_arraysize(buttons),
+        buttons,
+        NULL
+    };
+    int pressed = 1;
+
+    if (name && name[0])
+        snprintf(detail, sizeof detail,
+                 "\"%s\" wants to replace the clipboard contents.", name);
+    else
+        snprintf(detail, sizeof detail,
+                 "The program wants to replace the clipboard contents.");
+
+    if (!SDL_ShowMessageBox(&box, &pressed))
+        return false;
+    return pressed == 0;
+}
+
+/* A program asked for the clipboard (OSC 52, iTerm2, kitty). The settings
+ * decide the policy: ask, allow or deny. Nothing is written back into the
+ * terminal from here - the VT stream is paused while this runs, so a
+ * message box is the feedback. */
+static TermClipboardResult handle_clipboard_write(void *userdata,
+                                                  const char *text,
+                                                  size_t length,
+                                                  const char *name)
+{
+    App *app = (App *)userdata;
+
+    (void)length;
+    switch (app->settings.osc52) {
+    case SETTINGS_OSC52_ALLOW:
+        break;
+    case SETTINGS_OSC52_DENY:
+        return TERM_CLIPBOARD_DENIED;
+    default:
+        if (!confirm_clipboard_write(app, name))
+            return TERM_CLIPBOARD_DENIED;
+        break;
+    }
+    if (!SDL_SetClipboardText(text))
+        return TERM_CLIPBOARD_DENIED;
+    return TERM_CLIPBOARD_ALLOWED;
+}
+
 /* Ask before pasting text that could run commands: line breaks outside
  * bracketed paste, or an embedded end-of-paste marker. */
 static bool confirm_unsafe_paste(App *app)
@@ -555,6 +689,32 @@ static void write_key(App *app, const SDL_KeyboardEvent *event)
 static void handle_text_input(App *app, const SDL_TextInputEvent *event)
 {
     send_text(app, event->text);
+    /* A commit ends the composition. */
+    app->composing_length = 0;
+    app->composing[0] = '\0';
+}
+
+/* Uncommitted IME text. Empty text means the composition was cancelled, so
+ * the app forgets it; anything else is kept for the frame and drawn at the
+ * cursor until the commit event above clears it. */
+static void handle_text_editing(App *app, const SDL_TextEditingEvent *event)
+{
+    size_t length;
+
+    if (!event->text || event->text[0] == '\0') {
+        app->composing_length = 0;
+        app->composing[0] = '\0';
+        app->needs_redraw = true;
+        return;
+    }
+
+    length = strlen(event->text);
+    if (length >= COMPOSING_MAX)
+        length = COMPOSING_MAX - 1;
+    memcpy(app->composing, event->text, length);
+    app->composing[length] = '\0';
+    app->composing_length = (int)length;
+    app->needs_redraw = true;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -603,6 +763,123 @@ static void cell_clamped(const App *app, float x, float y, int *out_x,
     *out_y = row;
 }
 
+/* The scrollback bar. It lives in the right margin, outside the cell grid,
+ * so it is app chrome even when a program has asked for the pointer. */
+typedef struct ScrollBar {
+    bool     visible;
+    float    x;
+    float    width;
+    float    track_top;
+    float    track_height;
+    float    thumb_top;
+    float    thumb_height;
+    uint64_t first_row;    /* the row currently at the top of the viewport */
+    uint64_t page_rows;    /* rows in the viewport                         */
+    uint64_t scrollable;   /* total - page                                 */
+} ScrollBar;
+
+static void scrollbar_geometry(App *app, ScrollBar *bar)
+{
+    GhosttyTerminalScrollbar data;
+    int pixel_width;
+    int pixel_height;
+
+    memset(bar, 0, sizeof *bar);
+    if (!term_scrollbar(&app->term, &data) || data.total <= data.len)
+        return;
+    if (term_viewport_at_bottom(&app->term))
+        return;
+
+    SDL_GetWindowSizeInPixels(app->window, &pixel_width, &pixel_height);
+    (void)pixel_height;
+    bar->track_height = (float)app->rows * (float)app->glyphs.cell_height;
+    if (bar->track_height <= 0.0f)
+        return;
+
+    bar->width = 4.0f * app->display_scale;
+    if (bar->width < 2.0f)
+        bar->width = 2.0f;
+    /* SDL claims the last 8 pixels of the window for the resize border: a
+     * click there moves the window instead of reaching the app, so the bar
+     * is right-aligned just inside it. */
+    bar->x = (float)pixel_width - 9.0f - bar->width;
+    bar->track_top = (float)app->grid_top;
+    bar->first_row = data.offset;
+    bar->page_rows = data.len;
+    bar->scrollable = data.total - data.len;
+
+    bar->thumb_height = bar->track_height *
+                        ((float)data.len / (float)data.total);
+    if (bar->thumb_height < 16.0f)
+        bar->thumb_height = 16.0f;
+    bar->thumb_top = (bar->track_height - bar->thumb_height) *
+                     ((float)data.offset / (float)bar->scrollable);
+    bar->visible = true;
+}
+
+/* The first visible row for a pointer y while the thumb is being dragged.
+ * The pointer controls the thumb's middle, so grabbing it anywhere keeps
+ * the view where it was. */
+static uint64_t scrollbar_row_at(const ScrollBar *bar, float y)
+{
+    float span = bar->track_height - bar->thumb_height;
+    float ratio;
+    double row;
+
+    if (span <= 0.0f)
+        return 0;
+    ratio = (y - bar->track_top - bar->thumb_height * 0.5f) / span;
+    if (ratio < 0.0f)
+        ratio = 0.0f;
+    if (ratio > 1.0f)
+        ratio = 1.0f;
+    row = (double)ratio * (double)bar->scrollable;
+    return (uint64_t)(row + 0.5);
+}
+
+static bool scrollbar_hit(const ScrollBar *bar, float x, float y,
+                          float window_width)
+{
+    float left = bar->x - 3.0f;
+    float right = bar->x + bar->width + 3.0f;
+    float limit = window_width - 9.0f;   /* the resize border starts here */
+
+    if (!bar->visible)
+        return false;
+    if (right > limit)
+        right = limit;
+    if (x < left || x > right)
+        return false;
+    return y >= bar->track_top && y <= bar->track_top + bar->track_height;
+}
+
+/* A press on the bar: the thumb starts a drag, the track pages toward the
+ * click. Returns true when the event belonged to the bar. */
+static bool scrollbar_press(App *app, const ScrollBar *bar, float y)
+{
+    bool on_thumb = y >= bar->track_top + bar->thumb_top &&
+                    y <= bar->track_top + bar->thumb_top + bar->thumb_height;
+    uint64_t row;
+
+    if (on_thumb) {
+        app->bar_drag = true;
+        return true;
+    }
+    if (y < bar->track_top + bar->thumb_top) {
+        /* above the thumb: one page older */
+        row = bar->first_row > bar->page_rows
+                  ? bar->first_row - bar->page_rows
+                  : 0;
+    } else {
+        row = bar->first_row + bar->page_rows;
+        if (row > bar->scrollable)
+            row = bar->scrollable;
+    }
+    term_scroll_row(&app->term, (uint32_t)row);
+    app->needs_redraw = true;
+    return true;
+}
+
 static GhosttyMouseButton mouse_button_for(Uint8 button)
 {
     switch (button) {
@@ -645,9 +922,9 @@ static void report_mouse(App *app, GhosttyMouseAction action,
     send_to_shell(app, encoded, bytes);
 }
 
-/* Rebuild the selection from the current gesture. The library owns the
- * semantics (word boundaries, line extents); this only says what the
- * gesture was. */
+/* Rebuild the selection from the current gesture. The anchor is the tracked
+ * reference from the press, the focus is the cell under the pointer; the
+ * library owns the semantics (word boundaries, line extents). */
 static void selection_update(App *app)
 {
     SelectionDrag *drag = &app->select;
@@ -656,29 +933,234 @@ static void selection_update(App *app)
     case SELECT_WORDS:
         /* The nearest word between the anchor and the pointer, so a drag
          * that passes between words does not collapse to nothing. */
-        if (!term_selection_word_between(&app->term, drag->anchor_x,
-                                         drag->anchor_y, drag->focus_x,
-                                         drag->focus_y))
+        if (!term_selection_drag_words(&app->term, drag->focus_x,
+                                       drag->focus_y))
             term_selection_word(&app->term, drag->focus_x, drag->focus_y);
         break;
     case SELECT_LINES:
-        term_selection_line(&app->term, drag->anchor_x, drag->anchor_y);
+        if (!term_selection_drag_line(&app->term))
+            term_selection_line(&app->term, drag->anchor_x, drag->anchor_y);
         break;
     default:
-        term_selection_cells(&app->term, drag->anchor_x, drag->anchor_y,
-                             drag->focus_x, drag->focus_y, drag->rectangle);
+        if (!term_selection_drag_cells(&app->term, drag->focus_x,
+                                       drag->focus_y, drag->rectangle))
+            term_selection_cells(&app->term, drag->anchor_x, drag->anchor_y,
+                                 drag->focus_x, drag->focus_y,
+                                 drag->rectangle);
         break;
     }
     app->needs_redraw = true;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Pointer shape, IME composition and dragging into history                 */
+/* ------------------------------------------------------------------------- */
+
+/* OSC 22 asks for a shape by name; SDL has a system cursor for each of the
+ * ones a terminal ever gets asked for. Anything unknown is the default,
+ * because a wrong arrow is better than a wrong resize double-arrow. */
+static SDL_SystemCursor cursor_for_shape(GhosttyMouseShape shape)
+{
+    switch (shape) {
+    case GHOSTTY_MOUSE_SHAPE_TEXT:            return SDL_SYSTEM_CURSOR_TEXT;
+    case GHOSTTY_MOUSE_SHAPE_POINTER:         return SDL_SYSTEM_CURSOR_POINTER;
+    case GHOSTTY_MOUSE_SHAPE_WAIT:            return SDL_SYSTEM_CURSOR_WAIT;
+    case GHOSTTY_MOUSE_SHAPE_PROGRESS:        return SDL_SYSTEM_CURSOR_PROGRESS;
+    case GHOSTTY_MOUSE_SHAPE_CROSSHAIR:       return SDL_SYSTEM_CURSOR_CROSSHAIR;
+    case GHOSTTY_MOUSE_SHAPE_NOT_ALLOWED:     return SDL_SYSTEM_CURSOR_NOT_ALLOWED;
+    case GHOSTTY_MOUSE_SHAPE_MOVE:            return SDL_SYSTEM_CURSOR_MOVE;
+    case GHOSTTY_MOUSE_SHAPE_N_RESIZE:        return SDL_SYSTEM_CURSOR_N_RESIZE;
+    case GHOSTTY_MOUSE_SHAPE_S_RESIZE:        return SDL_SYSTEM_CURSOR_S_RESIZE;
+    case GHOSTTY_MOUSE_SHAPE_E_RESIZE:        return SDL_SYSTEM_CURSOR_E_RESIZE;
+    case GHOSTTY_MOUSE_SHAPE_W_RESIZE:        return SDL_SYSTEM_CURSOR_W_RESIZE;
+    case GHOSTTY_MOUSE_SHAPE_NE_RESIZE:       return SDL_SYSTEM_CURSOR_NE_RESIZE;
+    case GHOSTTY_MOUSE_SHAPE_NW_RESIZE:       return SDL_SYSTEM_CURSOR_NW_RESIZE;
+    case GHOSTTY_MOUSE_SHAPE_SE_RESIZE:       return SDL_SYSTEM_CURSOR_SE_RESIZE;
+    case GHOSTTY_MOUSE_SHAPE_SW_RESIZE:       return SDL_SYSTEM_CURSOR_SW_RESIZE;
+    case GHOSTTY_MOUSE_SHAPE_EW_RESIZE:       return SDL_SYSTEM_CURSOR_EW_RESIZE;
+    case GHOSTTY_MOUSE_SHAPE_NS_RESIZE:       return SDL_SYSTEM_CURSOR_NS_RESIZE;
+    case GHOSTTY_MOUSE_SHAPE_NESW_RESIZE:     return SDL_SYSTEM_CURSOR_NESW_RESIZE;
+    case GHOSTTY_MOUSE_SHAPE_NWSE_RESIZE:     return SDL_SYSTEM_CURSOR_NWSE_RESIZE;
+    case GHOSTTY_MOUSE_SHAPE_VERTICAL_TEXT:   return SDL_SYSTEM_CURSOR_TEXT;
+    default:                                  return SDL_SYSTEM_CURSOR_DEFAULT;
+    }
+}
+
+/* The program asked for a shape; make it the window's cursor. Called on
+ * motion because that is the only moment a shape can have changed under
+ * the pointer. */
+static void apply_mouse_shape(App *app)
+{
+    GhosttyMouseShape shape;
+    SDL_Cursor *cursor;
+
+    if (!term_mouse_shape(&app->term, &shape))
+        return;
+    if (app->cursor && shape == app->shape)
+        return;
+    app->shape = shape;
+
+    cursor = SDL_CreateSystemCursor(cursor_for_shape(shape));
+    if (!cursor)
+        return;
+    if (!SDL_SetCursor(cursor)) {
+        SDL_DestroyCursor(cursor);
+        return;
+    }
+    if (app->cursor)
+        SDL_DestroyCursor(app->cursor);
+    app->cursor = cursor;
+}
+
+/* SDL's cursor is process-wide, so leaving the window has to hand the
+ * pointer back to the system or the whole desktop keeps the terminal's
+ * shape. */
+static void reset_mouse_shape(App *app)
+{
+    SDL_Cursor *system_default = SDL_GetDefaultCursor();
+
+    if (!app->cursor)
+        return;
+    if (system_default)
+        SDL_SetCursor(system_default);
+    SDL_DestroyCursor(app->cursor);
+    app->cursor = NULL;
+    app->shape = GHOSTTY_MOUSE_SHAPE_DEFAULT;
+}
+
+/* Where the IME should put its candidate window: the cell the terminal
+ * cursor is in. The render state already knows it, so this is computed
+ * while drawing rather than guessed from history. */
+static void update_text_input_area(App *app)
+{
+    GhosttyRenderStateCursor cursor_state =
+        GHOSTTY_INIT_SIZED(GhosttyRenderStateCursor);
+    SDL_Rect area;
+
+    if (ghostty_render_state_get(app->term.render_state,
+                                 GHOSTTY_RENDER_STATE_DATA_CURSOR,
+                                 &cursor_state) != GHOSTTY_SUCCESS)
+        return;
+    if (!cursor_state.visible || !cursor_state.viewport_has_value)
+        return;
+
+    /* Window coordinates, not pixels: divide the layout back out. */
+    area.x = (int)((float)(app->grid_left +
+                           cursor_state.viewport_x * app->glyphs.cell_width) /
+                   app->display_scale);
+    area.y = (int)((float)(app->grid_top +
+                           cursor_state.viewport_y * app->glyphs.cell_height) /
+                   app->display_scale);
+    area.w = (int)((float)app->glyphs.cell_width / app->display_scale);
+    area.h = (int)((float)app->glyphs.cell_height / app->display_scale);
+    SDL_SetTextInputArea(app->window, &area, 0);
+}
+
+/* The text the IME is still composing. It is not in the screen buffer, so
+ * without this the user types and sees nothing until the commit. */
+static void draw_composition(App *app, int cursor_column, int cursor_row)
+{
+    const char *text = app->composing;
+    int column = cursor_column;
+
+    if (app->composing_length == 0)
+        return;
+
+    while (*text && column < app->columns) {
+        char utf8[8];
+        char *end;
+        Uint32 codepoint = SDL_StepUTF8(&text, NULL);
+
+        if (codepoint == 0)
+            break;
+        end = SDL_UCS4ToUTF8(codepoint, utf8);
+        *end = '\0';
+        glyphs_draw_text(&app->glyphs, utf8, (size_t)(end - utf8),
+                         cell_x(app, column), cell_y(app, cursor_row), false,
+                         false, STATUS_TEXT);
+        column++;
+    }
+}
+
+/* Rows moved by one autoscroll tick, and how fast those ticks come. */
+#define AUTOSCROLL_ROWS 1
+#define AUTOSCROLL_INTERVAL_MS 40
+
+/* A drag that reaches the last row keeps pulling history in, so a
+ * selection longer than the screen is possible without letting go. */
+static Uint32 SDLCALL on_autoscroll_timer(void *userdata, SDL_TimerID timer_id,
+                                          Uint32 interval)
+{
+    SDL_Event event;
+
+    (void)userdata;
+    (void)timer_id;
+    SDL_zero(event);
+    event.type = SDL_EVENT_USER;
+    event.user.code = 3;
+    SDL_PushEvent(&event);
+    return interval;
+}
+
+static void autoscroll_start(App *app, int direction)
+{
+    if (app->autoscroll == direction && app->autoscroll_timer)
+        return;
+    app->autoscroll = direction;
+    if (direction == 0) {
+        if (app->autoscroll_timer) {
+            SDL_RemoveTimer(app->autoscroll_timer);
+            app->autoscroll_timer = 0;
+        }
+        return;
+    }
+    if (!app->autoscroll_timer)
+        app->autoscroll_timer = SDL_AddTimer(AUTOSCROLL_INTERVAL_MS,
+                                             on_autoscroll_timer, app);
+}
+
+static void autoscroll_tick(App *app)
+{
+    if (app->autoscroll == 0 || !app->select.dragging)
+        return;
+    term_scroll_rows(&app->term, app->autoscroll > 0 ? AUTOSCROLL_ROWS
+                                                     : -AUTOSCROLL_ROWS);
+    /* The focus end is the edge row that is now under the pointer. */
+    app->select.focus_y = app->autoscroll > 0 ? app->rows - 1 : 0;
+    app->select.moved = true;
+    selection_update(app);
 }
 
 static void handle_mouse_button(App *app, const SDL_MouseButtonEvent *event)
 {
     bool pressed = event->down;
     SDL_Keymod modifiers = mouse_modifiers();
+    ScrollBar bar;
+    int pixel_width = 0;
+    int pixel_height = 0;
     int cell_x = 0;
     int cell_y = 0;
-    bool inside = cell_at(app, event->x, event->y, &cell_x, &cell_y);
+    bool inside;
+
+    /* The bar comes first: it is outside the grid, so a program that owns
+     * the pointer still cannot swallow the only control that reaches the
+     * top of the scrollback without the keyboard. */
+    SDL_GetWindowSizeInPixels(app->window, &pixel_width, &pixel_height);
+    scrollbar_geometry(app, &bar);
+    if (event->button == SDL_BUTTON_LEFT && !app->select.dragging &&
+        scrollbar_hit(&bar, event->x, event->y, (float)pixel_width)) {
+        if (pressed)
+            scrollbar_press(app, &bar, event->y);
+        else
+            app->bar_drag = false;
+        return;
+    }
+    if (app->bar_drag && !pressed) {
+        app->bar_drag = false;
+        return;
+    }
+
+    inside = cell_at(app, event->x, event->y, &cell_x, &cell_y);
 
     if (pointer_belongs_to_shell(app, modifiers)) {
         /* Coordinates outside the grid are still worth sending while a
@@ -716,16 +1198,19 @@ static void handle_mouse_button(App *app, const SDL_MouseButtonEvent *event)
         else
             app->select.mode = SELECT_CELLS;
 
-        if (app->select.mode == SELECT_WORDS)
-            term_selection_word(&app->term, cell_x, cell_y);
-        else if (app->select.mode == SELECT_LINES)
-            term_selection_line(&app->term, cell_x, cell_y);
-        else
+        /* The anchor is tracked from here on: output arriving while the
+         * button is held moves it with the text it named. */
+        term_selection_drag_start(&app->term, cell_x, cell_y);
+        if (app->select.mode == SELECT_CELLS)
             term_selection_clear(&app->term);
+        else
+            selection_update(app);
         app->needs_redraw = true;
         return;
     }
 
+    term_selection_drag_end(&app->term);
+    autoscroll_start(app, 0);
     if (!app->select.dragging)
         return;
     app->select.dragging = false;
@@ -733,16 +1218,36 @@ static void handle_mouse_button(App *app, const SDL_MouseButtonEvent *event)
     if (!app->select.moved && app->select.mode == SELECT_CELLS) {
         term_selection_clear(&app->term);
         app->needs_redraw = true;
+        return;
     }
+    /* copy_on_select puts the gesture's text on the clipboard as soon as
+     * the button comes up, the way most Windows terminals do it. */
+    if (app->select.moved && app->settings.copy_on_select)
+        copy_selection(app);
 }
 
 static void handle_mouse_motion(App *app, const SDL_MouseMotionEvent *event)
 {
     /* SDL does not carry the modifier state on motion events. */
-    SDL_Keymod modifiers = SDL_GetModState();
+    SDL_Keymod modifiers = mouse_modifiers();
     int cell_x = 0;
     int cell_y = 0;
     bool inside = cell_at(app, event->x, event->y, &cell_x, &cell_y);
+
+    /* OSC 22 only says what the shape should be; the only moment it can
+     * matter is when the pointer moves over the grid. */
+    apply_mouse_shape(app);
+
+    if (app->bar_drag) {
+        ScrollBar bar;
+
+        scrollbar_geometry(app, &bar);
+        if (bar.visible)
+            term_scroll_row(&app->term,
+                            (uint32_t)scrollbar_row_at(&bar, event->y));
+        app->needs_redraw = true;
+        return;
+    }
 
     if (pointer_belongs_to_shell(app, modifiers)) {
         if (inside || app->mouse_held)
@@ -754,6 +1259,17 @@ static void handle_mouse_motion(App *app, const SDL_MouseMotionEvent *event)
 
     if (!app->select.dragging)
         return;
+
+    /* A drag at the first or last row keeps pulling rows in from history,
+     * so a selection longer than the screen needs no second gesture. */
+    if (event->y < (float)app->grid_top)
+        autoscroll_start(app, -1);
+    else if (event->y >= (float)(app->grid_top +
+                                 app->rows * app->glyphs.cell_height))
+        autoscroll_start(app, 1);
+    else
+        autoscroll_start(app, 0);
+
     cell_clamped(app, event->x, event->y, &cell_x, &cell_y);
     if (cell_x == app->select.focus_x && cell_y == app->select.focus_y)
         return;
@@ -847,9 +1363,13 @@ static void update_geometry(App *app)
                       (uint32_t)(pixel_height > grid_bottom
                                      ? pixel_height - grid_bottom
                                      : 0));
-    term_selection_clear(&app->term);
+    /* The selection is left alone: the terminal owns a tracked copy of it,
+     * so it keeps naming the same text through a reflow. Only the pointer
+     * state is reset, because the cell under the cursor changed. */
     app->select.dragging = false;
+    app->bar_drag = false;
     app->mouse_held = false;
+    term_selection_drag_end(&app->term);
     term_set_mouse_button(&app->term, false);
 }
 
@@ -1001,36 +1521,19 @@ static void draw_status_line(App *app, int row, int cursor_column,
  * drawn when the whole history fits. */
 static void draw_scrollbar(App *app)
 {
-    GhosttyTerminalScrollbar bar;
-    float track_height;
-    float thumb_height;
-    float thumb_top;
+    ScrollBar bar;
     SDL_Color color = { 150, 158, 168, 190 };
-    int pixel_width;
-    int pixel_height;
 
-    if (!term_scrollbar(&app->term, &bar) || bar.total <= bar.len)
-        return;
-    if (term_viewport_at_bottom(&app->term))
+    scrollbar_geometry(app, &bar);
+    if (!bar.visible)
         return;
 
-    SDL_GetWindowSizeInPixels(app->window, &pixel_width, &pixel_height);
-    track_height = (float)app->rows * (float)app->glyphs.cell_height;
-    if (track_height <= 0.0f)
-        return;
-
-    thumb_height = track_height * ((float)bar.len / (float)bar.total);
-    if (thumb_height < 16.0f)
-        thumb_height = 16.0f;
-    if (bar.total > bar.len)
-        thumb_top = (track_height - thumb_height) *
-                    ((float)bar.offset / (float)(bar.total - bar.len));
-    else
-        thumb_top = 0.0f;
-
-    fill_rectangle(app, (float)(pixel_width - 5 - (int)(4.0f * app->display_scale)),
-                   app->grid_top + thumb_top,
-                   4.0f * app->display_scale, thumb_height, color);
+    /* The thumb brightens while it is held, so a drag has feedback even
+     * when the view itself is a moment behind. */
+    if (app->bar_drag)
+        color.a = 255;
+    fill_rectangle(app, bar.x, bar.track_top + bar.thumb_top, bar.width,
+                   bar.thumb_height, color);
 }
 
 /* The translucent window forces a full redraw every frame, so per-row dirty
@@ -1048,6 +1551,7 @@ static void draw_frame(App *app)
     int cursor_column = 0;
     int cursor_row = 0;
     bool cursor_drawn = false;
+    bool cursor_valid = false;
 
     SDL_GetWindowSizeInPixels(app->window, &pixel_width, &pixel_height);
 
@@ -1083,6 +1587,7 @@ static void draw_frame(App *app)
             cursor_column = cursor_state.viewport_x;
             cursor_row = cursor_state.viewport_y;
             cursor_drawn = true;
+            cursor_valid = true;
         }
     }
     /* A blinking cursor is only drawn half the time. */
@@ -1167,13 +1672,23 @@ static void draw_frame(App *app)
         }
     }
 
-    /* 6. The frame is drawn, so the next one only reports new changes. */
+    /* 6. Uncommitted IME text goes on top of the cell the terminal cursor
+     * is in: the screen buffer does not have it yet, so this is the only
+     * place a user can see what they are mid-way through typing. It is
+     * gated on the cursor being on screen, not on the blink phase - the
+     * preedit must not strobe with the cursor. */
+    if (cursor_valid) {
+        draw_composition(app, cursor_column, cursor_row);
+        update_text_input_area(app);
+    }
+
+    /* 7. The frame is drawn, so the next one only reports new changes. */
     ghostty_render_state_clean(app->term.render_state);
 
-    /* 7. The scrollback indicator, over the right edge of the grid. */
+    /* 8. The scrollback indicator, over the right edge of the grid. */
     draw_scrollbar(app);
 
-    /* 8. Status line, one row below the grid. */
+    /* 9. Status line, one row below the grid. */
     draw_status_line(app, app->rows, cursor_column, cursor_row);
 
     SDL_RenderPresent(renderer);
@@ -1196,10 +1711,11 @@ static bool is_point_size(const char *text, float *out)
     return true;
 }
 
-/* The font is optional: no path means the built-in Maple Mono NF.
- * A build without the embedded font (anything but Windows) falls back to a
- * monospace font from the system. */
-static const char *pick_font(const char *requested)
+/* The font is optional. Order: a path on the command line, then the one in
+ * the settings file, then the built-in Maple Mono NF. A build without the
+ * embedded font (anything but Windows) falls back to a monospace font from
+ * the system. */
+static const char *pick_font(const char *requested, const char *from_settings)
 {
     static const char *fallbacks[] = {
         "C:\\Windows\\Fonts\\consola.ttf",
@@ -1210,6 +1726,8 @@ static const char *pick_font(const char *requested)
 
     if (requested)
         return requested;
+    if (from_settings && from_settings[0])
+        return from_settings;
     if (embedded_font_available())
         return NULL;
     for (index = 0; fallbacks[index]; index++) {
@@ -1263,8 +1781,11 @@ static void handle_key_down(App *app, const SDL_KeyboardEvent *event)
         copy_selection(app);
         return;
     }
-    /* History. Shift+Home/End stay with the shell (readline line start and
-     * end); Ctrl+Shift+Home/End and Ctrl+Shift+Up/Down are ours. */
+    /* History and panel chrome. Both live under Ctrl+Shift because that is
+     * what no shell binds; Shift+Home/End stay with the shell (readline
+     * line start and end), and every Alt+* now reaches it as Meta.
+     * Ctrl+Alt+* is deliberately unused: on many layouts that pair is
+     * AltGr and produces a character of its own. */
     if (ctrl_shift && !event->repeat) {
         switch (event->scancode) {
         case SDL_SCANCODE_UP:
@@ -1283,10 +1804,38 @@ static void handle_key_down(App *app, const SDL_KeyboardEvent *event)
             term_scroll_bottom(&app->term);
             app->needs_redraw = true;
             return;
+        case SDL_SCANCODE_MINUS:
+        case SDL_SCANCODE_KP_MINUS:
+            app->panel_opacity -= 0.05f;
+            if (app->panel_opacity < 0.0f)
+                app->panel_opacity = 0.0f;
+            app->settings.panel_opacity = app->panel_opacity;
+            app->needs_redraw = true;
+            return;
+        case SDL_SCANCODE_EQUALS:
+        case SDL_SCANCODE_KP_PLUS:
+            app->panel_opacity += 0.05f;
+            if (app->panel_opacity > 1.0f)
+                app->panel_opacity = 1.0f;
+            app->settings.panel_opacity = app->panel_opacity;
+            app->needs_redraw = true;
+            return;
+        case SDL_SCANCODE_B: {
+            WindowBackdrop next =
+                (WindowBackdrop)((app->backdrop + 1) % WINDOW_BACKDROP_COUNT);
+            /* The OS may not know the material; the window says so and the
+             * app keeps the mode that is really in effect. */
+            app->backdrop = window_sync_chrome(app->window, next,
+                                               app->panel.radius);
+            app->settings.backdrop = (int)app->backdrop;
+            app->needs_redraw = true;
+            return;
+        }
         default:
             break;
         }
     }
+    /* Scroll a page at a time with Shift alone. */
     if ((event->mod & SDL_KMOD_SHIFT) && !(event->mod & SDL_KMOD_CTRL) &&
         !event->repeat) {
         if (event->scancode == SDL_SCANCODE_PAGEUP) {
@@ -1300,32 +1849,6 @@ static void handle_key_down(App *app, const SDL_KeyboardEvent *event)
             return;
         }
     }
-    if (event->mod & SDL_KMOD_ALT) {
-        if (event->scancode == SDL_SCANCODE_UP) {
-            app->panel_opacity += 0.05f;
-            if (app->panel_opacity > 1.0f)
-                app->panel_opacity = 1.0f;
-            app->needs_redraw = true;
-            return;
-        }
-        if (event->scancode == SDL_SCANCODE_DOWN) {
-            app->panel_opacity -= 0.05f;
-            if (app->panel_opacity < 0.0f)
-                app->panel_opacity = 0.0f;
-            app->needs_redraw = true;
-            return;
-        }
-        if (event->scancode == SDL_SCANCODE_M && !event->repeat) {
-            WindowBackdrop next =
-                (WindowBackdrop)((app->backdrop + 1) % WINDOW_BACKDROP_COUNT);
-            /* The OS may not know the material; the window says so and the
-             * app keeps the mode that is really in effect. */
-            app->backdrop = window_sync_chrome(app->window, next,
-                                               app->panel.radius);
-            app->needs_redraw = true;
-            return;
-        }
-    }
     write_key(app, event);
 }
 
@@ -1335,18 +1858,24 @@ int main(int argc, char **argv)
     const char *font_path;
     const char *font_label;
     const char *requested_font = NULL;
-    float point_size = 16.0f;
+    float point_size = 0.0f;   /* 0 means "whatever the settings say" */
     int exit_code = 1;
     int index;
+
+    /* The executable is a GUI one, so a console only exists when something
+     * launched us from one. Claim it before anything is printed. */
+    console_reclaim();
 
     if (argc > 1 && strcmp(argv[1], "--selftest") == 0)
         return term_selftest() == 0 ? 0 : 1;
 
     memset(&app, 0, sizeof app);
     app.running = true;
-    app.panel_opacity = 0.80f;
     app.cursor_lit = true;
+    settings_load(&app.settings);
 
+    /* Command-line arguments win over the file: the file is what the app
+     * remembers, the arguments are what the user asked for this once. */
     for (index = 1; index < argc; index++) {
         float size;
 
@@ -1355,8 +1884,12 @@ int main(int argc, char **argv)
         else if (!requested_font)
             requested_font = argv[index];
     }
+    if (point_size <= 0.0f)
+        point_size = app.settings.point_size;
+    app.panel_opacity = app.settings.panel_opacity;
+    app.backdrop = (WindowBackdrop)app.settings.backdrop;
 
-    font_path = pick_font(requested_font);
+    font_path = pick_font(requested_font, app.settings.font);
     if (!font_path && !embedded_font_available()) {
         fprintf(stderr, "usage: %s [--selftest] [path\\to\\font.ttf] "
                 "[point-size]\n", argv[0]);
@@ -1417,19 +1950,26 @@ int main(int argc, char **argv)
     /* Replies from the parser belong in the program's input, like every
      * other keystroke. */
     term_set_writer(&app.term, send_to_shell, &app);
+    term_set_clipboard_write(&app.term, handle_clipboard_write, &app);
 
     window_sync_chrome(app.window, app.backdrop, app.panel.radius);
     fit_grid(&app);
 
     /* The grid is final now, so the console starts at the right size. */
     {
-        wchar_t *command = pty_default_shell();
+        wchar_t *command = pty_shell_for((int)app.settings.shell);
         char error[256];
 
         if (!command) {
-            show_message(&app,
-                         "\x1b[31mno shell found: pwsh.exe, powershell.exe "
-                         "and cmd.exe are all missing\x1b[0m\r\n");
+            if (app.settings.shell == SETTINGS_SHELL_AUTO)
+                show_message(&app,
+                             "\x1b[31mno shell found: pwsh.exe, "
+                             "powershell.exe and cmd.exe are all missing"
+                             "\x1b[0m\r\n");
+            else
+                show_message(&app,
+                             "\x1b[31mthe shell named in the settings is not "
+                             "installed\x1b[0m\r\n");
         } else {
             app.pty = pty_spawn(command, (uint16_t)app.columns,
                                 (uint16_t)app.rows, on_pty_output, &app,
@@ -1463,6 +2003,8 @@ int main(int argc, char **argv)
                     app.cursor_lit = !app.cursor_lit;
                     if (app.cursor_blinks)
                         app.needs_redraw = true;
+                } else if (event.user.code == 3) {
+                    autoscroll_tick(&app);
                 }
                 break;
             case SDL_EVENT_KEY_DOWN:
@@ -1470,6 +2012,9 @@ int main(int argc, char **argv)
                 break;
             case SDL_EVENT_TEXT_INPUT:
                 handle_text_input(&app, &event.text);
+                break;
+            case SDL_EVENT_TEXT_EDITING:
+                handle_text_editing(&app, &event.edit);
                 break;
             case SDL_EVENT_MOUSE_MOTION:
                 handle_mouse_motion(&app, &event.motion);
@@ -1482,6 +2027,10 @@ int main(int argc, char **argv)
                 break;
             case SDL_EVENT_MOUSE_WHEEL:
                 handle_mouse_wheel(&app, &event.wheel);
+                break;
+            case SDL_EVENT_WINDOW_MOUSE_LEAVE:
+                reset_mouse_shape(&app);
+                autoscroll_start(&app, 0);
                 break;
             case SDL_EVENT_WINDOW_FOCUS_GAINED:
                 handle_focus(&app, true);
@@ -1517,10 +2066,16 @@ int main(int argc, char **argv)
 
 cleanup:
     /* Every step is safe on a partly initialised app, so a failure in the
-     * middle of setup leaks nothing either. Close the pty before the
-     * terminal: the terminal's write callback goes through it. */
+     * middle of setup leaks nothing either. What the user changed while the
+     * window was open (opacity, backdrop) is remembered for next time. */
+    if (app.window)
+        settings_save(&app.settings);
     if (app.blink_timer)
         SDL_RemoveTimer(app.blink_timer);
+    if (app.autoscroll_timer)
+        SDL_RemoveTimer(app.autoscroll_timer);
+    if (app.cursor)
+        SDL_DestroyCursor(app.cursor);
     pty_close(app.pty);
     term_free(&app.term);
     panel_free(&app.panel);

@@ -35,6 +35,12 @@ typedef void (*PtyNotifyFn)(void *userdata);
  * none of them could be found. Windows only; NULL elsewhere. */
 wchar_t *pty_default_shell(void);
 
+/* Which shell to start when the user said. `which` is a SettingsShell
+ * value (0 auto, 1 pwsh, 2 powershell, 3 cmd), because the only reason to
+ * name a shell is the settings file. A named shell that is not installed
+ * returns NULL rather than silently starting another one. */
+wchar_t *pty_shell_for(int which);
+
 /* Start command_line (a complete, quoted command line, as
  * CreateProcessW wants it) behind a pseudoconsole of columns x rows. The
  * child inherits this process's environment and working directory.

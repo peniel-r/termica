@@ -47,9 +47,19 @@ if (-not (Test-Path $exe)) {
     throw "$exe not found - run 'pwsh -File ./build.ps1' first."
 }
 
+# termica.exe is a GUI-subsystem executable, so PowerShell returns from it
+# immediately. Start it without a new window (it keeps this console for the
+# startup diagnostics) and wait for it here, so this script still behaves
+# like before: it returns when the window closes, with the app's exit code.
+function Start-Termica([string[]] $app_args) {
+    $process = Start-Process -FilePath $exe -ArgumentList $app_args `
+                             -NoNewWindow -PassThru
+    $process.WaitForExit()
+    return $process.ExitCode
+}
+
 if ($SelfTest) {
-    & $exe --selftest
-    exit $LASTEXITCODE
+    exit (Start-Termica @('--selftest'))
 }
 
 if ($Font) {
@@ -60,4 +70,5 @@ if ($Font) {
 Write-Host "size: $Size" -ForegroundColor DarkGray
 Write-Host ""
 
-if ($Font) { & $exe $Font $Size } else { & $exe $Size }
+if ($Font) { exit (Start-Termica @($Font, $Size)) }
+exit (Start-Termica @($Size))
