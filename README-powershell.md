@@ -24,7 +24,7 @@ pwsh -File ./run.ps1               # launch it
 |---|---|---|---|
 | CMake | `cmake` | `Kitware.CMake` | the build system driver |
 | Ninja | `ninja` | `Ninja-build.Ninja` | the build backend |
-| git | `git` | `Git.Git` | `FetchContent` clones SDL3 with it |
+| git | `git` | `Git.Git` | `FetchContent` clones SDL3 and tomlc17 with it |
 | **llvm-mingw** | `mingw-mstorsjo-llvm-ucrt` | *(no official id; grab the release zip from github.com/mstorsjo/llvm-mingw)* | **clang 23 + lld + MinGW-w64 headers + llvm-windres + llvm-ar** |
 | Zig | `zig` | `zig.zig` | only needed later, for `libghostty-vt` |
 
@@ -86,8 +86,9 @@ cmake --preset llvm-mingw
 cmake --build --preset llvm-mingw
 ```
 
-The first configure downloads and builds SDL3, SDL3_ttf, FreeType and
-HarfBuzz, so expect several minutes. Rebuilds after that take seconds.
+The first configure downloads and builds SDL3, SDL3_ttf, FreeType, HarfBuzz
+and the amalgamated tomlc17 parser, so expect several minutes. Rebuilds after
+that take seconds.
 
 `build.ps1` merges the persisted machine/user PATH into the session first, so
 a Scoop package installed a moment ago is picked up without restarting the
@@ -158,8 +159,8 @@ So `termica.exe` runs anywhere on Windows, with no toolchain installed.
   third-party build warnings (HarfBuzz emits a lot of them) would abort a
   script that sets `$ErrorActionPreference = 'Stop'`. `build.ps1` sets
   `$PSNativeCommandUseErrorActionPreference = $false` for that reason.
-* **`git` must be reachable** - `FetchContent` clones SDL3 and SDL3_ttf with
-  it.
+* **`git` must be reachable** - `FetchContent` clones SDL3, SDL3_ttf and
+  tomlc17 with it.
 * **SDL3 compiles C++ on Windows**, so a C++ compiler is required even though
   the code is strict C99. The presets set `CMAKE_CXX_COMPILER`.
 * **`SDL_RENDER_DRIVER`**: force a renderer with

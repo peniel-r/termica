@@ -32,7 +32,7 @@
  *   geometry.c  the squircle corner curve
  *   window.c    the SDL window and the Windows 11 chrome
  *
- * Usage:  termica [--selftest] [path\to\font.ttf] [point-size]
+ * Usage:  termica [--selftest] [font path or family name] [point-size]
  * Keys:   typing, arrows, PgUp/PgDn, Enter, Backspace, Esc and every Alt+*
  *         go to the shell; Ctrl+V pastes, Ctrl+Shift+C copies the selection,
  *         Ctrl+Shift+Q quits, wheel / Shift+wheel / Ctrl+Shift+Up-Down-Home-End
@@ -51,6 +51,7 @@
 
 #include "console.h"
 #include "embed.h"
+#include "font_lookup.h"
 #include "glyph.h"
 #include "panel.h"
 #include "pty.h"
@@ -1855,6 +1856,7 @@ static void handle_key_down(App *app, const SDL_KeyboardEvent *event)
 int main(int argc, char **argv)
 {
     App app;
+    char resolved_font[512];
     const char *font_path;
     const char *font_label;
     const char *requested_font = NULL;
@@ -1890,9 +1892,13 @@ int main(int argc, char **argv)
     app.backdrop = (WindowBackdrop)app.settings.backdrop;
 
     font_path = pick_font(requested_font, app.settings.font);
+    /* A settings file may name the installed family instead of a file. */
+    if (font_path &&
+        font_lookup_path(font_path, resolved_font, sizeof resolved_font))
+        font_path = resolved_font;
     if (!font_path && !embedded_font_available()) {
-        fprintf(stderr, "usage: %s [--selftest] [path\\to\\font.ttf] "
-                "[point-size]\n", argv[0]);
+        fprintf(stderr, "usage: %s [--selftest] "
+                "[font-path-or-family] [point-size]\n", argv[0]);
         return 1;
     }
     font_label = font_path ? font_path : BUILT_IN_FONT;

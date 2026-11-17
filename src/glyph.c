@@ -130,20 +130,10 @@ static void draw_texture(Glyphs *glyphs, SDL_Texture *texture, float x, float y,
     SDL_RenderTexture(glyphs->renderer, texture, NULL, &destination);
 }
 
-/* Look up a bold or italic face next to the regular one: strip the
- * extension and try the known spellings. */
-static TTF_Font *open_variant(const char *font_path, float point_size,
-                              const char *const *suffixes)
+static TTF_Font *try_variant_suffixes(const char *base_path, float point_size,
+                                     const char *const *suffixes)
 {
-    char base_path[512];
-    const char *extension;
     size_t suffix;
-
-    extension = strrchr(font_path, '.');
-    if (!extension || (size_t)(extension - font_path) >= sizeof base_path)
-        return NULL;
-    memcpy(base_path, font_path, (size_t)(extension - font_path));
-    base_path[extension - font_path] = '\0';
 
     for (suffix = 0; suffixes[suffix]; suffix++) {
         char candidate_path[600];
@@ -159,6 +149,37 @@ static TTF_Font *open_variant(const char *font_path, float point_size,
         font = TTF_OpenFont(candidate_path, point_size);
         if (font)
             return font;
+    }
+    return NULL;
+}
+
+/* Look up a bold or italic face next to the regular one: strip the
+ * extension and try the known spellings. Nerd Fonts name the regular face
+ * "...-Regular", so retry once without that suffix to find "...-Bold". */
+static TTF_Font *open_variant(const char *font_path, float point_size,
+                              const char *const *suffixes)
+{
+    char base_path[512];
+    const char *extension;
+    size_t base_length;
+    TTF_Font *font;
+
+    extension = strrchr(font_path, '.');
+    if (!extension || (size_t)(extension - font_path) >= sizeof base_path)
+        return NULL;
+    memcpy(base_path, font_path, (size_t)(extension - font_path));
+    base_path[extension - font_path] = '\0';
+
+    font = try_variant_suffixes(base_path, point_size, suffixes);
+    if (font)
+        return font;
+
+    base_length = strlen(base_path);
+    if (base_length >= 8 &&
+        (SDL_strcasecmp(base_path + base_length - 8, "-Regular") == 0 ||
+         SDL_strcasecmp(base_path + base_length - 8, " Regular") == 0)) {
+        base_path[base_length - 8] = '\0';
+        return try_variant_suffixes(base_path, point_size, suffixes);
     }
     return NULL;
 }

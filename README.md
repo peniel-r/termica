@@ -1,4 +1,4 @@
-# termica: milestone 5
+# termica: milestone 6
 
 A tiny SDL3 terminal that answers four questions:
 
@@ -20,6 +20,13 @@ copy-on-select; a pointer shape the program can set; uncommitted IME text drawn 
 cursor; and a drag that keeps pulling history in when you hold it past an edge. The first
 two are tested in `--selftest`; the rest need a real keyboard, mouse or input method and are
 listed as manual checks.
+
+Milestone 6 moved that settings file to TOML: `termica.toml` with `[font]`, `[window]` and
+`[terminal]` sections, parsed by [tomlc17](https://github.com/cktan/tomlc17) and rewritten
+in a canonical form on exit. Typed values are checked for type and range, and a syntax error
+is reported with its line instead of silently keeping half a file. The old `termica.conf` is
+no longer read. `font.path` now also accepts the installed family name, resolved through the
+Windows font registry, so a font can be named the way its installer shows it.
 
 What it draws: a borderless window with a translucent dark panel, opaque text on a fixed
 cell grid, a block cursor and a status line. Text goes through a one-texture-per-codepoint
@@ -155,25 +162,81 @@ Other presets: `llvm-mingw-debug`, and `gcc` for any gcc already on `PATH` (Scoo
 
 ## 4. Settings
 
-`%APPDATA%\termica\termica.conf` (elsewhere
-`$XDG_CONFIG_HOME/termica/termica.conf` or `~/.config/termica/termica.conf`),
-plain `key = value` lines, `#` comments, no parser dependency. The app writes
-it on exit with the values it was using and reads it at startup; anything on
-the command line wins over the file for that run.
+`%APPDATA%\termica\termica.toml` (elsewhere
+`$XDG_CONFIG_HOME/termica/termica.toml` or
+`~/.config/termica/termica.toml`), a TOML file parsed with
+[tomlc17](https://github.com/cktan/tomlc17). The app writes it on exit with
+the values it was using and reads it at startup; anything on the command line
+wins over the file for that run.
 
-| Key | Values | Default |
-|---|---|---|
-| `font` | path to a `.ttf`, or empty | empty (the built-in Maple Mono NF) |
-| `size` | point size | `16` |
-| `opacity` | `0`..`1` | `0.80` |
-| `backdrop` | `panel`, `mica`, `mica_alt`, `acrylic` | `panel` |
-| `copy_on_select` | `true`/`false` | `false` |
-| `shell` | `auto`, `pwsh`, `powershell`, `cmd` | `auto` |
-| `osc52` | `ask`, `allow`, `deny` | `ask` |
+```toml
+[font]
+path = ""                    # empty = the built-in Maple Mono NF
+size = 16.0
 
-Keys fold case and separators, so `CopyOnSelect`, `copy-on-select` and
-`copy_on_select` are the same key. Bad values are refused and the previous
-value stays; unknown keys are ignored.
+[window]
+opacity = 0.8                # 0..1
+backdrop = "panel"           # panel, mica, mica_alt, acrylic
+
+[terminal]
+copy_on_select = false
+shell = "auto"               # auto, pwsh, powershell, cmd
+osc52 = "ask"                # ask, allow, deny
+```
+
+| Key | TOML type | Values | Default |
+|---|---|---|---|
+| `font.path` | string | path to a `.ttf`, an installed family name, or `""` | `""` (the built-in Maple Mono NF) |
+| `font.size` | float or integer | point size, greater than `0`, up to `200` | `16.0` |
+| `window.opacity` | float or integer | `0`..`1` | `0.8` |
+| `window.backdrop` | string | `panel`, `mica`, `mica_alt`, `acrylic` | `"panel"` |
+| `terminal.copy_on_select` | boolean | `true`/`false` | `false` |
+| `terminal.shell` | string | `auto`, `pwsh`, `powershell`, `cmd` | `"auto"` |
+| `terminal.osc52` | string | `ask`, `allow`, `deny` | `"ask"` |
+
+Section and key names fold case and separators, so `[Font]` with
+`Path`/`Size`, or `CopyOnSelect`, name the same settings as the canonical
+spelling. Values must have the type in the table: `size = "16"` and
+`copy_on_select = "yes"` are refused, not converted. Bad values leave the
+previous value alone; unknown keys and tables are ignored.
+
+TOML strings need their escapes. For a Windows path either escape the
+backslashes:
+
+```toml
+[font]
+path = "C:\\Windows\\Fonts\\consola.ttf"
+```
+
+or use a TOML literal string, where backslashes are exactly what they look
+like:
+
+```toml
+[font]
+path = 'C:\Windows\Fonts\consola.ttf'
+```
+
+A family name works too, and is easier to keep across updates:
+
+```toml
+[font]
+path = "Inconsolata Nerd Font Propo"
+size = 18.0
+```
+
+On Windows the name is looked up in the font registry (per-user fonts first,
+then machine-wide), matched against the display names with the `(TrueType)` /
+`(OpenType)` suffix removed, and the regular face wins over bold or italic.
+Relative file names in the registry are resolved against `%WINDIR%\Fonts` and
+`%LOCALAPPDATA%\Microsoft\Windows\Fonts`. If the name is not found, the
+built-in font is used and the `font:` line on stdout says so.
+
+A TOML syntax error rejects the whole document, so the app starts with its
+defaults and prints the parser's message and line number on stderr when it
+was started from a console. The file is rewritten on exit in the canonical
+form above, so hand-written comments and unknown keys are not preserved. The
+old `termica.conf` is not read any more. tomlc17 is MIT-licensed; see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 `shell` names a program rather than a path: if the named shell is not
 installed the terminal says so on screen instead of quietly starting another
@@ -203,13 +266,15 @@ depends on: resolved colors, bold/underline, the cursor position, erase, wide ch
 the OSC window title; the history and pointer half (scrolling by rows, to the top and to the
 bottom, the scrollbar figures, cell / word / line / block selections, the copied text, mouse
 and focus encoders against a terminal that enabled the modes); the underline kinds (SGR 4,
-4:2, 4:3, 4:4, 4:5 must come out as single, double, curly, dotted and dashed); the settings
-parser, its bounds, its folding and a full format round trip; and the OSC 52 clipboard path
+4:2, 4:3, 4:4, 4:5 must come out as single, double, curly, dotted and dashed); the TOML
+settings parser (sections, typed values, bounds, key folding, string escaping and a full
+format round trip); the font-name resolver (an installed family resolves through the registry,
+an existing path is returned unchanged); and the OSC 52 clipboard path
 (decoded payload, multi-line payload, clear request, denial, and no handler installed).
 The last checks start a real ConPTY: `cmd.exe /c "echo termica-pty-ok"` and a non-ASCII echo
 have to come back through the pipes as UTF-8 with exit code 0, and a `powershell.exe` child
 that writes an OSC 52 request has to reach the app's clipboard callback decoded. That is
-92 checks; the exit code is the number of failures.
+124 checks; the exit code is the number of failures.
 
 Everything in that list runs without a window and without touching the keyboard or mouse of
 whoever is logged in, which is deliberate: the features that can only be exercised by a real
@@ -313,9 +378,12 @@ half way, so an early `return` cannot leak either.
     appears. Started from a terminal, the `renderer:` / `font:` lines still land inline.
 19. **Settings survive a restart.** Change opacity (`Ctrl+Shift+=`) or backdrop
     (`Ctrl+Shift+B`), close the window, start again: the values come back from
-    `%APPDATA%\termica\termica.conf`, and the file is plain enough to edit by hand.
-    Verified: `shell = cmd` starts `cmd.exe` and nothing else (checked in the process
+    `%APPDATA%\termica\termica.toml`, and the TOML file is plain enough to edit by hand.
+    Verified: `shell = "cmd"` starts `cmd.exe` and nothing else (checked in the process
     tree), and the file after exit holds the values the session was using.
+    A `font.path` that is an installed family name (for example
+    `"Inconsolata Nerd Font Propo"`) resolves to that family's regular file; the `font:`
+    line names the `.ttf` it opened and the cell size reflects `font.size`.
 20. **A program can ask for the clipboard.** The OSC 52 path is covered by `--selftest`,
     including the real case: a `powershell.exe` child under ConPTY writes
     `\e]52;c;<base64>\a` and the app's handler receives it decoded. Try the `ask`
@@ -421,7 +489,8 @@ The app itself only does the parts the library leaves to the embedder:
 | `src/pty.{h,c}` | ConPTY: pipes, the child process, the reader thread, resize, teardown |
 | `src/embed.{h,c}` | the Maple Mono NF bytes linked into the executable |
 | `src/console.{h,c}` | reclaiming the launching console, since the exe is GUI-subsystem |
-| `src/settings.{h,c}` | the `key = value` config file: read at startup, written on exit |
+| `src/settings.{h,c}` | the `termica.toml` settings file (TOML via tomlc17): read at startup, written on exit |
+| `src/font_lookup.{h,c}` | a font path or installed family name -> the font file to open |
 | `src/fonts.rc.in` | the Windows resource script that carries those bytes |
 | `src/glyph.{h,c}` | fonts, the glyph cache, drawing a cell's text (bold/italic faces) |
 | `src/style.{h,c}` | a terminal cell style -> colors and decorations for the renderer |
@@ -471,10 +540,11 @@ easy to reason about on their own.
   the app stopped clearing it), `fzf` taking the pointer when it asks for it, five
   distinguishable underline kinds, no console window when started by double-click, and closing
   the window while the shell runs leaves no `conhost.exe` or shell behind.
-  `--selftest` runs 92 checks, all passing: the ConPTY round trips, the settings parser and
-  its format round trip, and the OSC 52 path both from a literal byte string and from a real
-  `powershell.exe` child under ConPTY. Settings are read at startup and written on exit -
-  `shell = cmd` was confirmed by inspecting the process tree, and the file after exit holds
+  `--selftest` runs 124 checks, all passing: the ConPTY round trips, the TOML settings parser
+  and its format round trip, installed font family names resolving through the registry, and
+  the OSC 52 path both from a literal byte string and from a real `powershell.exe` child under
+  ConPTY. Settings are read at startup and written on exit -
+  `shell = "cmd"` was confirmed by inspecting the process tree, and the file after exit holds
   the session's values. No warnings from the project's own sources under
   `-Wall -Wextra -pedantic`.
 - Not machine-verified, because they need a real keyboard, mouse or input method:

@@ -1,10 +1,25 @@
 /*
  * termica - the user's settings. See settings.h.
  *
- * The format is deliberately the boring one: `key = value` per line, `#`
- * starts a comment, unknown keys are ignored. That keeps the file editable
- * by hand, needs no parser library, and lets a half-written line cost at
- * most one setting.
+ * The file is TOML, parsed by tomlc17:
+ *
+ *   [font]
+ *   path = 'C:\Windows\Fonts\consola.ttf'
+ *   size = 16.0
+ *
+ *   [window]
+ *   opacity = 0.8
+ *   backdrop = "panel"
+ *
+ *   [terminal]
+ *   copy_on_select = false
+ *   shell = "auto"
+ *   osc52 = "ask"
+ *
+ * Unknown keys, wrong types and out-of-range values are ignored one at a
+ * time. A syntax error rejects the whole document, which is what TOML
+ * parsers do; the app then keeps its defaults and says why on stderr. The
+ * file is rewritten in a canonical form on exit, so comments are not kept.
  */
 
 #include "settings.h"
@@ -13,14 +28,21 @@
 #include <SDL3/SDL_iostream.h>
 #include <SDL3/SDL_stdinc.h>
 
+#include "tomlc17.h"
+
+#include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
 #define SETTINGS_APP_DIR "termica"
-#define SETTINGS_FILE_NAME "termica.conf"
+#define SETTINGS_FILE_NAME "termica.toml"
 
 /* Longest file we are willing to read; the real one is a dozen lines. */
-#define SETTINGS_MAX_BYTES 8192
+#define SETTINGS_MAX_BYTES 65536
+
+/* Room for the formatted file, including an escaped font path. */
+#define SETTINGS_FORMAT_BYTES 4096
 
 void settings_default(Settings *settings)
 {
@@ -33,51 +55,20 @@ void settings_default(Settings *settings)
     settings->osc52 = SETTINGS_OSC52_ASK;
 }
 
-static void trim(char *text)
-{
-    size_t length;
-    char *start = text;
-
-    while (*start == ' ' || *start == '\t')
-        start++;
-    if (start != text)
-        memmove(text, start, strlen(start) + 1);
-    length = strlen(text);
-    while (length > 0 && (text[length - 1] == ' ' ||
-                          text[length - 1] == '\t' ||
-                          text[length - 1] == '\r' ||
-                          text[length - 1] == '\n'))
-        text[--length] = '\0';
-}
-
-static bool bool_value(const char *value, bool *out)
-{
-    if (strcmp(value, "true") == 0 || strcmp(value, "1") == 0 ||
-        strcmp(value, "yes") == 0) {
-        *out = true;
-        return true;
-    }
-    if (strcmp(value, "false") == 0 || strcmp(value, "0") == 0 ||
-        strcmp(value, "no") == 0) {
-        *out = false;
-        return true;
-    }
-    return false;
-}
-
+/* `-` and `_` are the same separator, and case does not matter:
+ * CopyOnSelect, copy-on-select and copy_on_select all name one key. */
 static void fold_key(const char *text, char *out, size_t capacity)
 {
     size_t read = 0;
     size_t written = 0;
 
+    if (capacity == 0)
+        return;
     for (; text[read] && written + 1 < capacity; read++) {
         char c = text[read];
 
         if (c >= 'A' && c <= 'Z')
             c = (char)(c + 32);
-        /* `-` and `_` are the same separator, and a name written without
-         * any separator at all means the same thing: Copy-On-Select,
-         * copy_on_select and copyonselect all name one key. */
         if (c == '-' || c == '_')
             continue;
         out[written++] = c;
@@ -85,103 +76,252 @@ static void fold_key(const char *text, char *out, size_t capacity)
     out[written] = '\0';
 }
 
-static bool settings_value(const char *key, const char *name)
+static bool key_is(const char *key, const char *name)
 {
-    char folded_key[40];
-    char folded_name[40];
+    char folded_key[64];
+    char folded_name[64];
 
     fold_key(key, folded_key, sizeof folded_key);
     fold_key(name, folded_name, sizeof folded_name);
     return strcmp(folded_key, folded_name) == 0;
 }
 
-bool settings_parse_line(Settings *settings, const char *raw_line)
+static bool number_value(toml_datum_t value, double *out)
 {
-    char line[600];
-    char *equals;
-    char *key;
-    char *value;
-    float number;
-
-    if (!settings || !raw_line)
-        return false;
-    if (raw_line[0] == '#' || raw_line[0] == '\0')
-        return false;
-    if (strlen(raw_line) >= sizeof line)
-        return false;
-    strcpy(line, raw_line);
-
-    equals = strchr(line, '=');
-    if (!equals)
-        return false;
-    *equals = '\0';
-    key = line;
-    value = equals + 1;
-    trim(key);
-    trim(value);
-    if (key[0] == '\0')
-        return false;
-
-    if (settings_value(key, "font")) {
-        if (strlen(value) >= sizeof settings->font)
-            return false;
-        strcpy(settings->font, value);
+    if (value.type == TOML_FP64) {
+        *out = value.u.fp64;
         return true;
     }
-    if (settings_value(key, "size")) {
-        number = (float)SDL_atof(value);
-        if (number <= 0.0f || number > 200.0f)
-            return false;
-        settings->point_size = number;
-        return true;
-    }
-    if (settings_value(key, "opacity")) {
-        number = (float)SDL_atof(value);
-        if (number < 0.0f || number > 1.0f)
-            return false;
-        settings->panel_opacity = number;
-        return true;
-    }
-    if (settings_value(key, "backdrop")) {
-        if (strcmp(value, "panel") == 0)
-            settings->backdrop = 0;
-        else if (strcmp(value, "mica") == 0)
-            settings->backdrop = 1;
-        else if (strcmp(value, "mica_alt") == 0 || strcmp(value, "mica-alt") == 0)
-            settings->backdrop = 2;
-        else if (strcmp(value, "acrylic") == 0)
-            settings->backdrop = 3;
-        else
-            return false;
-        return true;
-    }
-    if (settings_value(key, "copy_on_select"))
-        return bool_value(value, &settings->copy_on_select);
-    if (settings_value(key, "shell")) {
-        if (strcmp(value, "auto") == 0)
-            settings->shell = SETTINGS_SHELL_AUTO;
-        else if (strcmp(value, "pwsh") == 0)
-            settings->shell = SETTINGS_SHELL_PWSH;
-        else if (strcmp(value, "powershell") == 0)
-            settings->shell = SETTINGS_SHELL_WINDOWS_POWERSHELL;
-        else if (strcmp(value, "cmd") == 0)
-            settings->shell = SETTINGS_SHELL_CMD;
-        else
-            return false;
-        return true;
-    }
-    if (settings_value(key, "osc52")) {
-        if (strcmp(value, "ask") == 0)
-            settings->osc52 = SETTINGS_OSC52_ASK;
-        else if (strcmp(value, "allow") == 0)
-            settings->osc52 = SETTINGS_OSC52_ALLOW;
-        else if (strcmp(value, "deny") == 0)
-            settings->osc52 = SETTINGS_OSC52_DENY;
-        else
-            return false;
+    if (value.type == TOML_INT64) {
+        *out = (double)value.u.int64;
         return true;
     }
     return false;
+}
+
+static bool apply_font(Settings *settings, toml_datum_t table)
+{
+    bool changed = false;
+    int index;
+
+    for (index = 0; index < table.u.tab.size; index++) {
+        const char *key = table.u.tab.key[index];
+        toml_datum_t value = table.u.tab.value[index];
+
+        if (key_is(key, "path") && value.type == TOML_STRING) {
+            int length = value.u.str.len;
+
+            if (length >= 0 && (size_t)length < sizeof settings->font &&
+                !memchr(value.u.str.ptr, '\0', (size_t)length)) {
+                memcpy(settings->font, value.u.str.ptr, (size_t)length);
+                settings->font[length] = '\0';
+                changed = true;
+            }
+        } else if (key_is(key, "size")) {
+            double number;
+
+            if (number_value(value, &number) && isfinite(number) &&
+                number > 0.0 && number <= 200.0) {
+                settings->point_size = (float)number;
+                changed = true;
+            }
+        }
+    }
+    return changed;
+}
+
+static bool apply_window(Settings *settings, toml_datum_t table)
+{
+    bool changed = false;
+    int index;
+
+    for (index = 0; index < table.u.tab.size; index++) {
+        const char *key = table.u.tab.key[index];
+        toml_datum_t value = table.u.tab.value[index];
+
+        if (key_is(key, "opacity")) {
+            double number;
+
+            if (number_value(value, &number) && isfinite(number) &&
+                number >= 0.0 && number <= 1.0) {
+                settings->panel_opacity = (float)number;
+                changed = true;
+            }
+        } else if (key_is(key, "backdrop") && value.type == TOML_STRING) {
+            if (strcmp(value.u.s, "panel") == 0) {
+                settings->backdrop = 0;
+                changed = true;
+            } else if (strcmp(value.u.s, "mica") == 0) {
+                settings->backdrop = 1;
+                changed = true;
+            } else if (strcmp(value.u.s, "mica_alt") == 0 ||
+                       strcmp(value.u.s, "mica-alt") == 0) {
+                settings->backdrop = 2;
+                changed = true;
+            } else if (strcmp(value.u.s, "acrylic") == 0) {
+                settings->backdrop = 3;
+                changed = true;
+            }
+        }
+    }
+    return changed;
+}
+
+static bool apply_terminal(Settings *settings, toml_datum_t table)
+{
+    bool changed = false;
+    int index;
+
+    for (index = 0; index < table.u.tab.size; index++) {
+        const char *key = table.u.tab.key[index];
+        toml_datum_t value = table.u.tab.value[index];
+
+        if (key_is(key, "copy_on_select") && value.type == TOML_BOOLEAN) {
+            settings->copy_on_select = value.u.boolean;
+            changed = true;
+        } else if (key_is(key, "shell") && value.type == TOML_STRING) {
+            if (strcmp(value.u.s, "auto") == 0) {
+                settings->shell = SETTINGS_SHELL_AUTO;
+                changed = true;
+            } else if (strcmp(value.u.s, "pwsh") == 0) {
+                settings->shell = SETTINGS_SHELL_PWSH;
+                changed = true;
+            } else if (strcmp(value.u.s, "powershell") == 0) {
+                settings->shell = SETTINGS_SHELL_WINDOWS_POWERSHELL;
+                changed = true;
+            } else if (strcmp(value.u.s, "cmd") == 0) {
+                settings->shell = SETTINGS_SHELL_CMD;
+                changed = true;
+            }
+        } else if (key_is(key, "osc52") && value.type == TOML_STRING) {
+            if (strcmp(value.u.s, "ask") == 0) {
+                settings->osc52 = SETTINGS_OSC52_ASK;
+                changed = true;
+            } else if (strcmp(value.u.s, "allow") == 0) {
+                settings->osc52 = SETTINGS_OSC52_ALLOW;
+                changed = true;
+            } else if (strcmp(value.u.s, "deny") == 0) {
+                settings->osc52 = SETTINGS_OSC52_DENY;
+                changed = true;
+            }
+        }
+    }
+    return changed;
+}
+
+static bool apply_table(Settings *settings, const char *name,
+                        toml_datum_t table)
+{
+    if (table.type != TOML_TABLE)
+        return false;
+    if (key_is(name, "font"))
+        return apply_font(settings, table);
+    if (key_is(name, "window"))
+        return apply_window(settings, table);
+    if (key_is(name, "terminal"))
+        return apply_terminal(settings, table);
+    return false;
+}
+
+static bool parse_toml(Settings *settings, const char *text, size_t length,
+                       char *error, size_t error_capacity)
+{
+    toml_result_t document;
+    bool changed = false;
+    int index;
+
+    if (error && error_capacity)
+        error[0] = '\0';
+    if (!settings || !text || length > (size_t)INT_MAX)
+        return false;
+
+    document = toml_parse(text, (int)length);
+    if (!document.ok) {
+        if (error && error_capacity)
+            snprintf(error, error_capacity, "%s", document.errmsg);
+        toml_free(document);
+        return false;
+    }
+    if (document.toptab.type == TOML_TABLE) {
+        for (index = 0; index < document.toptab.u.tab.size; index++) {
+            if (apply_table(settings, document.toptab.u.tab.key[index],
+                            document.toptab.u.tab.value[index]))
+                changed = true;
+        }
+    }
+    toml_free(document);
+    return changed;
+}
+
+bool settings_parse_toml(Settings *settings, const char *text, size_t length)
+{
+    return parse_toml(settings, text, length, NULL, 0);
+}
+
+static void append_piece(char *out, size_t capacity, size_t *used,
+                         const char *piece, size_t length)
+{
+    if (*used >= capacity)
+        return;
+    if (length > capacity - 1 - *used)
+        length = capacity - 1 - *used;
+    memcpy(out + *used, piece, length);
+    *used += length;
+    out[*used] = '\0';
+}
+
+static void escape_toml_string(const char *text, char *out, size_t capacity)
+{
+    size_t used = 0;
+
+    if (capacity == 0)
+        return;
+    out[0] = '\0';
+    while (*text) {
+        unsigned char c = (unsigned char)*text++;
+        const char *piece = NULL;
+        char escape[8];
+        char one[2];
+
+        switch (c) {
+        case '\\': piece = "\\\\"; break;
+        case '"':  piece = "\\\""; break;
+        case '\b': piece = "\\b"; break;
+        case '\t': piece = "\\t"; break;
+        case '\n': piece = "\\n"; break;
+        case '\f': piece = "\\f"; break;
+        case '\r': piece = "\\r"; break;
+        default:
+            if (c < 0x20 || c == 0x7f) {
+                snprintf(escape, sizeof escape, "\\u%04X", (unsigned)c);
+                piece = escape;
+            }
+            break;
+        }
+        if (!piece) {
+            one[0] = (char)c;
+            one[1] = '\0';
+            piece = one;
+        }
+        append_piece(out, capacity, &used, piece, strlen(piece));
+    }
+}
+
+static void format_float(double value, char *out, size_t capacity)
+{
+    size_t length;
+
+    if (capacity == 0)
+        return;
+    snprintf(out, capacity, "%g", value);
+    length = strlen(out);
+    if (strchr(out, '.') || strchr(out, 'e') || strchr(out, 'E'))
+        return;
+    if (length + 2 >= capacity)
+        return;
+    out[length++] = '.';
+    out[length++] = '0';
+    out[length] = '\0';
 }
 
 void settings_format(const Settings *settings, char *out, size_t capacity)
@@ -189,6 +329,15 @@ void settings_format(const Settings *settings, char *out, size_t capacity)
     const char *shell = "auto";
     const char *osc52 = "ask";
     const char *backdrop = "panel";
+    char font[3072];
+    char size[32];
+    char opacity[32];
+
+    if (!out || capacity == 0)
+        return;
+    out[0] = '\0';
+    if (!settings)
+        return;
 
     switch (settings->shell) {
     case SETTINGS_SHELL_PWSH: shell = "pwsh"; break;
@@ -208,113 +357,157 @@ void settings_format(const Settings *settings, char *out, size_t capacity)
     default: break;
     }
 
+    escape_toml_string(settings->font, font, sizeof font);
+    format_float((double)settings->point_size, size, sizeof size);
+    format_float((double)settings->panel_opacity, opacity, sizeof opacity);
+
     snprintf(out, capacity,
              "# termica settings\n"
-             "font = %s\n"
-             "size = %g\n"
-             "opacity = %g\n"
-             "backdrop = %s\n"
+             "\n"
+             "[font]\n"
+             "path = \"%s\"\n"
+             "size = %s\n"
+             "\n"
+             "[window]\n"
+             "opacity = %s\n"
+             "backdrop = \"%s\"\n"
+             "\n"
+             "[terminal]\n"
              "copy_on_select = %s\n"
-             "shell = %s\n"
-             "osc52 = %s\n",
-             settings->font, (double)settings->point_size,
-             (double)settings->panel_opacity, backdrop,
+             "shell = \"%s\"\n"
+             "osc52 = \"%s\"\n",
+             font, size, opacity, backdrop,
              settings->copy_on_select ? "true" : "false", shell, osc52);
 }
 
-bool settings_path(char *out, size_t capacity)
+static bool settings_path_named(const char *name, char *out, size_t capacity)
 {
     const char *base = NULL;
     char directory[512];
+    int written;
+
+    if (!out || capacity == 0)
+        return false;
 
 #ifdef _WIN32
     base = SDL_getenv("APPDATA");
     if (!base || !base[0])
         return false;
-    snprintf(directory, sizeof directory, "%s\\%s", base, SETTINGS_APP_DIR);
+    written = snprintf(directory, sizeof directory, "%s/%s", base,
+                       SETTINGS_APP_DIR);
 #else
     base = SDL_getenv("XDG_CONFIG_HOME");
-    if (base && base[0])
-        snprintf(directory, sizeof directory, "%s/%s", base, SETTINGS_APP_DIR);
-    else {
+    if (base && base[0]) {
+        written = snprintf(directory, sizeof directory, "%s/%s", base,
+                           SETTINGS_APP_DIR);
+    } else {
         const char *home = SDL_getenv("HOME");
 
         if (!home || !home[0])
             return false;
-        snprintf(directory, sizeof directory, "%s/.config/%s", home,
-                 SETTINGS_APP_DIR);
+        written = snprintf(directory, sizeof directory, "%s/.config/%s", home,
+                           SETTINGS_APP_DIR);
     }
 #endif
-
-    if (strlen(directory) + strlen(SETTINGS_FILE_NAME) + 2 > capacity)
+    if (written < 0 || (size_t)written >= sizeof directory)
         return false;
-    snprintf(out, capacity, "%s/%s", directory, SETTINGS_FILE_NAME);
+
+    if (strlen(directory) + strlen(name) + 2 > capacity)
+        return false;
+    snprintf(out, capacity, "%s/%s", directory, name);
     return true;
+}
+
+bool settings_path(char *out, size_t capacity)
+{
+    return settings_path_named(SETTINGS_FILE_NAME, out, capacity);
+}
+
+static void settings_create_directory(const char *path)
+{
+    char directory[512];
+    char *slash;
+    size_t length = strlen(path);
+
+    if (length >= sizeof directory)
+        return;
+    memcpy(directory, path, length + 1);
+    slash = strrchr(directory, '/');
+    if (!slash)
+        slash = strrchr(directory, '\\');
+    if (!slash)
+        return;
+    *slash = '\0';
+    SDL_CreateDirectory(directory);
 }
 
 bool settings_load(Settings *settings)
 {
     char path[512];
-    char directory[512];
+    char error[200];
+    SDL_PathInfo info;
     char *contents;
     size_t length = 0;
-    char *line;
-    char *next;
-    bool read_any = false;
+    bool parsed;
 
+    if (!settings)
+        return false;
     settings_default(settings);
     if (!settings_path(path, sizeof path))
         return false;
 
-    /* The directory has to exist before saving, and creating it here costs
-     * nothing when the file is already there. */
-    strncpy(directory, path, sizeof directory - 1);
-    directory[sizeof directory - 1] = '\0';
-    next = strrchr(directory, '/');
-    if (!next)
-        next = strrchr(directory, '\\');
-    if (next) {
-        *next = '\0';
-        if (!SDL_CreateDirectory(directory))
-            return false;
-    }
-
+    settings_create_directory(path);
+    if (!SDL_GetPathInfo(path, &info) || info.type != SDL_PATHTYPE_FILE)
+        return false;
     contents = (char *)SDL_LoadFile(path, &length);
     if (!contents)
         return false;
-    if (length > SETTINGS_MAX_BYTES)
-        length = SETTINGS_MAX_BYTES;
-    contents[length] = '\0';
-
-    line = contents;
-    while (line && *line) {
-        next = strchr(line, '\n');
-        if (next)
-            *next = '\0';
-        if (settings_parse_line(settings, line))
-            read_any = true;
-        line = next ? next + 1 : NULL;
+    if (length > SETTINGS_MAX_BYTES) {
+        SDL_free(contents);
+        fprintf(stderr, "settings: %s: file is too large\n", path);
+        return false;
     }
 
+    parsed = parse_toml(settings, contents, length, error, sizeof error);
     SDL_free(contents);
-    return read_any;
+    if (error[0])
+        fprintf(stderr, "settings: %s: %s\n", path, error);
+    return parsed;
 }
 
 bool settings_save(const Settings *settings)
 {
     char path[512];
-    char text[2048];
+    char temporary[520];
+    char text[SETTINGS_FORMAT_BYTES];
     SDL_IOStream *stream;
+    size_t length;
 
-    if (!settings_path(path, sizeof path))
+    if (!settings || !settings_path(path, sizeof path))
         return false;
+    settings_create_directory(path);
     settings_format(settings, text, sizeof text);
-    stream = SDL_IOFromFile(path, "w");
+    length = strlen(text);
+
+    if (snprintf(temporary, sizeof temporary, "%s.tmp", path) >=
+        (int)sizeof temporary)
+        return false;
+
+    stream = SDL_IOFromFile(temporary, "w");
     if (!stream)
         return false;
-    if (SDL_WriteIO(stream, text, strlen(text)) != strlen(text)) {
+    if (SDL_WriteIO(stream, text, length) != length) {
         SDL_CloseIO(stream);
+        SDL_RemovePath(temporary);
         return false;
     }
-    return SDL_CloseIO(stream);
+    if (!SDL_CloseIO(stream)) {
+        SDL_RemovePath(temporary);
+        return false;
+    }
+    if (!SDL_RenamePath(temporary, path)) {
+        SDL_RemovePath(temporary);
+        return false;
+    }
+    return true;
 }

@@ -5,7 +5,8 @@ the code is in `05a1af1` ("milestones 4 and 5"), `bddc1d2` (milestone 3),
 `2f4792e` (milestone 2) and `19c8523` (milestone 1), with the built-in font
 commits interleaved; documentation commits sit on top, so `origin/main` is
 ahead of the shas named here. Milestone 4 was reported as committed before it
-had been, so its work and milestone 5's share one commit.
+had been, so its work and milestone 5's share one commit. Milestone 6 (TOML
+settings) is implemented in the working tree; it is described at the end.
 Each section keeps the design that was written before the code, with the
 measured results folded into it, and closes with what actually verified -
 including, where a feature could not be verified without a real keyboard,
@@ -458,7 +459,8 @@ pointer shape honest, and show uncommitted IME text instead of nothing.
   round trip) and the OSC 52 path in two forms: a literal byte string through
   the parser, and a real `powershell.exe` child under ConPTY writing
   `OSC 52;c;<base64>` that must arrive decoded at the app's callback.
-  92 checks, none failing.
+  92 checks, none failing - the suite was that size at this milestone; it is
+  124 now, see milestone 6.
 - Settings were checked without simulating input: with `shell = cmd` the
   process tree shows `cmd.exe` as termica's child, and after closing the
   window the file holds exactly the values the session used.
@@ -483,3 +485,82 @@ pointer shape honest, and show uncommitted IME text instead of nothing.
 - A paste writer queue, so a multi-megabyte paste cannot block the UI thread.
 - CI: nothing about a workflow file can be verified from here, so it is
   deliberately not added rather than added blind.
+
+---
+
+# Milestone 6: TOML settings
+
+## Goal
+
+Replace the hand-written `key = value` parser with a TOML file parsed by
+[tomlc17](https://github.com/cktan/tomlc17), without changing the `Settings`
+struct or the `settings_load` / `settings_save` API that `main.c` uses.
+
+## Design
+
+- The file is `%APPDATA%\termica\termica.toml`; elsewhere
+  `$XDG_CONFIG_HOME/termica/termica.toml` or
+  `~/.config/termica/termica.toml`. The old `termica.conf` is not read.
+- Three sections keep the keys together: `[font]` (`path`, `size`),
+  `[window]` (`opacity`, `backdrop`) and `[terminal]` (`copy_on_select`,
+  `shell`, `osc52`). Section and key names still fold case and `-`/`_`.
+- Values are validated by their TOML type: strings for paths and enums,
+  booleans for `copy_on_select`, floats or integers for `size` and `opacity`.
+  Non-finite numbers are refused before the range check, so `nan` and `inf`
+  cannot pass. A wrong type or an out-of-range value leaves the previous value
+  alone; unknown keys and tables are ignored.
+- TOML syntax is all-or-nothing: a malformed document keeps the defaults and
+  prints the parser's message and line number on stderr. The old line parser
+  could apply the good lines around a bad one; the TOML contract cannot.
+- tomlc17 is fetched by CMake, pinned to release `R261116`, and built as its
+  own C17 static library target; termica's own code stays strict C99.
+- Files are read with `SDL_LoadFile` and `toml_parse`, not
+  `toml_parse_file_ex`, because the latter uses narrow `fopen` and would fail
+  on a non-ASCII Windows profile path.
+- Saves write a temporary file and `SDL_RenamePath` it over the real one, so
+  a failed write cannot truncate the settings. The output is canonical TOML;
+  comments and unknown keys are not preserved on exit.
+- `font.path` accepts either a file or an installed family name. The family
+  is resolved by `src/font_lookup.c` from
+  `HKCU\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts` and then the
+  `HKLM` equivalent: the `(TrueType)` / `(OpenType)` suffix is removed, the
+  name must be the whole family or the family followed by a known style word,
+  and `Regular` outranks the other styles. Registry values that are relative
+  file names are tried under `%WINDIR%\Fonts` and
+  `%LOCALAPPDATA%\Microsoft\Windows\Fonts`; `REG_EXPAND_SZ` values are
+  expanded first. A name that is already a readable file is returned
+  untouched. Adjacent bold/italic faces named `...-Regular.ttf` are found by
+  retrying without the `-Regular` suffix.
+
+## Verification
+
+- Build clean under `-Wall -Wextra -pedantic`; `--selftest` runs 124 checks,
+  none failing. The settings checks cover the three sections, typed values,
+  bounds (`0`, `900`, `nan`, `inf`, wrong types), folding of section and key
+  names, unknown keys, malformed documents, string escaping, an oversized
+  font path, and a full format round trip. The font lookup checks that an
+  unknown name is refused, that an installed family (`Consolas`) resolves,
+  and that a resolved path is returned unchanged.
+- A hand-edited `termica.toml` with `size = 13.5`, `opacity = 0.65`,
+  `backdrop = "acrylic"`, `shell = "cmd"`, `osc52 = "deny"` and a Windows
+  font path loaded and came back unchanged after the app exited. The process
+  tree showed `cmd.exe` (and `conhost.exe`) as termica's children, so the
+  section was read, not just written.
+- The saved file parsed back into the same values and wrote the font path as
+  an escaped basic string (`C:\\Windows\\Fonts\\consola.ttf`).
+- A deliberately malformed file (`[font` with no bracket) printed
+  `settings: ...: (line 1) missing right-bracket` on stderr and the app
+  started on its defaults.
+- The same load/save round trip worked with `APPDATA` pointed at a directory
+  whose name contained non-ASCII characters (`termica-settings-测试`), which
+  is the reason the file is read through SDL rather than `fopen`.
+- A `font.path` of `"Inconsolata Nerd Font Propo"` (installed per user, not
+  under `C:\Windows\Fonts`) opened
+  `C:\Users\i_rac\AppData\Local\Microsoft\Windows\Fonts\InconsolataNerdFontPropo-Regular.ttf`
+  at `size = 18`; the `font:` line named that file, and `bold: yes` showed
+  the adjacent `-Bold.ttf` was found. Before the resolver this name reached
+  `TTF_OpenFont` as if it were a path and silently fell back to the built-in
+  font.
+- Not verified: nothing in this milestone needs a keyboard, pointer or input
+  method, so every claim above is from the build, the self test or a real
+  process run.

@@ -12,6 +12,7 @@
 
 #include "term.h"
 #include "pty.h"
+#include "font_lookup.h"
 #include "settings.h"
 #include "style.h"
 
@@ -863,13 +864,28 @@ static void test_underline_styles(void)
     term_free(&term);
 }
 
-/* The settings file: parsing, the bounds that are refused, and a format
- * round trip. Nothing here needs a window or the disk. */
+/* The settings file: the TOML sections, their types and bounds, key folding,
+ * and a format round trip. Nothing here needs a window or the disk. */
 static void test_settings(void)
 {
     Settings settings;
     Settings again;
-    char text[2048];
+    char text[4096];
+    char long_font[700];
+    const char *document =
+        "# a comment\n"
+        "[font]\n"
+        "path = 'C:\\fonts\\Maple Mono.ttf'\n"
+        "size = 13\n"
+        "\n"
+        "[window]\n"
+        "opacity = 0.5\n"
+        "backdrop = \"mica\"\n"
+        "\n"
+        "[terminal]\n"
+        "copy_on_select = true\n"
+        "shell = \"cmd\"\n"
+        "osc52 = \"deny\"\n";
 
     settings_default(&settings);
     check(settings.point_size == 16.0f, "default point size is 16");
@@ -878,46 +894,139 @@ static void test_settings(void)
     check(settings.osc52 == SETTINGS_OSC52_ASK, "default osc52 is ask");
     check(settings.font[0] == '\0', "default font is the built-in one");
 
-    check(settings_parse_line(&settings, "size = 13"), "size parses");
+    check(settings_parse_toml(&settings, document, strlen(document)),
+          "a full TOML document parses");
+    check(strcmp(settings.font, "C:\\fonts\\Maple Mono.ttf") == 0,
+          "font path is stored");
     check(settings.point_size == 13.0f, "size is stored");
-    check(!settings_parse_line(&settings, "size = 0"), "a zero size is refused");
-    check(!settings_parse_line(&settings, "size = 900"), "a huge size is refused");
-    check(settings.point_size == 13.0f, "a refused value left it alone");
+    check(settings.panel_opacity == 0.5f, "opacity is stored");
+    check(settings.backdrop == 1, "backdrop is stored");
+    check(settings.copy_on_select, "copy-on-select is stored");
+    check(settings.shell == SETTINGS_SHELL_CMD, "shell is stored");
+    check(settings.osc52 == SETTINGS_OSC52_DENY, "osc52 is stored");
 
-    check(settings_parse_line(&settings, "opacity = 0.5"), "opacity parses");
-    check(!settings_parse_line(&settings, "opacity = 2"), "opacity bounds");
-    check(settings_parse_line(&settings, "CopyOnSelect = yes"),
-          "keys are case and dash insensitive");
-    check(settings.copy_on_select, "copy-on-select stored");
-    check(settings_parse_line(&settings, "shell = cmd"), "shell parses");
-    check(settings.shell == SETTINGS_SHELL_CMD, "shell stored");
-    check(settings_parse_line(&settings, "osc52 = deny"), "osc52 parses");
-    check(settings.osc52 == SETTINGS_OSC52_DENY, "osc52 stored");
-    check(!settings_parse_line(&settings, "osc52 = maybe"), "osc52 bounds");
-    check(!settings_parse_line(&settings, "nonsense = 1"), "unknown keys");
-    check(!settings_parse_line(&settings, "# a comment"), "comments");
-    check(settings_parse_line(&settings, "font = C:\\f.ttf"), "font parses");
-    check(strcmp(settings.font, "C:\\f.ttf") == 0, "font stored verbatim");
+    check(settings_parse_toml(&settings, "[font]\nsize = 13.5\n",
+                              strlen("[font]\nsize = 13.5\n")),
+          "a float size parses");
+    check(settings.point_size == 13.5f, "float size is stored");
 
+    check(!settings_parse_toml(&settings, "[font]\nsize = 0\n",
+                               strlen("[font]\nsize = 0\n")),
+          "a zero size is refused");
+    check(settings.point_size == 13.5f, "a refused value left it alone");
+    check(!settings_parse_toml(&settings, "[font]\nsize = 900\n",
+                               strlen("[font]\nsize = 900\n")),
+          "a huge size is refused");
+    check(!settings_parse_toml(&settings, "[font]\nsize = nan\n",
+                               strlen("[font]\nsize = nan\n")),
+          "a non-finite size is refused");
+    check(!settings_parse_toml(&settings, "[font]\nsize = \"big\"\n",
+                               strlen("[font]\nsize = \"big\"\n")),
+          "a non-numeric size is refused");
+
+    check(!settings_parse_toml(&settings, "[window]\nopacity = 2\n",
+                               strlen("[window]\nopacity = 2\n")),
+          "opacity bounds");
+    check(!settings_parse_toml(&settings, "[window]\nopacity = nan\n",
+                               strlen("[window]\nopacity = nan\n")),
+          "a non-finite opacity is refused");
+    check(!settings_parse_toml(&settings, "[window]\nopacity = \"half\"\n",
+                               strlen("[window]\nopacity = \"half\"\n")),
+          "a non-numeric opacity is refused");
+    check(settings.panel_opacity == 0.5f, "a refused opacity left it alone");
+
+    check(settings_parse_toml(&settings,
+                              "[terminal]\ncopy_on_select = false\n",
+                              strlen("[terminal]\ncopy_on_select = false\n")),
+          "copy-on-select parses");
+    check(!settings.copy_on_select, "copy-on-select stored");
+    check(!settings_parse_toml(&settings,
+                               "[terminal]\ncopy_on_select = \"yes\"\n",
+                               strlen("[terminal]\ncopy_on_select = \"yes\"\n")),
+          "a non-boolean copy-on-select is refused");
+
+    check(settings_parse_toml(&settings,
+                              "[window]\nbackdrop = \"mica_alt\"\n",
+                              strlen("[window]\nbackdrop = \"mica_alt\"\n")),
+          "mica_alt parses");
+    check(settings.backdrop == 2, "mica_alt stored");
+    check(!settings_parse_toml(&settings,
+                               "[window]\nbackdrop = \"bogus\"\n",
+                               strlen("[window]\nbackdrop = \"bogus\"\n")),
+          "an unknown backdrop is refused");
+    check(settings.backdrop == 2, "a refused backdrop left it alone");
+
+    check(settings_parse_toml(&settings, "[terminal]\nshell = \"pwsh\"\n",
+                              strlen("[terminal]\nshell = \"pwsh\"\n")),
+          "shell parses");
+    check(settings.shell == SETTINGS_SHELL_PWSH, "shell stored");
+    check(!settings_parse_toml(&settings, "[terminal]\nshell = \"bash\"\n",
+                               strlen("[terminal]\nshell = \"bash\"\n")),
+          "an unknown shell is refused");
+    check(settings_parse_toml(&settings, "[terminal]\nosc52 = \"allow\"\n",
+                              strlen("[terminal]\nosc52 = \"allow\"\n")),
+          "osc52 parses");
+    check(settings.osc52 == SETTINGS_OSC52_ALLOW, "osc52 stored");
+    check(!settings_parse_toml(&settings, "[terminal]\nosc52 = \"maybe\"\n",
+                               strlen("[terminal]\nosc52 = \"maybe\"\n")),
+          "an unknown osc52 policy is refused");
+
+    check(settings_parse_toml(&settings,
+                              "[FONT]\nPath = 'C:\\folded.ttf'\nSize = 14\n",
+                              strlen("[FONT]\nPath = 'C:\\folded.ttf'\nSize = 14\n")),
+          "section and key names fold case");
+    check(strcmp(settings.font, "C:\\folded.ttf") == 0, "folded path stored");
+    check(settings.point_size == 14.0f, "folded size stored");
+    check(settings_parse_toml(&settings,
+                              "[TERMINAL]\nCopyOnSelect = true\n",
+                              strlen("[TERMINAL]\nCopyOnSelect = true\n")),
+          "dash and underscore folding still works");
+    check(settings.copy_on_select, "folded copy-on-select stored");
+
+    check(!settings_parse_toml(&settings,
+                               "nonsense = 1\n[other]\nfoo = \"bar\"\n",
+                               strlen("nonsense = 1\n[other]\nfoo = \"bar\"\n")),
+          "unknown keys and tables are ignored");
+    check(!settings_parse_toml(&settings, "# only a comment\n",
+                               strlen("# only a comment\n")),
+          "a comment-only document changes nothing");
+
+    settings_default(&settings);
+    check(!settings_parse_toml(&settings, "[font\nsize = 1\n",
+                               strlen("[font\nsize = 1\n")),
+          "malformed TOML is refused");
+    check(settings.point_size == 16.0f, "malformed TOML changes nothing");
+
+    check(settings_parse_toml(&settings, "[font]\npath = \"\"\n",
+                              strlen("[font]\npath = \"\"\n")),
+          "an empty font path parses");
+    check(settings.font[0] == '\0', "an empty font path is stored");
+
+    memset(long_font, 'a', 600);
+    long_font[600] = '\0';
+    snprintf(text, sizeof text, "[font]\npath = \"%s\"\n", long_font);
+    check(!settings_parse_toml(&settings, text, strlen(text)),
+          "an oversized font path is refused");
+    check(settings.font[0] == '\0', "the oversized path left the font alone");
+
+    settings_default(&settings);
+    settings.point_size = 13.5f;
+    settings.panel_opacity = 0.85f;
+    settings.backdrop = 3;
+    settings.copy_on_select = true;
+    settings.shell = SETTINGS_SHELL_PWSH;
+    settings.osc52 = SETTINGS_OSC52_ALLOW;
+    strcpy(settings.font, "C:\\fonts\\A \"B\".ttf");
     settings_format(&settings, text, sizeof text);
-    settings_default(&again);
-    {
-        char *line = text;
-        char *next;
-        size_t read = 0;
+    check(strstr(text, "[font]") != NULL, "the formatted file has sections");
+    check(strstr(text, "C:\\\\fonts") != NULL, "backslashes are escaped");
 
-        while (line && *line) {
-            next = strchr(line, '\n');
-            if (next)
-                *next = '\0';
-            if (settings_parse_line(&again, line))
-                read++;
-            line = next ? next + 1 : NULL;
-        }
-        check(read >= 6, "the formatted file reparses");
-    }
+    settings_default(&again);
+    check(settings_parse_toml(&again, text, strlen(text)),
+          "the formatted TOML reparses");
     check(again.point_size == settings.point_size &&
           again.panel_opacity == settings.panel_opacity &&
+          again.backdrop == settings.backdrop &&
           again.copy_on_select == settings.copy_on_select &&
           again.shell == settings.shell && again.osc52 == settings.osc52 &&
           strcmp(again.font, settings.font) == 0,
@@ -1041,6 +1150,25 @@ static void test_clipboard_write_conpty(void)
 }
 #endif /* _WIN32 */
 
+/* A font setting may be a family name. The resolver leaves a path that
+ * already names a file alone and finds an installed family through the
+ * Windows font registry. */
+static void test_font_lookup(void)
+{
+    char path[512];
+    char again[512];
+
+    check(!font_lookup_path("termica-no-such-font-family", path, sizeof path),
+          "an unknown font name is not resolved");
+#ifdef _WIN32
+    check(font_lookup_path("Consolas", path, sizeof path) && path[0] != '\0',
+          "an installed family name resolves to a file");
+    check(font_lookup_path(path, again, sizeof again) &&
+          strcmp(again, path) == 0,
+          "a resolved path is returned unchanged");
+#endif
+}
+
 int term_selftest(void)
 {
     printf("termica self test (libghostty-vt)\n\n");
@@ -1057,6 +1185,7 @@ int term_selftest(void)
     test_mouse_and_focus();
     test_underline_styles();
     test_settings();
+    test_font_lookup();
     test_clipboard_write();
 #ifdef _WIN32
     test_pty();

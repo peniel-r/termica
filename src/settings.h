@@ -1,9 +1,9 @@
 /*
  * termica - the user's settings.
  *
- * One file, plain lines of `key = value`, no dependencies and no JSON
- * parser: %APPDATA%\termica\termica.conf on Windows,
- * $XDG_CONFIG_HOME/termica/termica.conf or ~/.config/termica/termica.conf
+ * One TOML file, parsed with tomlc17:
+ * %APPDATA%\termica\termica.toml on Windows,
+ * $XDG_CONFIG_HOME/termica/termica.toml or ~/.config/termica/termica.toml
  * elsewhere. Whatever is not there keeps its default, so a missing or
  * half-written file still starts the app.
  *
@@ -43,11 +43,12 @@ typedef struct Settings {
 
 void settings_default(Settings *settings);
 
-/* Parse one `key = value` line. Unknown keys and bad values are ignored.
- * Exposed for the self test. */
-bool settings_parse_line(Settings *settings, const char *line);
+/* Parse a TOML document and overlay the recognised settings. Unknown keys,
+ * wrong types and out-of-range values are ignored; a syntax error leaves
+ * the settings untouched. Exposed for the self test. */
+bool settings_parse_toml(Settings *settings, const char *text, size_t length);
 
-/* Render the settings back to the same line format, for saving. */
+/* Render the settings as TOML, for saving. */
 void settings_format(const Settings *settings, char *out, size_t capacity);
 
 /* Where the file lives. False when no config directory could be worked

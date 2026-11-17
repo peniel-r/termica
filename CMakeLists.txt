@@ -43,6 +43,28 @@ FetchContent_Declare(SDL3_ttf
 FetchContent_MakeAvailable(SDL3)
 FetchContent_MakeAvailable(SDL3_ttf)
 
+# ---- tomlc17: the TOML settings parser --------------------------------------
+# Upstream ships an amalgamated src/tomlc17.c + tomlc17.h and a Makefile, but
+# no CMakeLists.txt, so the library target is declared here.
+# Offline? Point this at a local checkout:
+#   -DFETCHCONTENT_SOURCE_DIR_TOMLC17=C:/src/tomlc17
+FetchContent_Declare(tomlc17
+    GIT_REPOSITORY https://github.com/cktan/tomlc17.git
+    GIT_TAG        R261116
+    GIT_SHALLOW    TRUE)
+FetchContent_MakeAvailable(tomlc17)
+
+add_library(tomlc17 STATIC ${tomlc17_SOURCE_DIR}/src/tomlc17.c)
+target_include_directories(tomlc17 PUBLIC ${tomlc17_SOURCE_DIR}/src)
+# termica's own code stays C99; the library is written for C17 and compiled
+# as such on its own target.
+set_target_properties(tomlc17 PROPERTIES
+    C_STANDARD 17
+    C_STANDARD_REQUIRED ON)
+if(NOT WIN32)
+    target_link_libraries(tomlc17 PUBLIC m)
+endif()
+
 # ---- libghostty-vt -----------------------------------------------------------
 # Docs: https://lib.ghostty.org/vt/installing.html
 #
@@ -102,6 +124,7 @@ add_executable(termica
     src/embed.c
     src/console.c
     src/settings.c
+    src/font_lookup.c
     src/selftest.c
     src/glyph.c
     src/style.c
@@ -113,6 +136,7 @@ add_executable(termica
     src/embed.h
     src/console.h
     src/settings.h
+    src/font_lookup.h
     src/glyph.h
     src/style.h
     src/panel.h
@@ -137,6 +161,7 @@ if(WIN32)
 endif()
 target_link_libraries(termica PRIVATE SDL3_ttf::SDL3_ttf SDL3::SDL3)
 target_link_libraries(termica PRIVATE ghostty-vt::ghostty-vt)
+target_link_libraries(termica PRIVATE tomlc17)
 
 if(WIN32)
     # ghostty-vt.dll must sit next to the exe (or on PATH).
@@ -163,6 +188,8 @@ endif()
 option(TERMICA_SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 if(TERMICA_SANITIZE)
     target_compile_options(termica PRIVATE
+        -fsanitize=address,undefined -fno-omit-frame-pointer -g)
+    target_compile_options(tomlc17 PRIVATE
         -fsanitize=address,undefined -fno-omit-frame-pointer -g)
     target_link_options(termica PRIVATE -fsanitize=address,undefined)
 endif()
