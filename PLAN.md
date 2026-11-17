@@ -460,7 +460,7 @@ pointer shape honest, and show uncommitted IME text instead of nothing.
   the parser, and a real `powershell.exe` child under ConPTY writing
   `OSC 52;c;<base64>` that must arrive decoded at the app's callback.
   92 checks, none failing - the suite was that size at this milestone; it is
-  124 now, see milestone 6.
+  143 now, see milestone 8.
 - Settings were checked without simulating input: with `shell = cmd` the
   process tree shows `cmd.exe` as termica's child, and after closing the
   window the file holds exactly the values the session used.
@@ -520,7 +520,7 @@ struct or the `settings_load` / `settings_save` API that `main.c` uses.
 - Saves write a temporary file and `SDL_RenamePath` it over the real one, so
   a failed write cannot truncate the settings. The output is canonical TOML;
   comments and unknown keys are not preserved on exit.
-- `font.path` accepts either a file or an installed family name. The family
+- `font.face` accepts either a file or an installed family name. The family
   is resolved by `src/font_lookup.c` from
   `HKCU\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts` and then the
   `HKLM` equivalent: the `(TrueType)` / `(OpenType)` suffix is removed, the
@@ -534,7 +534,7 @@ struct or the `settings_load` / `settings_save` API that `main.c` uses.
 
 ## Verification
 
-- Build clean under `-Wall -Wextra -pedantic`; `--selftest` runs 124 checks,
+- Build clean under `-Wall -Wextra -pedantic`; `--selftest` runs 143 checks,
   none failing. The settings checks cover the three sections, typed values,
   bounds (`0`, `900`, `nan`, `inf`, wrong types), folding of section and key
   names, unknown keys, malformed documents, string escaping, an oversized
@@ -554,7 +554,7 @@ struct or the `settings_load` / `settings_save` API that `main.c` uses.
 - The same load/save round trip worked with `APPDATA` pointed at a directory
   whose name contained non-ASCII characters (`termica-settings-测试`), which
   is the reason the file is read through SDL rather than `fopen`.
-- A `font.path` of `"Inconsolata Nerd Font Propo"` (installed per user, not
+- A `font.face` of `"Inconsolata Nerd Font Propo"` (installed per user, not
   under `C:\Windows\Fonts`) opened
   `C:\Users\i_rac\AppData\Local\Microsoft\Windows\Fonts\InconsolataNerdFontPropo-Regular.ttf`
   at `size = 18`; the `font:` line named that file, and `bold: yes` showed
@@ -564,3 +564,133 @@ struct or the `settings_load` / `settings_save` API that `main.c` uses.
 - Not verified: nothing in this milestone needs a keyboard, pointer or input
   method, so every claim above is from the build, the self test or a real
   process run.
+
+---
+
+# Milestone 7: window decorations
+
+## Goal
+
+Let the user choose how much frame the window draws: the rounded borderless
+panel as before, a square variant, a compact variant with a smaller top inset,
+or the native Windows frame - plus an optional custom title bar with the
+terminal title and working window buttons.
+
+## Design
+
+- `[window] decoration` is one of `rounded`, `square`, `compact`, `native`;
+  `[window] title_bar` is a boolean. Both live in `Settings`, gain defaults in
+  `settings_default`, typed parsing in `apply_window`, canonical output in
+  `settings_format`, and a `SettingsDecoration` enum next to the existing ones.
+  `title_bar` is ignored when the decoration is `native`.
+- `WindowDecoration` in `window.h` mirrors the setting. `window_create` takes
+  both the decoration and the title bar flag: `native` creates a normal
+  `SDL_WINDOW_RESIZABLE` window and installs no hit test; the other three keep
+  `SDL_WINDOW_BORDERLESS | SDL_WINDOW_TRANSPARENT` and install the hit test.
+- `panel_draw` takes a corner radius. Zero is a square frame: one fill plus
+  four straight border runs, no masks. `window_sync_chrome` also takes the
+  decoration and forces the region radius to 0 for `square` and `native`.
+- The chrome geometry in `main.c` is a function of the preset: side padding is
+  12 px (8 px for `compact`), the top inset is 34 px for `rounded`/`square`,
+  22 px for `compact`, and `title_bar + 4` when the custom bar is drawn.
+- The custom title bar is `WINDOW_TITLE_BAR_HEIGHT` (30) logical pixels high.
+  It paints a light tint clipped to the panel's top corners, a 1 px separator,
+  the terminal's title with the grid font, and three
+  `WINDOW_TITLE_BAR_BUTTON_WIDTH` (46) wide buttons. The buttons hover, the
+  close button in red, and call `SDL_MinimizeWindow`,
+  `SDL_MaximizeWindow`/`SDL_RestoreWindow`, or stop the event loop.
+- Button hit testing uses SDL window coordinates (what mouse events carry)
+  while drawing uses pixels scaled by `display_scale`. The hit test marks the
+  button strip as `SDL_HITTEST_NORMAL` so a click is a click, not a drag.
+
+## Decisions
+
+- **Presets over orthogonal knobs.** One enum is easier to document and to
+  keep visually coherent than separate radius, padding and inset settings.
+- **`native` is the escape hatch.** It gives the real Windows frame and system
+  buttons, so users who want the OS behaviour do not have to trust a drawn
+  title bar. Backdrop handling keeps the system caption buttons in that mode.
+- **The shipped defaults are shared and explicit.** `settings_default` now
+  matches the canonical file: 11 pt built-in font, opacity 1.0, Mica, the
+  native frame, and `title_bar = true`. The title bar flag stays on even
+  though `native` ignores it, so choosing a custom decoration brings a
+  configured bar with it.
+- **The title bar falls back to `termica`.** It shows the terminal title once
+  the shell sets one, and the app name before that.
+
+## Verification
+
+- `--selftest` grew from 124 to 139 checks at this milestone (143 now, see
+  milestone 8): the new default size, opacity, backdrop, decoration and title
+  bar, both stored from a document, `square` and `native` parsing, an unknown
+  name refused, a non-string decoration refused, a non-boolean title bar
+  refused, key folding for `TitleBar`, and the format round trip carrying both
+  fields.
+- Build clean under `-Wall -Wextra -pedantic`; the suite passes 143/143.
+- Each of the four presets was started with a hand-written `termica.toml` and
+  exited through the window: all four started, and the canonical rewrite kept
+  `decoration` and `title_bar`.
+- Screenshots of `rounded` with a title bar over both the panel and Mica, and
+  of `native`, were inspected: the tint follows the panel's rounded corners,
+  the title renders in the grid font, and the native window measured 916x519
+  with a 900x480 client area.
+- The custom buttons were exercised with pointer events over the foreground
+  window: maximize went to the full work area and reported `IsZoomed`,
+  restore returned to 900x480, and close exited with code 0. Click positions
+  have to be computed from `ClientToScreen(0, 0)`, because a maximized
+  borderless window reports an invisible `-8` frame offset. The events were
+  injected desktop-wide, so by the harness rule this is recorded as a manual
+  check rather than evidence; the README lists it that way.
+- Not verified: high-DPI scaling of the bar on a second monitor, and the
+  Windows 10 fallback for the `native` frame. Neither needs new code paths;
+  they need hardware this build did not have.
+
+---
+
+# Milestone 8: the font face key, safe saves and the launcher
+
+## Goal
+
+Make the font key say what it is - `[font] face` instead of `[font] path` -
+and stop an edit made in the settings file while the app is running from
+being overwritten by the old in-memory values when the app exits.
+
+## Design
+
+- `face` is the canonical key, written by `settings_format`. `apply_font`
+  also accepts `path`, so a file written by an older build still loads; the
+  next canonical save rewrites it as `face`.
+- The reported "font size does not change" had two causes. `run.ps1` defaulted
+  `-Size` to 16 and always passed it on the command line, which wins over the
+  file; it now passes `-Font` / `-Size` only when they are supplied. The
+  second cause was the save on exit overwriting an edit made while the app
+  was still running.
+- The font size was always read correctly at startup; what lost the change
+  was the save on exit. `settings_load` now records an FNV-1a fingerprint of
+  the file it read, and `settings_save` compares the file on disk before
+  writing.
+  If the file was created, deleted or edited in the meantime, the save is
+  skipped and the user's file is left alone.
+- Settings are still read once at startup, so `size` and `face` changes apply
+  on the next launch. Hot reload would need font re-opening, grid refitting
+  and a terminal resize; it is not part of this milestone.
+
+## Verification
+
+- `--selftest` is 143 checks: `face` parses and is stored, the old `path`
+  key still parses and is stored, an oversized face is refused, and the
+  formatted output contains `face =` and no `path =`.
+- No settings file: the app started on the built-in font and wrote a canonical
+  file with `face = ""` and the frozen defaults.
+- `size = 18.0` in the file produced a 10x24 px cell; `size = 24.0` produced
+  14x32. This confirms the size itself was never ignored.
+- Editing `size` to 24 while the app was running, then closing: the file kept
+  24.0 instead of being rewritten with the loaded 18.0, and the next launch
+  used the 24 pt cell. A file that was not touched was still rewritten in
+  canonical form on exit, including an old `path` key becoming `face`.
+- Launching through `run.ps1` with no arguments and `size = 18.0` in the file
+  printed `size: from termica.toml` and opened a 10x24 px cell; `-Size 24`
+  printed `size: 24 (override)` and opened a 14x32 px cell. Before the script
+  change the first case was forced to 16 pt.
+- `run.ps1 -SelfTest` still returns the app's exit code.
+- Build clean under `-Wall -Wextra -pedantic`; ASan/UBSan self test passes.

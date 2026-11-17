@@ -16,10 +16,15 @@
 /* A few pixels at the window edge resize, the top strip drags the window.
  * These are SDL window coordinates, not pixels, so they do not scale. */
 #define RESIZE_BORDER 8
-#define DRAG_STRIP    30
 
 /* Segments per corner when the squircle is turned into a window region. */
 #define REGION_CORNER_STEPS 12
+
+/* What the hit test needs to know. Only one window exists, so this is set
+ * once by window_create and read by the callback. */
+static bool hit_custom_frame;
+static int hit_drag_strip;
+static int hit_buttons_width;
 
 static SDL_HitTestResult SDLCALL hit_test(SDL_Window *window,
                                           const SDL_Point *point, void *data)
@@ -32,6 +37,9 @@ static SDL_HitTestResult SDLCALL hit_test(SDL_Window *window,
     bool bottom;
 
     (void)data;
+    if (!hit_custom_frame)
+        return SDL_HITTEST_NORMAL;
+
     SDL_GetWindowSize(window, &width, &height);
     left = point->x < RESIZE_BORDER;
     right = point->x >= width - RESIZE_BORDER;
@@ -46,7 +54,12 @@ static SDL_HitTestResult SDLCALL hit_test(SDL_Window *window,
     if (right)           return SDL_HITTEST_RESIZE_RIGHT;
     if (top)             return SDL_HITTEST_RESIZE_TOP;
     if (bottom)          return SDL_HITTEST_RESIZE_BOTTOM;
-    if (point->y < DRAG_STRIP) return SDL_HITTEST_DRAGGABLE;
+    if (point->y < hit_drag_strip) {
+        /* The title bar buttons are ordinary clicks, not a window drag. */
+        if (hit_buttons_width > 0 && point->x >= width - hit_buttons_width)
+            return SDL_HITTEST_NORMAL;
+        return SDL_HITTEST_DRAGGABLE;
+    }
     return SDL_HITTEST_NORMAL;
 }
 
@@ -98,12 +111,13 @@ static void apply_dark_frame(SDL_Window *window)
 /* Drop the caption button styles while a backdrop is on: extending the
  * frame for Mica brings the system minimize/maximize/close buttons with
  * it, and this window has its own drag strip instead. */
-static void set_caption_styles(HWND handle, WindowBackdrop backdrop)
+static void set_caption_styles(HWND handle, WindowBackdrop backdrop,
+                               bool native)
 {
     LONG_PTR style = GetWindowLongPtr(handle, GWL_STYLE);
 
-    if (backdrop == WINDOW_BACKDROP_MICA ||
-        backdrop == WINDOW_BACKDROP_MICA_ALT)
+    if (!native && (backdrop == WINDOW_BACKDROP_MICA ||
+                    backdrop == WINDOW_BACKDROP_MICA_ALT))
         style &= ~(WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
     else
         style |= WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
@@ -116,7 +130,8 @@ static void set_caption_styles(HWND handle, WindowBackdrop backdrop)
 /* Pick the DWM system backdrop. Mica and Mica Alt only cover the frame, so
  * the frame is extended over the client area; Acrylic needs no extension.
  * False when the OS does not know the material (before Windows 11 22H2). */
-static bool apply_backdrop(SDL_Window *window, WindowBackdrop backdrop)
+static bool apply_backdrop(SDL_Window *window, WindowBackdrop backdrop,
+                           bool native)
 {
     HWND handle = window_handle(window);
     MARGINS margins;
@@ -171,7 +186,7 @@ static bool apply_backdrop(SDL_Window *window, WindowBackdrop backdrop)
     applied_backdrop = backdrop;
     applied_backdrop_valid = true;
 
-    set_caption_styles(handle, backdrop);
+    set_caption_styles(handle, backdrop, native);
     return true;
 }
 
@@ -247,9 +262,11 @@ static void apply_region(SDL_Window *window, int corner_radius)
 }
 #else
 static void apply_dark_frame(SDL_Window *window) { (void)window; }
-static bool apply_backdrop(SDL_Window *window, WindowBackdrop backdrop)
+static bool apply_backdrop(SDL_Window *window, WindowBackdrop backdrop,
+                           bool native)
 {
     (void)window;
+    (void)native;
     return backdrop == WINDOW_BACKDROP_PANEL;
 }
 static void apply_region(SDL_Window *window, int corner_radius)
@@ -259,28 +276,52 @@ static void apply_region(SDL_Window *window, int corner_radius)
 }
 #endif
 
-SDL_Window *window_create(const char *title, int width, int height)
+SDL_Window *window_create(const char *title, int width, int height,
+                          WindowDecoration decoration, bool title_bar)
 {
     SDL_Window *window;
+    SDL_WindowFlags flags = SDL_WINDOW_TRANSPARENT | SDL_WINDOW_RESIZABLE |
+                            SDL_WINDOW_HIGH_PIXEL_DENSITY;
+    bool native = decoration == WINDOW_DECORATION_NATIVE;
 
-    window = SDL_CreateWindow(title, width, height,
-                              SDL_WINDOW_BORDERLESS | SDL_WINDOW_TRANSPARENT |
-                              SDL_WINDOW_RESIZABLE |
-                              SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    hit_custom_frame = !native;
+    title_bar = title_bar && !native;
+    if (native) {
+        hit_drag_strip = 0;
+        hit_buttons_width = 0;
+    } else {
+        flags |= SDL_WINDOW_BORDERLESS;
+        hit_drag_strip = title_bar ? WINDOW_TITLE_BAR_HEIGHT
+                                   : (decoration == WINDOW_DECORATION_COMPACT
+                                          ? WINDOW_COMPACT_DRAG_STRIP
+                                          : WINDOW_DRAG_STRIP);
+        hit_buttons_width = title_bar
+                                ? WINDOW_TITLE_BAR_BUTTONS *
+                                      WINDOW_TITLE_BAR_BUTTON_WIDTH
+                                : 0;
+    }
+
+    window = SDL_CreateWindow(title, width, height, flags);
     if (!window)
         return NULL;
-    SDL_SetWindowHitTest(window, hit_test, NULL);
+    if (!native)
+        SDL_SetWindowHitTest(window, hit_test, NULL);
     apply_dark_frame(window);
     return window;
 }
 
 WindowBackdrop window_sync_chrome(SDL_Window *window, WindowBackdrop backdrop,
+                                  WindowDecoration decoration,
                                   int corner_radius)
 {
-    bool rounded_by_backdrop = backdrop == WINDOW_BACKDROP_MICA ||
-                               backdrop == WINDOW_BACKDROP_MICA_ALT;
+    bool native = decoration == WINDOW_DECORATION_NATIVE;
+    bool rounded_by_backdrop = !native &&
+                               (backdrop == WINDOW_BACKDROP_MICA ||
+                                backdrop == WINDOW_BACKDROP_MICA_ALT);
 
-    if (!apply_backdrop(window, backdrop))
+    if (decoration == WINDOW_DECORATION_SQUARE || native)
+        corner_radius = 0;
+    if (!apply_backdrop(window, backdrop, native))
         return WINDOW_BACKDROP_PANEL;
     /* The drawn panel rounds itself; only a DWM backdrop needs a region. */
     apply_region(window, rounded_by_backdrop ? corner_radius : 0);
@@ -294,5 +335,15 @@ const char *window_backdrop_name(WindowBackdrop backdrop)
     case WINDOW_BACKDROP_MICA_ALT: return "mica alt";
     case WINDOW_BACKDROP_ACRYLIC:  return "acrylic";
     default:                       return "panel";
+    }
+}
+
+const char *window_decoration_name(WindowDecoration decoration)
+{
+    switch (decoration) {
+    case WINDOW_DECORATION_SQUARE:  return "square";
+    case WINDOW_DECORATION_COMPACT: return "compact";
+    case WINDOW_DECORATION_NATIVE:  return "native";
+    default:                        return "rounded";
     }
 }

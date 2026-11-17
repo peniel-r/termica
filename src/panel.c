@@ -143,11 +143,26 @@ static void draw_corner(SDL_Renderer *renderer, SDL_Texture *mask,
 }
 
 void panel_draw(const Panel *panel, SDL_Renderer *renderer,
-                int width, int height, SDL_Color fill, SDL_Color border)
+                int width, int height, int corner_radius,
+                SDL_Color fill, SDL_Color border)
 {
-    int radius = panel->radius;
+    int radius = corner_radius;
     float panel_width = (float)width;
     float panel_height = (float)height;
+
+    /* A square frame: one fill and four straight border runs. */
+    if (radius <= 0) {
+        fill_rectangle(renderer, 0.0f, 0.0f, panel_width, panel_height, fill);
+        fill_rectangle(renderer, 0.0f, 0.0f, panel_width,
+                       panel->border_width, border);
+        fill_rectangle(renderer, 0.0f, panel_height - panel->border_width,
+                       panel_width, panel->border_width, border);
+        fill_rectangle(renderer, 0.0f, 0.0f, panel->border_width,
+                       panel_height, border);
+        fill_rectangle(renderer, panel_width - panel->border_width, 0.0f,
+                       panel->border_width, panel_height, border);
+        return;
+    }
 
     /* A window smaller than two corners has no room for them. */
     if (radius * 2 > width)

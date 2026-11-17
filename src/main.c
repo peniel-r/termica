@@ -73,6 +73,7 @@
 static const SDL_Color PANEL_BACKGROUND = { 14, 18, 22, 255 };
 static const SDL_Color PANEL_BORDER = { 90, 100, 112, PANEL_BORDER_ALPHA };
 static const SDL_Color STATUS_TEXT = { 130, 138, 148, 255 };
+static const SDL_Color TITLE_TEXT = { 205, 212, 220, 255 };
 
 /* What the built-in family is called, for the startup line. */
 #define BUILT_IN_FONT "Maple Mono NF (built in)"
@@ -113,6 +114,9 @@ typedef struct App {
     float          display_scale;
     float          panel_opacity;   /* 0..1                            */
     WindowBackdrop backdrop;
+    WindowDecoration decoration;
+    bool           title_bar;       /* the custom title bar is drawn   */
+    int            title_hover;     /* button under the pointer, or -1 */
 
     int            grid_left;       /* pixel position of cell 0,0       */
     int            grid_top;
@@ -209,6 +213,47 @@ static SDL_Color panel_fill_color(const App *app)
         opacity *= BACKDROP_TINT;
     color.a = (Uint8)(opacity * 255.0f + 0.5f);
     return color;
+}
+
+/* The frame presets: how much room the chrome takes and whether the panel
+ * has corners. Native means Windows already drew a frame around us. */
+static bool custom_frame(const App *app)
+{
+    return app->decoration != WINDOW_DECORATION_NATIVE;
+}
+
+static int chrome_corner_radius(const App *app)
+{
+    if (app->decoration == WINDOW_DECORATION_SQUARE ||
+        app->decoration == WINDOW_DECORATION_NATIVE)
+        return 0;
+    return app->panel.radius;
+}
+
+static int chrome_padding(const App *app)
+{
+    float padding = app->decoration == WINDOW_DECORATION_COMPACT ? 8.0f : 12.0f;
+
+    return (int)(padding * app->display_scale);
+}
+
+static int title_bar_height(const App *app)
+{
+    if (!app->title_bar || !custom_frame(app))
+        return 0;
+    return (int)(WINDOW_TITLE_BAR_HEIGHT * app->display_scale + 0.5f);
+}
+
+static int chrome_top(const App *app)
+{
+    /* A native frame has no strip to drag, only the usual padding. */
+    if (!custom_frame(app))
+        return chrome_padding(app);
+    if (app->title_bar)
+        return (int)((WINDOW_TITLE_BAR_HEIGHT + 4.0f) * app->display_scale);
+    if (app->decoration == WINDOW_DECORATION_COMPACT)
+        return (int)(WINDOW_COMPACT_DRAG_STRIP * app->display_scale);
+    return (int)((WINDOW_DRAG_STRIP + 4.0f) * app->display_scale);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1132,6 +1177,60 @@ static void autoscroll_tick(App *app)
     selection_update(app);
 }
 
+/* Title bar buttons live in window coordinates, which is what SDL puts in
+ * mouse events; the drawing uses pixels. */
+static bool title_button_at(const App *app, float x, float y, int *index)
+{
+    int width;
+    int height;
+    float left;
+
+    if (!app->title_bar || !custom_frame(app))
+        return false;
+    SDL_GetWindowSize(app->window, &width, &height);
+    (void)height;
+    if (y < 0.0f || y >= (float)WINDOW_TITLE_BAR_HEIGHT)
+        return false;
+    left = (float)(width - WINDOW_TITLE_BAR_BUTTONS *
+                               WINDOW_TITLE_BAR_BUTTON_WIDTH);
+    if (x < left || x >= (float)width)
+        return false;
+    *index = (int)((x - left) / (float)WINDOW_TITLE_BAR_BUTTON_WIDTH);
+    return *index >= 0 && *index < WINDOW_TITLE_BAR_BUTTONS;
+}
+
+static void title_button_action(App *app, int index)
+{
+    switch (index) {
+    case 0:
+        SDL_MinimizeWindow(app->window);
+        break;
+    case 1:
+        if ((SDL_GetWindowFlags(app->window) & SDL_WINDOW_MAXIMIZED) != 0)
+            SDL_RestoreWindow(app->window);
+        else
+            SDL_MaximizeWindow(app->window);
+        break;
+    default:
+        app->running = false;
+        break;
+    }
+    app->needs_redraw = true;
+}
+
+static void update_title_hover(App *app, float x, float y)
+{
+    int hover = -1;
+    int index;
+
+    if (title_button_at(app, x, y, &index))
+        hover = index;
+    if (hover != app->title_hover) {
+        app->title_hover = hover;
+        app->needs_redraw = true;
+    }
+}
+
 static void handle_mouse_button(App *app, const SDL_MouseButtonEvent *event)
 {
     bool pressed = event->down;
@@ -1141,7 +1240,16 @@ static void handle_mouse_button(App *app, const SDL_MouseButtonEvent *event)
     int pixel_height = 0;
     int cell_x = 0;
     int cell_y = 0;
+    int title_button;
     bool inside;
+
+    /* The title bar is above the grid and owns its own clicks. */
+    if (event->button == SDL_BUTTON_LEFT &&
+        title_button_at(app, event->x, event->y, &title_button)) {
+        if (pressed)
+            title_button_action(app, title_button);
+        return;
+    }
 
     /* The bar comes first: it is outside the grid, so a program that owns
      * the pointer still cannot swallow the only control that reaches the
@@ -1234,6 +1342,8 @@ static void handle_mouse_motion(App *app, const SDL_MouseMotionEvent *event)
     int cell_x = 0;
     int cell_y = 0;
     bool inside = cell_at(app, event->x, event->y, &cell_x, &cell_y);
+
+    update_title_hover(app, event->x, event->y);
 
     /* OSC 22 only says what the shape should be; the only moment it can
      * matter is when the pointer moves over the grid. */
@@ -1385,9 +1495,9 @@ static void fit_grid(App *app)
     int rows;
 
     SDL_GetWindowSizeInPixels(app->window, &pixel_width, &pixel_height);
-    padding = (int)(12.0f * app->display_scale);
+    padding = chrome_padding(app);
     app->grid_left = padding;
-    app->grid_top = (int)(34.0f * app->display_scale);
+    app->grid_top = chrome_top(app);
 
     columns = (pixel_width - 2 * padding) / app->glyphs.cell_width;
     rows = (pixel_height - app->grid_top - padding - app->glyphs.cell_height) /
@@ -1409,7 +1519,8 @@ static void fit_grid(App *app)
             pty_resize(app->pty, (uint16_t)columns, (uint16_t)rows);
     }
     /* The window region follows the window size. */
-    window_sync_chrome(app->window, app->backdrop, app->panel.radius);
+    window_sync_chrome(app->window, app->backdrop, app->decoration,
+                       chrome_corner_radius(app));
     update_geometry(app);
     app->needs_redraw = true;
 }
@@ -1495,10 +1606,12 @@ static void draw_status_line(App *app, int row, int cursor_column,
     int column = 0;
 
     SDL_snprintf(status, sizeof status,
-                 "%dx%d cells | cursor %d,%d | opacity %d%% | %s",
+                 "%dx%d cells | cursor %d,%d | opacity %d%% | %s | %s%s",
                  app->columns, app->rows, cursor_column + 1, cursor_row + 1,
                  (int)(app->panel_opacity * 100.0f + 0.5f),
-                 window_backdrop_name(app->backdrop));
+                 window_backdrop_name(app->backdrop),
+                 window_decoration_name(app->decoration),
+                 app->title_bar ? " + bar" : "");
 
     while (*text) {
         char utf8[8];
@@ -1537,6 +1650,146 @@ static void draw_scrollbar(App *app)
                    bar.thumb_height, color);
 }
 
+/* The custom title bar: a tint, the terminal's title, and the three window
+ * buttons. The native decoration draws none of this. */
+static void draw_title_symbol(App *app, int index, const SDL_FRect *area,
+                              bool maximized)
+{
+    float centre_x = area->x + area->w * 0.5f;
+    float centre_y = area->y + area->h * 0.5f;
+    float size = 5.0f * app->display_scale;
+    float offset = 2.0f * app->display_scale;
+    SDL_Renderer *renderer = app->renderer;
+
+    SDL_SetRenderDrawColor(renderer, TITLE_TEXT.r, TITLE_TEXT.g, TITLE_TEXT.b,
+                           TITLE_TEXT.a);
+    if (index == 0) {
+        SDL_RenderLine(renderer, centre_x - size, centre_y, centre_x + size,
+                       centre_y);
+    } else if (index == 1) {
+        SDL_FRect box = { centre_x - size, centre_y - size, size * 2.0f,
+                          size * 2.0f };
+
+        if (maximized) {
+            SDL_FRect back = { box.x + offset, box.y - offset, box.w, box.h };
+            SDL_FRect front = { box.x, box.y + offset, box.w, box.h };
+
+            SDL_RenderRect(renderer, &back);
+            SDL_RenderRect(renderer, &front);
+        } else {
+            SDL_RenderRect(renderer, &box);
+        }
+    } else {
+        SDL_RenderLine(renderer, centre_x - size, centre_y - size,
+                       centre_x + size, centre_y + size);
+        SDL_RenderLine(renderer, centre_x - size, centre_y + size,
+                       centre_x + size, centre_y - size);
+    }
+}
+
+static void draw_title_bar(App *app, int pixel_width, int pixel_height)
+{
+    SDL_Renderer *renderer = app->renderer;
+    int height = title_bar_height(app);
+    int button_width = (int)(WINDOW_TITLE_BAR_BUTTON_WIDTH *
+                             app->display_scale + 0.5f);
+    int buttons_left = pixel_width - WINDOW_TITLE_BAR_BUTTONS * button_width;
+    SDL_Color tint = { 255, 255, 255, 16 };
+    SDL_Color separator = { 90, 100, 112, 90 };
+    const char *title = app->term.title[0] ? app->term.title : "termica";
+    bool maximized = (SDL_GetWindowFlags(app->window) &
+                      SDL_WINDOW_MAXIMIZED) != 0;
+    SDL_Rect clip;
+    int text_x;
+    int text_y;
+    int column = 0;
+    int index;
+
+    if (height <= 0)
+        return;
+
+    /* The tint follows the panel's rounded top corners instead of painting
+     * a square band over them. */
+    {
+        SDL_Color no_border = { 0, 0, 0, 0 };
+        SDL_Rect band = { 0, 0, pixel_width, height };
+
+        SDL_SetRenderClipRect(renderer, &band);
+        panel_draw(&app->panel, renderer, pixel_width, pixel_height,
+                   chrome_corner_radius(app), tint, no_border);
+        SDL_SetRenderClipRect(renderer, NULL);
+    }
+    fill_rectangle(app, 0.0f, (float)height - 1.0f, (float)pixel_width, 1.0f,
+                   separator);
+
+    for (index = 0; index < WINDOW_TITLE_BAR_BUTTONS; index++) {
+        SDL_FRect area;
+        SDL_Color hover;
+
+        area.x = (float)(buttons_left + index * button_width);
+        area.y = 0.0f;
+        area.w = (float)button_width;
+        area.h = (float)height;
+        if (app->title_hover == index) {
+            if (index == WINDOW_TITLE_BAR_BUTTONS - 1) {
+                hover.r = 196;
+                hover.g = 48;
+                hover.b = 48;
+                hover.a = 220;
+            } else {
+                hover.r = 255;
+                hover.g = 255;
+                hover.b = 255;
+                hover.a = 26;
+            }
+            if (index == WINDOW_TITLE_BAR_BUTTONS - 1 &&
+                chrome_corner_radius(app) > 0 &&
+                chrome_corner_radius(app) < height) {
+                /* Keep the close button's hover inside the top-right
+                 * rounded corner. */
+                int radius = chrome_corner_radius(app);
+
+                fill_rectangle(app, area.x, area.y, area.w - (float)radius,
+                               (float)radius, hover);
+                fill_rectangle(app, area.x, area.y + (float)radius, area.w,
+                               (float)(height - radius), hover);
+            } else {
+                fill_rectangle(app, area.x, area.y, area.w, area.h, hover);
+            }
+        }
+        draw_title_symbol(app, index, &area, maximized);
+    }
+
+    /* The title is clipped to the space left of the buttons. */
+    text_x = chrome_padding(app);
+    text_y = (height - app->glyphs.cell_height) / 2;
+    if (text_y < 0)
+        text_y = 0;
+    clip.x = text_x;
+    clip.y = 0;
+    clip.w = buttons_left - text_x - chrome_padding(app);
+    clip.h = height;
+    if (clip.w <= 0)
+        return;
+
+    SDL_SetRenderClipRect(renderer, &clip);
+    while (*title) {
+        char utf8[8];
+        char *end;
+        Uint32 codepoint = SDL_StepUTF8(&title, NULL);
+
+        if (!codepoint)
+            break;
+        end = SDL_UCS4ToUTF8(codepoint, utf8);
+        *end = '\0';
+        glyphs_draw_text(&app->glyphs, utf8, (size_t)(end - utf8),
+                         (float)(text_x + column * app->glyphs.cell_width),
+                         (float)text_y, false, false, TITLE_TEXT);
+        column++;
+    }
+    SDL_SetRenderClipRect(renderer, NULL);
+}
+
 /* The translucent window forces a full redraw every frame, so per-row dirty
  * flags do not buy anything here: every row of the viewport is visited. */
 static void draw_frame(App *app)
@@ -1563,7 +1816,9 @@ static void draw_frame(App *app)
 
     /* 2. The panel: our rounded fill, or a tint over a DWM backdrop. */
     panel_draw(&app->panel, renderer, pixel_width, pixel_height,
-               panel_fill_color(app), PANEL_BORDER);
+               chrome_corner_radius(app), panel_fill_color(app),
+               PANEL_BORDER);
+    draw_title_bar(app, pixel_width, pixel_height);
 
     /* 3. Capture the frame. The only step that reads the terminal. */
     ghostty_render_state_update(app->term.render_state, app->term.handle);
@@ -1827,7 +2082,8 @@ static void handle_key_down(App *app, const SDL_KeyboardEvent *event)
             /* The OS may not know the material; the window says so and the
              * app keeps the mode that is really in effect. */
             app->backdrop = window_sync_chrome(app->window, next,
-                                               app->panel.radius);
+                                               app->decoration,
+                                               chrome_corner_radius(app));
             app->settings.backdrop = (int)app->backdrop;
             app->needs_redraw = true;
             return;
@@ -1890,6 +2146,12 @@ int main(int argc, char **argv)
         point_size = app.settings.point_size;
     app.panel_opacity = app.settings.panel_opacity;
     app.backdrop = (WindowBackdrop)app.settings.backdrop;
+    app.decoration = (WindowDecoration)app.settings.decoration;
+    if (app.decoration >= WINDOW_DECORATION_COUNT)
+        app.decoration = WINDOW_DECORATION_ROUNDED;
+    app.title_bar = app.settings.title_bar &&
+                    app.decoration != WINDOW_DECORATION_NATIVE;
+    app.title_hover = -1;
 
     font_path = pick_font(requested_font, app.settings.font);
     /* A settings file may name the installed family instead of a file. */
@@ -1898,7 +2160,7 @@ int main(int argc, char **argv)
         font_path = resolved_font;
     if (!font_path && !embedded_font_available()) {
         fprintf(stderr, "usage: %s [--selftest] "
-                "[font-path-or-family] [point-size]\n", argv[0]);
+                "[font-face-or-path] [point-size]\n", argv[0]);
         return 1;
     }
     font_label = font_path ? font_path : BUILT_IN_FONT;
@@ -1912,7 +2174,8 @@ int main(int argc, char **argv)
         goto cleanup;
     }
 
-    app.window = window_create("termica", 900, 480);
+    app.window = window_create("termica", 900, 480, app.decoration,
+                               app.title_bar);
     if (!app.window) {
         fprintf(stderr, "window_create: %s\n", SDL_GetError());
         goto cleanup;
@@ -1958,7 +2221,11 @@ int main(int argc, char **argv)
     term_set_writer(&app.term, send_to_shell, &app);
     term_set_clipboard_write(&app.term, handle_clipboard_write, &app);
 
-    window_sync_chrome(app.window, app.backdrop, app.panel.radius);
+    /* Keep the material that is really in effect: Mica may be unavailable
+     * on an older Windows, and the window falls back to the panel. */
+    app.backdrop = window_sync_chrome(app.window, app.backdrop,
+                                      app.decoration,
+                                      chrome_corner_radius(&app));
     fit_grid(&app);
 
     /* The grid is final now, so the console starts at the right size. */
@@ -2036,6 +2303,8 @@ int main(int argc, char **argv)
                 break;
             case SDL_EVENT_WINDOW_MOUSE_LEAVE:
                 reset_mouse_shape(&app);
+                app.title_hover = -1;
+                app.needs_redraw = true;
                 autoscroll_start(&app, 0);
                 break;
             case SDL_EVENT_WINDOW_FOCUS_GAINED:

@@ -31,11 +31,21 @@ typedef enum {
     SETTINGS_OSC52_DENY
 } SettingsOsc52;
 
+/* How much frame the window draws around the terminal. */
+typedef enum {
+    SETTINGS_DECORATION_ROUNDED = 0,  /* the custom rounded panel  */
+    SETTINGS_DECORATION_SQUARE,       /* square custom frame       */
+    SETTINGS_DECORATION_COMPACT,      /* rounded, less top inset   */
+    SETTINGS_DECORATION_NATIVE         /* the Windows title bar     */
+} SettingsDecoration;
+
 typedef struct Settings {
     char font[512];        /* empty = the built-in Maple Mono NF     */
-    float point_size;      /* default 16                             */
-    float panel_opacity;   /* default 0.80, 0..1                     */
-    int backdrop;          /* WindowBackdrop value, default panel    */
+    float point_size;      /* default 11                             */
+    float panel_opacity;   /* default 1.0, 0..1                      */
+    int backdrop;          /* WindowBackdrop value, default mica     */
+    int decoration;        /* SettingsDecoration, default native     */
+    bool title_bar;        /* draw a custom title bar, default true  */
     bool copy_on_select;   /* default false                          */
     SettingsShell shell;   /* default auto                           */
     SettingsOsc52 osc52;   /* default ask                            */

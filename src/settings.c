@@ -4,12 +4,14 @@
  * The file is TOML, parsed by tomlc17:
  *
  *   [font]
- *   path = 'C:\Windows\Fonts\consola.ttf'
- *   size = 16.0
+ *   face = ""
+ *   size = 11.0
  *
  *   [window]
- *   opacity = 0.8
- *   backdrop = "panel"
+ *   opacity = 1.0
+ *   backdrop = "mica"
+ *   decoration = "native"
+ *   title_bar = true
  *
  *   [terminal]
  *   copy_on_select = false
@@ -32,6 +34,7 @@
 
 #include <limits.h>
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -41,15 +44,35 @@
 /* Longest file we are willing to read; the real one is a dozen lines. */
 #define SETTINGS_MAX_BYTES 65536
 
-/* Room for the formatted file, including an escaped font path. */
+/* Room for the formatted file, including an escaped font face. */
 #define SETTINGS_FORMAT_BYTES 4096
+
+/* Fingerprint of the file as it was read. The save on exit is skipped when
+ * the file changed while the app ran, so a hand edit is not overwritten by
+ * the values the app still has in memory. */
+static bool loaded_file_seen;
+static uint64_t loaded_file_hash;
+
+static uint64_t hash_bytes(const char *data, size_t length)
+{
+    uint64_t hash = 14695981039346656037ULL;
+    size_t index;
+
+    for (index = 0; index < length; index++) {
+        hash ^= (unsigned char)data[index];
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
 
 void settings_default(Settings *settings)
 {
     memset(settings, 0, sizeof *settings);
-    settings->point_size = 16.0f;
-    settings->panel_opacity = 0.80f;
-    settings->backdrop = 0;             /* WINDOW_BACKDROP_PANEL       */
+    settings->point_size = 11.0f;
+    settings->panel_opacity = 1.0f;
+    settings->backdrop = 1;             /* WINDOW_BACKDROP_MICA        */
+    settings->decoration = SETTINGS_DECORATION_NATIVE;
+    settings->title_bar = true;
     settings->copy_on_select = false;
     settings->shell = SETTINGS_SHELL_AUTO;
     settings->osc52 = SETTINGS_OSC52_ASK;
@@ -108,7 +131,10 @@ static bool apply_font(Settings *settings, toml_datum_t table)
         const char *key = table.u.tab.key[index];
         toml_datum_t value = table.u.tab.value[index];
 
-        if (key_is(key, "path") && value.type == TOML_STRING) {
+        /* `face` is the canonical name. `path` is still read so a file
+         * written by an older build keeps working. */
+        if ((key_is(key, "face") || key_is(key, "path")) &&
+            value.type == TOML_STRING) {
             int length = value.u.str.len;
 
             if (length >= 0 && (size_t)length < sizeof settings->font &&
@@ -162,6 +188,23 @@ static bool apply_window(Settings *settings, toml_datum_t table)
                 settings->backdrop = 3;
                 changed = true;
             }
+        } else if (key_is(key, "decoration") && value.type == TOML_STRING) {
+            if (strcmp(value.u.s, "rounded") == 0) {
+                settings->decoration = SETTINGS_DECORATION_ROUNDED;
+                changed = true;
+            } else if (strcmp(value.u.s, "square") == 0) {
+                settings->decoration = SETTINGS_DECORATION_SQUARE;
+                changed = true;
+            } else if (strcmp(value.u.s, "compact") == 0) {
+                settings->decoration = SETTINGS_DECORATION_COMPACT;
+                changed = true;
+            } else if (strcmp(value.u.s, "native") == 0) {
+                settings->decoration = SETTINGS_DECORATION_NATIVE;
+                changed = true;
+            }
+        } else if (key_is(key, "title_bar") && value.type == TOML_BOOLEAN) {
+            settings->title_bar = value.u.boolean;
+            changed = true;
         }
     }
     return changed;
@@ -329,6 +372,7 @@ void settings_format(const Settings *settings, char *out, size_t capacity)
     const char *shell = "auto";
     const char *osc52 = "ask";
     const char *backdrop = "panel";
+    const char *decoration = "rounded";
     char font[3072];
     char size[32];
     char opacity[32];
@@ -356,6 +400,12 @@ void settings_format(const Settings *settings, char *out, size_t capacity)
     case 3: backdrop = "acrylic"; break;
     default: break;
     }
+    switch (settings->decoration) {
+    case SETTINGS_DECORATION_SQUARE: decoration = "square"; break;
+    case SETTINGS_DECORATION_COMPACT: decoration = "compact"; break;
+    case SETTINGS_DECORATION_NATIVE: decoration = "native"; break;
+    default: break;
+    }
 
     escape_toml_string(settings->font, font, sizeof font);
     format_float((double)settings->point_size, size, sizeof size);
@@ -365,18 +415,21 @@ void settings_format(const Settings *settings, char *out, size_t capacity)
              "# termica settings\n"
              "\n"
              "[font]\n"
-             "path = \"%s\"\n"
+             "face = \"%s\"\n"
              "size = %s\n"
              "\n"
              "[window]\n"
              "opacity = %s\n"
              "backdrop = \"%s\"\n"
+             "decoration = \"%s\"\n"
+             "title_bar = %s\n"
              "\n"
              "[terminal]\n"
              "copy_on_select = %s\n"
              "shell = \"%s\"\n"
              "osc52 = \"%s\"\n",
-             font, size, opacity, backdrop,
+             font, size, opacity, backdrop, decoration,
+             settings->title_bar ? "true" : "false",
              settings->copy_on_select ? "true" : "false", shell, osc52);
 }
 
@@ -452,6 +505,8 @@ bool settings_load(Settings *settings)
 
     if (!settings)
         return false;
+    loaded_file_seen = false;
+    loaded_file_hash = 0;
     settings_default(settings);
     if (!settings_path(path, sizeof path))
         return false;
@@ -468,6 +523,8 @@ bool settings_load(Settings *settings)
         return false;
     }
 
+    loaded_file_seen = true;
+    loaded_file_hash = hash_bytes(contents, length);
     parsed = parse_toml(settings, contents, length, error, sizeof error);
     SDL_free(contents);
     if (error[0])
@@ -480,11 +537,34 @@ bool settings_save(const Settings *settings)
     char path[512];
     char temporary[520];
     char text[SETTINGS_FORMAT_BYTES];
+    SDL_PathInfo info;
     SDL_IOStream *stream;
     size_t length;
+    bool exists;
 
     if (!settings || !settings_path(path, sizeof path))
         return false;
+
+    /* Do not overwrite a file that appeared, disappeared or changed after
+     * it was read: the user may have edited it while the app was running. */
+    exists = SDL_GetPathInfo(path, &info) && info.type == SDL_PATHTYPE_FILE;
+    if (exists != loaded_file_seen)
+        return false;
+    if (exists) {
+        size_t current_length = 0;
+        char *current = (char *)SDL_LoadFile(path, &current_length);
+        bool same;
+
+        if (!current || current_length > SETTINGS_MAX_BYTES) {
+            SDL_free(current);
+            return false;
+        }
+        same = hash_bytes(current, current_length) == loaded_file_hash;
+        SDL_free(current);
+        if (!same)
+            return false;
+    }
+
     settings_create_directory(path);
     settings_format(settings, text, sizeof text);
     length = strlen(text);
@@ -509,5 +589,7 @@ bool settings_save(const Settings *settings)
         SDL_RemovePath(temporary);
         return false;
     }
+    loaded_file_seen = true;
+    loaded_file_hash = hash_bytes(text, length);
     return true;
 }

@@ -31,9 +31,12 @@ bool panel_init(Panel *panel, SDL_Renderer *renderer, float display_scale);
 /* Free the masks. Safe on a zeroed struct. */
 void panel_free(Panel *panel);
 
-/* Draw the panel at the size of the render target. The two colors carry
- * their own alpha: the fill is the panel color, the border the outline. */
+/* Draw the panel at the size of the render target. `corner_radius` is 0 for
+ * a square frame; otherwise it is clamped to the available space. The two
+ * colors carry their own alpha: the fill is the panel color, the border the
+ * outline. */
 void panel_draw(const Panel *panel, SDL_Renderer *renderer,
-                int width, int height, SDL_Color fill, SDL_Color border);
+                int width, int height, int corner_radius,
+                SDL_Color fill, SDL_Color border);
 
 #endif /* TERMICA_PANEL_H */

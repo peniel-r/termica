@@ -25,7 +25,7 @@ Milestone 6 moved that settings file to TOML: `termica.toml` with `[font]`, `[wi
 `[terminal]` sections, parsed by [tomlc17](https://github.com/cktan/tomlc17) and rewritten
 in a canonical form on exit. Typed values are checked for type and range, and a syntax error
 is reported with its line instead of silently keeping half a file. The old `termica.conf` is
-no longer read. `font.path` now also accepts the installed family name, resolved through the
+no longer read. `font.face` now also accepts the installed family name, resolved through the
 Windows font registry, so a font can be named the way its installer shows it.
 
 What it draws: a borderless window with a translucent dark panel, opaque text on a fixed
@@ -143,9 +143,9 @@ The TTFs live in `assets/fonts/` with their `LICENSE.txt`; CMake embeds them thr
 ```
 cmake --preset llvm-mingw
 cmake --build --preset llvm-mingw
-build\llvm-mingw\termica.exe              # built-in font, 16 pt
-build\llvm-mingw\termica.exe 18           # point size only
-build\llvm-mingw\termica.exe C:\path\to\Font.ttf 16
+build\llvm-mingw\termica.exe              # uses termica.toml, 11 pt built-in by default
+build\llvm-mingw\termica.exe 18           # point size override
+build\llvm-mingw\termica.exe C:\path\to\Font.ttf 16   # face and size overrides
 ```
 
 Or, from PowerShell 7 / WezTerm:
@@ -154,6 +154,9 @@ Or, from PowerShell 7 / WezTerm:
 pwsh -File ./build.ps1
 pwsh -File ./run.ps1
 ```
+
+`run.ps1` passes `-Font` / `-Size` through only when you give them, so the
+settings file decides the face and size by default.
 
 The first configure downloads and builds SDL3 and SDL3_ttf, and downloads the
 libghostty-vt zip, so expect a few minutes. After that rebuilds take seconds.
@@ -165,18 +168,22 @@ Other presets: `llvm-mingw-debug`, and `gcc` for any gcc already on `PATH` (Scoo
 `%APPDATA%\termica\termica.toml` (elsewhere
 `$XDG_CONFIG_HOME/termica/termica.toml` or
 `~/.config/termica/termica.toml`), a TOML file parsed with
-[tomlc17](https://github.com/cktan/tomlc17). The app writes it on exit with
-the values it was using and reads it at startup; anything on the command line
-wins over the file for that run.
+[tomlc17](https://github.com/cktan/tomlc17). It is read at startup, so edits
+apply on the next launch; anything on the command line wins over the file for
+that run. On exit the app writes the values it was using, unless the file
+changed while it was running - a hand edit is never overwritten by the copy
+the app still has in memory.
 
 ```toml
 [font]
-path = ""                    # empty = the built-in Maple Mono NF
-size = 16.0
+face = ""                    # empty = the built-in Maple Mono NF
+size = 11.0
 
 [window]
-opacity = 0.8                # 0..1
-backdrop = "panel"           # panel, mica, mica_alt, acrylic
+opacity = 1.0                # 0..1
+backdrop = "mica"            # panel, mica, mica_alt, acrylic
+decoration = "native"        # rounded, square, compact, native
+title_bar = true             # a drawn title bar (not with native)
 
 [terminal]
 copy_on_select = false
@@ -186,26 +193,48 @@ osc52 = "ask"                # ask, allow, deny
 
 | Key | TOML type | Values | Default |
 |---|---|---|---|
-| `font.path` | string | path to a `.ttf`, an installed family name, or `""` | `""` (the built-in Maple Mono NF) |
-| `font.size` | float or integer | point size, greater than `0`, up to `200` | `16.0` |
-| `window.opacity` | float or integer | `0`..`1` | `0.8` |
-| `window.backdrop` | string | `panel`, `mica`, `mica_alt`, `acrylic` | `"panel"` |
+| `font.face` | string | path to a `.ttf`, an installed family name, or `""` | `""` (the built-in Maple Mono NF) |
+| `font.size` | float or integer | point size, greater than `0`, up to `200` | `11.0` |
+| `window.opacity` | float or integer | `0`..`1` | `1.0` |
+| `window.backdrop` | string | `panel`, `mica`, `mica_alt`, `acrylic` | `"mica"` |
+| `window.decoration` | string | `rounded`, `square`, `compact`, `native` | `"native"` |
+| `window.title_bar` | boolean | `true`/`false` | `true` |
 | `terminal.copy_on_select` | boolean | `true`/`false` | `false` |
 | `terminal.shell` | string | `auto`, `pwsh`, `powershell`, `cmd` | `"auto"` |
 | `terminal.osc52` | string | `ask`, `allow`, `deny` | `"ask"` |
 
 Section and key names fold case and separators, so `[Font]` with
-`Path`/`Size`, or `CopyOnSelect`, name the same settings as the canonical
+`Face`/`Size`, or `CopyOnSelect`, name the same settings as the canonical
 spelling. Values must have the type in the table: `size = "16"` and
 `copy_on_select = "yes"` are refused, not converted. Bad values leave the
 previous value alone; unknown keys and tables are ignored.
+
+`font.face` names a font file or an installed family; `font.path` is still
+read as an alias so a file written by an older build keeps working, but the
+canonical output uses `face`.
+
+The defaults are the canonical block above: the built-in font at 11 pt, full
+opacity, the Mica backdrop and the native Windows frame. `title_bar = true` is
+kept in the file even though `native` ignores it, so switching the decoration
+back to one of the custom frames brings the bar with it.
+
+`decoration` picks the frame. `rounded` is the custom borderless window with
+the squircle corners (the original look); `square` keeps the borderless frame
+but gives the panel square corners; `compact` keeps the rounded corners and
+shrinks the side padding to 8 px with a 22 px top strip; `native` gives the
+window back to Windows, so the system title bar and its minimize, maximize and
+close buttons are used and the panel is square. `title_bar = true` adds a drawn
+title bar to the three custom frames: the terminal title, plus minimize,
+maximize/restore and close buttons. It is ignored with `decoration = "native"`,
+which already has the system buttons. The title bar is 30 logical pixels high
+and its three buttons are 46 wide.
 
 TOML strings need their escapes. For a Windows path either escape the
 backslashes:
 
 ```toml
 [font]
-path = "C:\\Windows\\Fonts\\consola.ttf"
+face = "C:\\Windows\\Fonts\\consola.ttf"
 ```
 
 or use a TOML literal string, where backslashes are exactly what they look
@@ -213,14 +242,14 @@ like:
 
 ```toml
 [font]
-path = 'C:\Windows\Fonts\consola.ttf'
+face = 'C:\Windows\Fonts\consola.ttf'
 ```
 
 A family name works too, and is easier to keep across updates:
 
 ```toml
 [font]
-path = "Inconsolata Nerd Font Propo"
+face = "Inconsolata Nerd Font Propo"
 size = 18.0
 ```
 
@@ -233,9 +262,11 @@ built-in font is used and the `font:` line on stdout says so.
 
 A TOML syntax error rejects the whole document, so the app starts with its
 defaults and prints the parser's message and line number on stderr when it
-was started from a console. The file is rewritten on exit in the canonical
-form above, so hand-written comments and unknown keys are not preserved. The
-old `termica.conf` is not read any more. tomlc17 is MIT-licensed; see
+was started from a console. An untouched file is rewritten on exit in the
+canonical form above, so hand-written comments and unknown keys are not
+preserved. If the file was edited, created or deleted while the app ran, the
+save is skipped and the file stays as the user left it. The old
+`termica.conf` is not read any more. tomlc17 is MIT-licensed; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 `shell` names a program rather than a path: if the named shell is not
@@ -273,8 +304,9 @@ an existing path is returned unchanged); and the OSC 52 clipboard path
 (decoded payload, multi-line payload, clear request, denial, and no handler installed).
 The last checks start a real ConPTY: `cmd.exe /c "echo termica-pty-ok"` and a non-ASCII echo
 have to come back through the pipes as UTF-8 with exit code 0, and a `powershell.exe` child
-that writes an OSC 52 request has to reach the app's clipboard callback decoded. That is
-124 checks; the exit code is the number of failures.
+that writes an OSC 52 request has to reach the app's clipboard callback decoded. The settings
+checks also cover the `decoration` enum and the `title_bar` boolean, including refused values
+and the format round trip. That is 143 checks; the exit code is the number of failures.
 
 Everything in that list runs without a window and without touching the keyboard or mouse of
 whoever is logged in, which is deliberate: the features that can only be exercised by a real
@@ -376,12 +408,12 @@ half way, so an early `return` cannot leak either.
     `Alt+M` does whatever readline says it does; nothing under Alt is the app's any more.
 18. **No console window.** Double-click `termica.exe` in Explorer: only the terminal window
     appears. Started from a terminal, the `renderer:` / `font:` lines still land inline.
-19. **Settings survive a restart.** Change opacity (`Ctrl+Shift+=`) or backdrop
+19. **Settings survive a restart.** Change opacity (`Ctrl+Shift+-`) or backdrop
     (`Ctrl+Shift+B`), close the window, start again: the values come back from
     `%APPDATA%\termica\termica.toml`, and the TOML file is plain enough to edit by hand.
     Verified: `shell = "cmd"` starts `cmd.exe` and nothing else (checked in the process
     tree), and the file after exit holds the values the session was using.
-    A `font.path` that is an installed family name (for example
+    A `font.face` that is an installed family name (for example
     `"Inconsolata Nerd Font Propo"`) resolves to that family's regular file; the `font:`
     line names the `.ttf` it opened and the cell size reflects `font.size`.
 20. **A program can ask for the clipboard.** The OSC 52 path is covered by `--selftest`,
@@ -389,17 +421,24 @@ half way, so an early `return` cannot leak either.
     `\e]52;c;<base64>\a` and the app's handler receives it decoded. Try the `ask`
     policy by hand: it should name the request in a dialog and answer the program
     with what you chose.
-21. **Long selections (manual).** Press the left button, drag below the last row and
+21. **Window decoration.** Set `decoration` to each of `rounded`, `square`, `compact` and
+    `native` and restart. The first three should keep the borderless window, with the panel
+    corners, padding and top strip as described in section 7; `native` should show the normal
+    Windows title bar and buttons. With `title_bar = true` the custom frames should draw the
+    terminal title and the three buttons: minimize should go to the taskbar,
+    maximize/restore should toggle, and close should exit cleanly. The title the shell sets
+    should appear on a fresh start.
+22. **Long selections (manual).** Press the left button, drag below the last row and
     hold: the view should keep scrolling and the selection keep growing from the
     tracked anchor. This needs a real pointer; it is not covered by the self test.
-22. **Pointer shape (manual).** A program that sets it (OSC 22, e.g.
+23. **Pointer shape (manual).** A program that sets it (OSC 22, e.g.
     `printf '\e]22;pointer\a'`) should change the cursor over the grid, and leaving the
     window should hand the cursor back. Not covered by the self test.
-23. **IME composition (manual).** With an input method active, the uncommitted text
+24. **IME composition (manual).** With an input method active, the uncommitted text
     should appear at the cursor cell and the candidate window open there. Not covered
     by the self test; no input method is installed on the machine this was built on.
 
-## 7. Window chrome: the corners and the backdrops
+## 7. Window chrome: the corners, the backdrops and the decorations
 
 The window is borderless, per-pixel transparent (SDL does that with
 `DwmEnableBlurBehindWindow` and an empty blur region) and drawn by the app. That rules out the
@@ -428,9 +467,9 @@ system theme. It works with this window, with three requirements:
 
 Two side effects are handled:
 
-- **The system caption buttons come with the extended frame.** This window has its own drag strip
-  and no buttons, so `WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX` are dropped while Mica is on
-  and restored when it goes off.
+- **The system caption buttons come with the extended frame.** The custom frames have their own
+  drag strip, so `WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX` are dropped while Mica is on and
+  restored when it goes off. A `native` decoration keeps them: it is the Windows frame.
 - **The backdrop covers the whole window rectangle, corners included.** A drawn mask cannot cut
   into it, so in Mica modes the window is shaped with `SetWindowRgn`, using the same squircle
   sampled into a polygon. Two costs: regions are not antialiased, so those corners are hard
@@ -440,6 +479,19 @@ On Windows 10 and the first Windows 11 release the attribute is rejected (`DwmSe
 fails), and the app falls back to the panel. It was verified on Windows 11 25H2 (build 26200):
 the material follows the wallpaper - set the wallpaper to red and the window turns red - and
 Mica Alt is visibly different from Mica.
+
+**Decorations.** `decoration` is a small table of frame presets. The first three keep the
+borderless transparent window; only the values they feed into the panel and the top strip
+change. `rounded` draws the squircle panel and reserves the usual 34 px at the top; `square`
+passes a corner radius of 0, so the panel and the window region are rectangles; `compact`
+drops the side padding from 12 to 8 px and the top strip from 34 to 22 px. `native` removes
+`SDL_WINDOW_BORDERLESS` and the hit test, so Windows draws the frame and the caption buttons,
+and the client panel is square. The custom title bar is a 30 px strip drawn inside the panel:
+a subtle tint clipped to the panel's top corners, the terminal's title in the same font as the
+grid, and three 46 px buttons on the right. The buttons use the ordinary hover colours (red
+for close) and call `SDL_MinimizeWindow`, `SDL_MaximizeWindow` / `SDL_RestoreWindow`, and the
+app's normal shutdown. The hit test reports the button strip as normal, so a click is a click
+and not the start of a window drag.
 
 ## If transparency does not work
 
@@ -489,14 +541,14 @@ The app itself only does the parts the library leaves to the embedder:
 | `src/pty.{h,c}` | ConPTY: pipes, the child process, the reader thread, resize, teardown |
 | `src/embed.{h,c}` | the Maple Mono NF bytes linked into the executable |
 | `src/console.{h,c}` | reclaiming the launching console, since the exe is GUI-subsystem |
-| `src/settings.{h,c}` | the `termica.toml` settings file (TOML via tomlc17): read at startup, written on exit |
+| `src/settings.{h,c}` | the `termica.toml` settings file (TOML via tomlc17): read at startup, written on exit when untouched |
 | `src/font_lookup.{h,c}` | a font path or installed family name -> the font file to open |
 | `src/fonts.rc.in` | the Windows resource script that carries those bytes |
 | `src/glyph.{h,c}` | fonts, the glyph cache, drawing a cell's text (bold/italic faces) |
 | `src/style.{h,c}` | a terminal cell style -> colors and decorations for the renderer |
-| `src/panel.{h,c}` | the rounded translucent panel and its antialiased corner masks |
+| `src/panel.{h,c}` | the translucent panel, round or square, and its antialiased corner masks |
 | `src/geometry.{h,c}` | the squircle curve: pure math, shared by the panel and the region |
-| `src/window.{h,c}` | the SDL window, the drag/resize hit test, the Windows 11 chrome |
+| `src/window.{h,c}` | the SDL window, the decoration presets, the drag/resize hit test, the Windows 11 chrome |
 | `src/selftest.c` | `--selftest`, including the ConPTY round trip |
 
 `geometry.c` and `style.c` have no SDL state and no Windows calls, which is what makes them
@@ -539,18 +591,22 @@ easy to reason about on their own.
   same text after scrolling and after reflow (measured against the library headlessly, before
   the app stopped clearing it), `fzf` taking the pointer when it asks for it, five
   distinguishable underline kinds, no console window when started by double-click, and closing
-  the window while the shell runs leaves no `conhost.exe` or shell behind.
-  `--selftest` runs 124 checks, all passing: the ConPTY round trips, the TOML settings parser
+  the window while the shell runs leaves no `conhost.exe` or shell behind. Each decoration
+  preset started and saved its own value, and screenshots of `rounded` with a title bar over the
+  panel and over Mica, plus `native`, showed the expected frame and client area.
+  `--selftest` runs 143 checks, all passing: the ConPTY round trips, the TOML settings parser
   and its format round trip, installed font family names resolving through the registry, and
   the OSC 52 path both from a literal byte string and from a real `powershell.exe` child under
-  ConPTY. Settings are read at startup and written on exit -
+  ConPTY. Settings are read at startup and written on exit when the file was not edited meanwhile -
   `shell = "cmd"` was confirmed by inspecting the process tree, and the file after exit holds
   the session's values. No warnings from the project's own sources under
   `-Wall -Wextra -pedantic`.
 - Not machine-verified, because they need a real keyboard, mouse or input method:
   copy-on-select, selection autoscroll at the grid edge, the OSC 22 pointer shape, the
-  OSC 52 `ask` dialog, and IME preedit drawing. The code paths are wired and compile; the
-  behaviour is listed above as manual checks.
+  OSC 52 `ask` dialog, IME preedit drawing, and the custom title bar buttons. The buttons
+  did maximize, restore and close the window when clicked during development, but the
+  pointer events were injected desktop-wide, so by the rule above that is not counted as
+  evidence; they are listed as a manual check.
 - Also not machine-verified, for a method reason rather than a feature reason: anything
   whose only proof was a clipboard read driven by desktop-wide synthetic keys -
   `Ctrl+Shift+C` reaching the app, the `shell = cmd` setting reaching the child, and the

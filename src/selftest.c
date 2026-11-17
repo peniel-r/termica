@@ -875,12 +875,14 @@ static void test_settings(void)
     const char *document =
         "# a comment\n"
         "[font]\n"
-        "path = 'C:\\fonts\\Maple Mono.ttf'\n"
+        "face = 'C:\\fonts\\Maple Mono.ttf'\n"
         "size = 13\n"
         "\n"
         "[window]\n"
         "opacity = 0.5\n"
         "backdrop = \"mica\"\n"
+        "decoration = \"compact\"\n"
+        "title_bar = true\n"
         "\n"
         "[terminal]\n"
         "copy_on_select = true\n"
@@ -888,19 +890,26 @@ static void test_settings(void)
         "osc52 = \"deny\"\n";
 
     settings_default(&settings);
-    check(settings.point_size == 16.0f, "default point size is 16");
-    check(settings.panel_opacity == 0.80f, "default opacity is 0.80");
+    check(settings.point_size == 11.0f, "default point size is 11");
+    check(settings.panel_opacity == 1.0f, "default opacity is 1.0");
+    check(settings.backdrop == 1, "default backdrop is mica");
     check(settings.shell == SETTINGS_SHELL_AUTO, "default shell is auto");
     check(settings.osc52 == SETTINGS_OSC52_ASK, "default osc52 is ask");
     check(settings.font[0] == '\0', "default font is the built-in one");
+    check(settings.decoration == SETTINGS_DECORATION_NATIVE,
+          "default decoration is native");
+    check(settings.title_bar, "default title bar is on");
 
     check(settings_parse_toml(&settings, document, strlen(document)),
           "a full TOML document parses");
     check(strcmp(settings.font, "C:\\fonts\\Maple Mono.ttf") == 0,
-          "font path is stored");
+          "font face is stored");
     check(settings.point_size == 13.0f, "size is stored");
     check(settings.panel_opacity == 0.5f, "opacity is stored");
     check(settings.backdrop == 1, "backdrop is stored");
+    check(settings.decoration == SETTINGS_DECORATION_COMPACT,
+          "decoration is stored");
+    check(settings.title_bar, "title bar is stored");
     check(settings.copy_on_select, "copy-on-select is stored");
     check(settings.shell == SETTINGS_SHELL_CMD, "shell is stored");
     check(settings.osc52 == SETTINGS_OSC52_DENY, "osc52 is stored");
@@ -956,6 +965,33 @@ static void test_settings(void)
           "an unknown backdrop is refused");
     check(settings.backdrop == 2, "a refused backdrop left it alone");
 
+    check(settings_parse_toml(&settings, "[window]\ndecoration = \"square\"\n",
+                              strlen("[window]\ndecoration = \"square\"\n")),
+          "square decoration parses");
+    check(settings.decoration == SETTINGS_DECORATION_SQUARE,
+          "square decoration stored");
+    check(settings_parse_toml(&settings, "[window]\ndecoration = \"native\"\n",
+                              strlen("[window]\ndecoration = \"native\"\n")),
+          "native decoration parses");
+    check(settings.decoration == SETTINGS_DECORATION_NATIVE,
+          "native decoration stored");
+    check(!settings_parse_toml(&settings,
+                               "[window]\ndecoration = \"fancy\"\n",
+                               strlen("[window]\ndecoration = \"fancy\"\n")),
+          "an unknown decoration is refused");
+    check(settings.decoration == SETTINGS_DECORATION_NATIVE,
+          "a refused decoration left it alone");
+    check(!settings_parse_toml(&settings, "[window]\ndecoration = 2\n",
+                               strlen("[window]\ndecoration = 2\n")),
+          "a non-string decoration is refused");
+    check(!settings_parse_toml(&settings, "[window]\ntitle_bar = \"yes\"\n",
+                               strlen("[window]\ntitle_bar = \"yes\"\n")),
+          "a non-boolean title bar is refused");
+    check(settings_parse_toml(&settings, "[WINDOW]\nTitleBar = false\n",
+                              strlen("[WINDOW]\nTitleBar = false\n")),
+          "the title bar key folds case and separators");
+    check(!settings.title_bar, "the folded title bar is stored");
+
     check(settings_parse_toml(&settings, "[terminal]\nshell = \"pwsh\"\n",
                               strlen("[terminal]\nshell = \"pwsh\"\n")),
           "shell parses");
@@ -972,10 +1008,10 @@ static void test_settings(void)
           "an unknown osc52 policy is refused");
 
     check(settings_parse_toml(&settings,
-                              "[FONT]\nPath = 'C:\\folded.ttf'\nSize = 14\n",
-                              strlen("[FONT]\nPath = 'C:\\folded.ttf'\nSize = 14\n")),
+                              "[FONT]\nFace = 'C:\\folded.ttf'\nSize = 14\n",
+                              strlen("[FONT]\nFace = 'C:\\folded.ttf'\nSize = 14\n")),
           "section and key names fold case");
-    check(strcmp(settings.font, "C:\\folded.ttf") == 0, "folded path stored");
+    check(strcmp(settings.font, "C:\\folded.ttf") == 0, "folded face stored");
     check(settings.point_size == 14.0f, "folded size stored");
     check(settings_parse_toml(&settings,
                               "[TERMINAL]\nCopyOnSelect = true\n",
@@ -995,30 +1031,40 @@ static void test_settings(void)
     check(!settings_parse_toml(&settings, "[font\nsize = 1\n",
                                strlen("[font\nsize = 1\n")),
           "malformed TOML is refused");
-    check(settings.point_size == 16.0f, "malformed TOML changes nothing");
+    check(settings.point_size == 11.0f, "malformed TOML changes nothing");
 
-    check(settings_parse_toml(&settings, "[font]\npath = \"\"\n",
-                              strlen("[font]\npath = \"\"\n")),
-          "an empty font path parses");
-    check(settings.font[0] == '\0', "an empty font path is stored");
+    check(settings_parse_toml(&settings, "[font]\nface = \"\"\n",
+                              strlen("[font]\nface = \"\"\n")),
+          "an empty font face parses");
+    check(settings.font[0] == '\0', "an empty font face is stored");
 
     memset(long_font, 'a', 600);
     long_font[600] = '\0';
-    snprintf(text, sizeof text, "[font]\npath = \"%s\"\n", long_font);
+    snprintf(text, sizeof text, "[font]\nface = \"%s\"\n", long_font);
     check(!settings_parse_toml(&settings, text, strlen(text)),
-          "an oversized font path is refused");
-    check(settings.font[0] == '\0', "the oversized path left the font alone");
+          "an oversized font face is refused");
+    check(settings.font[0] == '\0', "the oversized face left the font alone");
+
+    check(settings_parse_toml(&settings, "[font]\npath = \"old.ttf\"\n",
+                              strlen("[font]\npath = \"old.ttf\"\n")),
+          "the old path key still parses");
+    check(strcmp(settings.font, "old.ttf") == 0,
+          "the old path key is still stored");
 
     settings_default(&settings);
     settings.point_size = 13.5f;
     settings.panel_opacity = 0.85f;
     settings.backdrop = 3;
+    settings.decoration = SETTINGS_DECORATION_SQUARE;
+    settings.title_bar = true;
     settings.copy_on_select = true;
     settings.shell = SETTINGS_SHELL_PWSH;
     settings.osc52 = SETTINGS_OSC52_ALLOW;
     strcpy(settings.font, "C:\\fonts\\A \"B\".ttf");
     settings_format(&settings, text, sizeof text);
     check(strstr(text, "[font]") != NULL, "the formatted file has sections");
+    check(strstr(text, "face = ") != NULL, "the formatted file uses face");
+    check(strstr(text, "path = ") == NULL, "the formatted file has no path");
     check(strstr(text, "C:\\\\fonts") != NULL, "backslashes are escaped");
 
     settings_default(&again);
@@ -1027,6 +1073,8 @@ static void test_settings(void)
     check(again.point_size == settings.point_size &&
           again.panel_opacity == settings.panel_opacity &&
           again.backdrop == settings.backdrop &&
+          again.decoration == settings.decoration &&
+          again.title_bar == settings.title_bar &&
           again.copy_on_select == settings.copy_on_select &&
           again.shell == settings.shell && again.osc52 == settings.osc52 &&
           strcmp(again.font, settings.font) == 0,

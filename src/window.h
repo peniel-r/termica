@@ -1,15 +1,18 @@
 /*
  * termica - the SDL window and its Windows chrome.
  *
- * The window is borderless, resizable and per-pixel transparent: the app
- * draws the panel, and transparent pixels show what is behind the window.
- * On Windows 11 the DWM can draw Mica, Mica Alt or Acrylic behind it
- * instead.
+ * With the custom decorations the window is borderless, resizable and
+ * per-pixel transparent: the app draws the panel, and transparent pixels
+ * show what is behind the window. On Windows 11 the DWM can draw Mica, Mica
+ * Alt or Acrylic behind it instead.
  *
  * A DWM backdrop fills the whole window rectangle, corners included, and a
  * drawn mask cannot cut into it, so with a backdrop the window is shaped
  * with a region. The region uses the same squircle as the drawn panel, so
  * the corner shape does not change when the backdrop does.
+ *
+ * The "native" decoration lets Windows draw the title bar and frame; the
+ * custom title bar is only used by the other three.
  *
  * Strict C99; the Windows parts are behind #ifdef _WIN32.
  */
@@ -29,9 +32,28 @@ typedef enum {
     WINDOW_BACKDROP_COUNT
 } WindowBackdrop;
 
-/* Create the borderless, transparent, resizable window with the drag and
- * resize hit test installed. NULL on failure (SDL's error is set). */
-SDL_Window *window_create(const char *title, int width, int height);
+typedef enum {
+    WINDOW_DECORATION_ROUNDED = 0,  /* custom frame, rounded panel   */
+    WINDOW_DECORATION_SQUARE,       /* custom frame, square panel    */
+    WINDOW_DECORATION_COMPACT,      /* custom frame, less top inset  */
+    WINDOW_DECORATION_NATIVE,       /* the Windows title bar         */
+    WINDOW_DECORATION_COUNT
+} WindowDecoration;
+
+/* Logical (not pixel) sizes. The hit test runs in window coordinates, while
+ * the drawing side scales these by the display scale. */
+#define WINDOW_DRAG_STRIP 30
+#define WINDOW_COMPACT_DRAG_STRIP 22
+#define WINDOW_TITLE_BAR_HEIGHT 30
+#define WINDOW_TITLE_BAR_BUTTON_WIDTH 46
+#define WINDOW_TITLE_BAR_BUTTONS 3
+
+/* Create the window. A native decoration keeps the system frame; the other
+ * three are borderless with the drag and resize hit test installed.
+ * `title_bar` draws a custom title bar and its three buttons, and is
+ * ignored when the decoration is native. */
+SDL_Window *window_create(const char *title, int width, int height,
+                          WindowDecoration decoration, bool title_bar);
 
 /* Apply the backdrop material and the matching rounded window region.
  * Call when the mode changes and after every resize, because the region
@@ -39,9 +61,11 @@ SDL_Window *window_create(const char *title, int width, int height);
  * the OS does not know the material (before Windows 11 22H2) the window
  * stays on WINDOW_BACKDROP_PANEL. */
 WindowBackdrop window_sync_chrome(SDL_Window *window, WindowBackdrop backdrop,
+                                  WindowDecoration decoration,
                                   int corner_radius);
 
-/* Human readable name for the status line. */
+/* Human readable names for the status line. */
 const char *window_backdrop_name(WindowBackdrop backdrop);
+const char *window_decoration_name(WindowDecoration decoration);
 
 #endif /* TERMICA_WINDOW_H */
