@@ -57,6 +57,10 @@ typedef struct Glyphs {
      * built-in family is the main font. */
     TTF_Font *fallback;
 
+    /* Symbols Nerd Font Mono, compiled in, as the last resort for symbols -
+     * especially codepoints above U+FFFF, which the cache does not cover. */
+    TTF_Font *symbol_fallback;
+
     /* True when the main family is the font compiled into the executable
      * (no path, or the requested path could not be opened). */
     bool built_in;

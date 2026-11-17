@@ -5,8 +5,9 @@
  * the Windows resource compiler. The RCDATA resource IDs must stay in step
  * with EmbeddedFontFace in embed.h.
  *
- * The files are Maple Mono NF 7.9 (Nerd-Font-patched, monospaced icons),
+ * Resources 1-4 are Maple Mono NF 7.9 (Nerd-Font-patched, monospaced icons),
  * by subframe7536, SIL OFL 1.1.
+ * Resource 5 is Symbols Nerd Font Mono, by the Nerd Fonts project, MIT.
  */
 
 #include <windows.h>
@@ -15,3 +16,4 @@
 2 RCDATA "@TERMICA_FONT_DIR@/MapleMono-NF-Bold.ttf"
 3 RCDATA "@TERMICA_FONT_DIR@/MapleMono-NF-Italic.ttf"
 4 RCDATA "@TERMICA_FONT_DIR@/MapleMono-NF-BoldItalic.ttf"
+5 RCDATA "@TERMICA_FONT_DIR@/SymbolsNerdFontMono-Regular.ttf"

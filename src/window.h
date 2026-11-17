@@ -64,8 +64,4 @@ WindowBackdrop window_sync_chrome(SDL_Window *window, WindowBackdrop backdrop,
                                   WindowDecoration decoration,
                                   int corner_radius);
 
-/* Human readable names for the status line. */
-const char *window_backdrop_name(WindowBackdrop backdrop);
-const char *window_decoration_name(WindowDecoration decoration);
-
 #endif /* TERMICA_WINDOW_H */

@@ -6,6 +6,11 @@
  * font with Nerd icons even when no font is installed and no font path is
  * given. A path passed on the command line still wins.
  *
+ * Symbols Nerd Font Mono (MIT, the Nerd Fonts project) is linked in as a
+ * fifth resource and used as a last-resort glyph fallback, which is how
+ * codepoints above U+FFFF (Material Design and other Symbols-set icons) get
+ * drawn at all - the glyph cache only covers the BMP.
+ *
  * Strict C99.
  */
 
@@ -17,10 +22,11 @@
 
 /* Resource IDs, kept in step with src/fonts.rc.in. */
 typedef enum {
-    EMBEDDED_FONT_REGULAR     = 1,
-    EMBEDDED_FONT_BOLD        = 2,
-    EMBEDDED_FONT_ITALIC      = 3,
-    EMBEDDED_FONT_BOLD_ITALIC = 4
+    EMBEDDED_FONT_REGULAR        = 1,
+    EMBEDDED_FONT_BOLD           = 2,
+    EMBEDDED_FONT_ITALIC         = 3,
+    EMBEDDED_FONT_BOLD_ITALIC    = 4,
+    EMBEDDED_FONT_SYMBOLS_MONO   = 5
 } EmbeddedFontFace;
 
 /* The bytes of one face. The memory belongs to the executable and stays

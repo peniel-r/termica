@@ -262,16 +262,20 @@ static bool is_dumb_terminal(const wchar_t *value)
     return name_matches(value, L"dumb", 4) && value[4] == L'\0';
 }
 
-/* The child inherits this process's environment, except that TERM and
- * COLORTERM are filled in: TERM when missing or "dumb", COLORTERM when
- * missing or empty. Programs that check whether they are talking to a real
- * terminal (git, vim, starship's prompt) key off them, and a Windows
- * process has neither by default. The result is a
+/* The child inherits this process's environment, except that TERM,
+ * COLORTERM, TERMICA and TERMICA_SHELL_INTEGRATION are filled in: TERM
+ * when missing or "dumb", COLORTERM when missing or empty, the two TERMICA
+ * markers always. Programs that check whether they are talking to a real
+ * terminal (git, vim, starship's prompt) key off the first two, and a
+ * Windows process has neither by default; shell profiles key off TERMICA
+ * to opt into the integration that feeds the status bar. The result is a
  * GetEnvironmentStringsW()-style block (double NUL) owned by the caller. */
 static wchar_t *child_environment(void)
 {
     static const wchar_t term_entry[] = L"TERM=xterm-256color";
     static const wchar_t colorterm_entry[] = L"COLORTERM=truecolor";
+    static const wchar_t termica_entry[] = L"TERMICA=1";
+    static const wchar_t integration_entry[] = L"TERMICA_SHELL_INTEGRATION=1";
     wchar_t *block = GetEnvironmentStringsW();
     wchar_t *result;
     wchar_t *cursor;
@@ -279,6 +283,8 @@ static wchar_t *child_environment(void)
     size_t   offset = 0;
     bool     replace_term = true;
     bool     replace_colorterm = true;
+    bool     replace_termica = true;
+    bool     replace_integration = true;
 
     if (!block)
         return NULL;
@@ -291,6 +297,10 @@ static wchar_t *child_environment(void)
             replace_term = length == 5 || is_dumb_terminal(cursor + 5);
         else if (name_matches(cursor, L"COLORTERM=", 10))
             replace_colorterm = length == 10;
+        else if (name_matches(cursor, L"TERMICA=", 8))
+            replace_termica = true;
+        else if (name_matches(cursor, L"TERMICA_SHELL_INTEGRATION=", 26))
+            replace_integration = true;
     }
 
     /* Pass 2: size the copy, leaving out the entries being replaced. */
@@ -298,6 +308,11 @@ static wchar_t *child_environment(void)
         if (name_matches(cursor, L"TERM=", 5) && replace_term)
             continue;
         if (name_matches(cursor, L"COLORTERM=", 10) && replace_colorterm)
+            continue;
+        if (name_matches(cursor, L"TERMICA=", 8) && replace_termica)
+            continue;
+        if (name_matches(cursor, L"TERMICA_SHELL_INTEGRATION=", 26) &&
+            replace_integration)
             continue;
         chars += wcslen(cursor) + 1;
     }
@@ -307,6 +322,10 @@ static wchar_t *child_environment(void)
         chars += sizeof term_entry / sizeof term_entry[0];
     if (replace_colorterm)
         chars += sizeof colorterm_entry / sizeof colorterm_entry[0];
+    if (replace_termica)
+        chars += sizeof termica_entry / sizeof termica_entry[0];
+    if (replace_integration)
+        chars += sizeof integration_entry / sizeof integration_entry[0];
 
     result = (wchar_t *)malloc(chars * sizeof *result);
     if (!result) {
@@ -321,6 +340,11 @@ static wchar_t *child_environment(void)
         if (name_matches(cursor, L"TERM=", 5) && replace_term)
             continue;
         if (name_matches(cursor, L"COLORTERM=", 10) && replace_colorterm)
+            continue;
+        if (name_matches(cursor, L"TERMICA=", 8) && replace_termica)
+            continue;
+        if (name_matches(cursor, L"TERMICA_SHELL_INTEGRATION=", 26) &&
+            replace_integration)
             continue;
         memcpy(result + offset, cursor, length * sizeof *result);
         offset += length;
@@ -339,6 +363,18 @@ static wchar_t *child_environment(void)
         size_t length = sizeof colorterm_entry / sizeof colorterm_entry[0];
 
         memcpy(result + offset, colorterm_entry, length * sizeof *result);
+        offset += length;
+    }
+    if (replace_termica) {
+        size_t length = sizeof termica_entry / sizeof termica_entry[0];
+
+        memcpy(result + offset, termica_entry, length * sizeof *result);
+        offset += length;
+    }
+    if (replace_integration) {
+        size_t length = sizeof integration_entry / sizeof integration_entry[0];
+
+        memcpy(result + offset, integration_entry, length * sizeof *result);
         offset += length;
     }
     result[offset] = L'\0';

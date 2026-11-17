@@ -12,8 +12,11 @@
 
 #include "term.h"
 #include "pty.h"
+#include "embed.h"
 #include "font_lookup.h"
+#include "git.h"
 #include "settings.h"
+#include "statusbar.h"
 #include "style.h"
 
 #include <stdio.h>
@@ -1198,6 +1201,27 @@ static void test_clipboard_write_conpty(void)
 }
 #endif /* _WIN32 */
 
+/* The faces compiled into the executable. On Windows they are RCDATA
+ * resources; the glyph system relies on the built-in Maple family and the
+ * Symbols Nerd Font Mono fallback being present. */
+static void test_embedded_fonts(void)
+{
+#ifdef _WIN32
+    const void *data = NULL;
+    size_t size = 0;
+
+    check(embedded_font(EMBEDDED_FONT_REGULAR, &data, &size) &&
+              data && size > 1024,
+          "the built-in Maple Mono NF regular face is embedded");
+    check(embedded_font(EMBEDDED_FONT_SYMBOLS_MONO, &data, &size) &&
+              data && size > 1024,
+          "Symbols Nerd Font Mono is embedded");
+    check(embedded_font_available(), "embedded_font_available is true");
+#else
+    check(true, "embedded fonts are Windows-only");
+#endif
+}
+
 /* A font setting may be a family name. The resolver leaves a path that
  * already names a file alone and finds an installed family through the
  * Windows font registry. */
@@ -1217,6 +1241,259 @@ static void test_font_lookup(void)
 #endif
 }
 
+/* The status bar config file: parse, format round trip, the 9 pt floor,
+ * the format string and the style grammar. */
+static void test_statusbar_settings(void)
+{
+    Statusbar sb;
+    Statusbar again;
+    char text[8192];
+    const char *document =
+        "format = '$directory$git_branch $time'\n"
+        "[font]\n"
+        "face = 'GeistMono NF'\n"
+        "size = 8\n"
+        "\n"
+        "[directory]\n"
+        "truncation_length = 2\n"
+        "style = 'fg:#aabbcc bold'\n"
+        "\n"
+        "[cmd_duration]\n"
+        "min_time = 1000\n";
+
+    statusbar_default(&sb);
+    check(sb.point_size == 9.0f, "default statusbar size is 9");
+    check(sb.modules[STATUSBAR_DIRECTORY].truncation_length == 3,
+          "default directory truncation is 3");
+    check(sb.modules[STATUSBAR_CMD_STATUS].parsed_success.has_fg,
+          "cmd success style resolves");
+
+    statusbar_parse_toml(&sb, document, strlen(document));
+    check(sb.point_size == 9.0f, "a statusbar size below 9 is refused");
+    check(sb.modules[STATUSBAR_DIRECTORY].truncation_length == 2,
+          "directory truncation parses");
+    check(sb.modules[STATUSBAR_DIRECTORY].parsed_style.has_fg &&
+              sb.modules[STATUSBAR_DIRECTORY].parsed_style.bold,
+          "module style resolves to color + bold");
+    check(sb.modules[STATUSBAR_CMD_DURATION].min_time_ms == 1000,
+          "cmd_duration min_time parses");
+    check(strcmp(sb.format, "$directory$git_branch $time") == 0,
+          "top-level format parses");
+
+    statusbar_format(&sb, text, sizeof text);
+    check(strstr(text, "size = 9") != NULL, "formatted file keeps the size");
+    check(strstr(text, "truncation_length = 2") != NULL,
+          "formatted file keeps truncation");
+
+    statusbar_default(&again);
+    check(statusbar_parse_toml(&again, text, strlen(text)),
+          "the formatted file reparses");
+    check(again.point_size == 9.0f &&
+              again.modules[STATUSBAR_DIRECTORY].truncation_length == 2,
+          "the statusbar format round trip holds");
+
+    /* The three containers and the reserved busy slot parse and round trip. */
+    {
+        const char *containers =
+            "center_format = '$busy'\n"
+            "right_format = '$time'\n"
+            "[busy]\n"
+            "idle = '.'\n";
+        Statusbar c;
+        char container_text[8192];
+
+        statusbar_default(&c);
+        check(statusbar_parse_toml(&c, containers, strlen(containers)),
+              "center_format and busy idle parse");
+        check(strcmp(c.center_format, "$busy") == 0, "center_format stored");
+        check(strcmp(c.right_format, "$time") == 0, "right_format stored");
+        check(strcmp(c.modules[STATUSBAR_BUSY].idle, ".") == 0,
+              "busy idle stored");
+        statusbar_format(&c, container_text, sizeof container_text);
+        check(strstr(container_text, "center_format = \"$busy\"") != NULL,
+              "formatted file has center_format");
+        check(strstr(container_text, "idle = \".\"") != NULL,
+              "formatted file has the busy idle");
+        statusbar_default(&again);
+        check(statusbar_parse_toml(&again, container_text,
+                                   strlen(container_text)) &&
+              strcmp(again.center_format, "$busy") == 0,
+              "center_format survives the round trip");
+    }
+}
+
+/* The render engine: module values, style runs and the empty-module space
+ * elision rule. */
+static void test_statusbar_render(void)
+{
+    Statusbar sb;
+    StatusbarState state;
+    char out[1024];
+    StatusbarRun runs[32];
+    int count;
+
+    statusbar_default(&sb);
+
+    memset(&state, 0, sizeof state);
+    state.directory.value = "~/proj";
+    state.time.value = "12:00:00";
+    count = statusbar_render(&sb, &state, "$directory $time", out,
+                             sizeof out, runs, 32);
+    check(count >= 2, "a populated line produces runs");
+    check(strstr(out, "~/proj") != NULL, "directory value renders");
+    check(strstr(out, "12:00:00") != NULL, "time value renders");
+
+    memset(&state, 0, sizeof state);
+    state.time.value = "12:00:00";
+    count = statusbar_render(&sb, &state, "$directory $time", out,
+                             sizeof out, runs, 32);
+    check(strcmp(out, "12:00:00") == 0,
+          "an empty module drops its following space");
+
+    /* The busy slot keeps its cell when it carries a placeholder, so the
+     * bar does not reflow when a command starts; only an empty placeholder
+     * collapses. */
+    memset(&state, 0, sizeof state);
+    state.busy.symbol = " ";
+    state.time.value = "12:00:00";
+    count = statusbar_render(&sb, &state, "$busy  $time", out,
+                             sizeof out, runs, 32);
+    check(out[0] == ' ', "the idle busy placeholder reserves a cell");
+    check(strstr(out, "12:00:00") != NULL, "time renders after the slot");
+
+    memset(&state, 0, sizeof state);
+    state.busy.symbol = "";
+    state.time.value = "12:00:00";
+    count = statusbar_render(&sb, &state, "$busy $time", out,
+                             sizeof out, runs, 32);
+    check(strcmp(out, "12:00:00") == 0,
+          "an empty busy placeholder collapses with its space");
+}
+
+/* The pure statusbar helpers. */
+static void test_statusbar_helpers(void)
+{
+    Statusbar sb;
+    char out[256];
+    char frames[16][8];
+    int count;
+
+    statusbar_default(&sb);
+
+    statusbar_shorten_path(&sb, "C:/Users/me/proj/src", out, sizeof out);
+    check(strcmp(out, "me/proj/src") == 0, "path truncation keeps 3 parts");
+    statusbar_shorten_path(&sb, "a/b", out, sizeof out);
+    check(strcmp(out, "a/b") == 0, "fewer parts than the limit stay whole");
+
+    /* The child's PEB reports the working directory with a trailing
+     * separator; the display must not show it. */
+    sb.modules[STATUSBAR_DIRECTORY].truncation_length = 0;
+    statusbar_shorten_path(&sb, "C:\\work\\deep\\path\\", out, sizeof out);
+    check(strcmp(out, "C:\\work\\deep\\path") == 0,
+          "a trailing separator is dropped");
+    sb.modules[STATUSBAR_DIRECTORY].truncation_length = 3;
+
+    /* Home substitution: the leading home components become home_symbol and
+     * the rest re-joins with a separator ("~", not "~Music"). */
+    {
+        SDL_setenv_unsafe("USERPROFILE", "C:\\Users\\tester", 1);
+        statusbar_shorten_path(&sb, "C:\\Users\\tester\\Music\\", out,
+                               sizeof out);
+        check(strcmp(out, "~\\Music") == 0,
+              "home becomes ~ and re-joins with a separator");
+    }
+
+    statusbar_format_duration(750, out, sizeof out);
+    check(strcmp(out, "750ms") == 0, "millisecond duration");
+    statusbar_format_duration(12500, out, sizeof out);
+    check(strcmp(out, "12s") == 0, "second duration");
+    statusbar_format_duration(185000, out, sizeof out);
+    check(strcmp(out, "3m 5s") == 0, "minute duration");
+
+    statusbar_git_status_text(&sb, 2, 0, 1, 0, false, out, sizeof out);
+    check(strstr(out, "2") != NULL &&
+              strstr(out, sb.modules[STATUSBAR_GIT_STATUS].dirty) != NULL,
+          "git status shows ahead and dirty");
+    statusbar_git_status_text(&sb, 0, 0, 0, 0, true, out, sizeof out);
+    check(strcmp(out, sb.modules[STATUSBAR_GIT_STATUS].clean) == 0,
+          "a clean repo shows the clean glyph");
+
+    count = statusbar_busy_frames(frames, 16);
+    check(count == 10, "ten fixed spinner frames");
+    check(strcmp(frames[0], "\u280B") == 0, "the first spinner frame");
+    check(strcmp(statusbar_busy_idle_default(), "\uF1807") == 0,
+          "the resting icon default is fixed");
+}
+
+/* The git porcelain-v2 parser. */
+static void test_git_parser(void)
+{
+    GitStatus status;
+    const char *clean =
+        "# branch.oid abc\n"
+        "# branch.head main\n"
+        "# branch.upstream origin/main\n"
+        "# branch.ab +0 -0\n";
+    const char *dirty =
+        "# branch.oid abc\n"
+        "# branch.head feature\r\n"
+        "# branch.ab +2 -1\n"
+        "1 M. N... 100644 100644 100644 file.c\n"
+        "u UU N... 100644 100644 100644 conflict.txt\n"
+        "? untracked.txt\n";
+
+    check(git_parse_status(clean, strlen(clean), &status),
+          "clean repo output parses");
+    check(status.in_repo && strcmp(status.branch, "main") == 0,
+          "the branch name is parsed");
+    check(status.clean, "a clean repo is clean");
+
+    check(git_parse_status(dirty, strlen(dirty), &status),
+          "dirty repo output parses");
+    check(strcmp(status.branch, "feature") == 0, "CRLF branch name is trimmed");
+    check(status.ahead == 2 && status.behind == 1, "ahead/behind are parsed");
+    check(status.dirty == 2, "tracked and untracked changes are counted");
+    check(status.conflicted == 1, "unmerged entries are counted");
+    check(!status.clean, "a dirty repo is not clean");
+
+    check(!git_parse_status("not a repo\n", strlen("not a repo\n"), &status),
+          "non-repo output is refused");
+}
+
+/* OSC 7 and OSC 133 feed the terminal's pwd and command state. */
+static void test_term_pwd_and_prompts(void)
+{
+    Term term;
+
+    check(term_init(&term, 40, 10), "term_init for pwd and prompts");
+    check(term_pwd(&term) == NULL, "no pwd before the shell reports one");
+
+    write_string(term.handle, "\x1b]7;file:///C:/Users/a%20b\x07");
+    check(term.pwd_changed, "OSC 7 sets the pwd_changed flag");
+#ifdef _WIN32
+    /* On Windows the decoded URI path is normalized to backslashes. */
+    check(term_pwd(&term) && strcmp(term_pwd(&term), "C:\\Users\\a b") == 0,
+          "OSC 7 decodes the file URI");
+#else
+    check(term_pwd(&term) && strcmp(term_pwd(&term), "C:/Users/a b") == 0,
+          "OSC 7 decodes the file URI");
+#endif
+
+    write_string(term.handle, "\x1b]133;C\x07");
+    check(term.command_running, "OSC 133 C marks a running command");
+
+    write_string(term.handle, "\x1b]133;D;7\x07");
+    check(!term.command_running, "OSC 133 D ends the command");
+    check(term.last_command_known, "the exit code is known");
+    check(term.last_exit_code == 7, "the exit code is stored");
+
+    write_string(term.handle, "\x1b" "c");
+    check(!term.command_running, "a hard reset clears the running flag");
+    check(term_pwd(&term) == NULL, "a hard reset clears the pwd");
+
+    term_free(&term);
+}
+
 int term_selftest(void)
 {
     printf("termica self test (libghostty-vt)\n\n");
@@ -1233,6 +1510,12 @@ int term_selftest(void)
     test_mouse_and_focus();
     test_underline_styles();
     test_settings();
+    test_statusbar_settings();
+    test_statusbar_render();
+    test_statusbar_helpers();
+    test_git_parser();
+    test_term_pwd_and_prompts();
+    test_embedded_fonts();
     test_font_lookup();
     test_clipboard_write();
 #ifdef _WIN32

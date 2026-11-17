@@ -52,10 +52,12 @@
 #include "console.h"
 #include "embed.h"
 #include "font_lookup.h"
+#include "git.h"
 #include "glyph.h"
 #include "panel.h"
 #include "pty.h"
 #include "settings.h"
+#include "statusbar.h"
 #include "style.h"
 #include "term.h"
 #include "window.h"
@@ -63,6 +65,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* Over a DWM backdrop the panel is only a light tint: the material is the
  * background, the tint just keeps the text readable. */
@@ -77,6 +80,22 @@ static const SDL_Color TITLE_TEXT = { 205, 212, 220, 255 };
 
 /* What the built-in family is called, for the startup line. */
 #define BUILT_IN_FONT "Maple Mono NF (built in)"
+
+/* The status bar band: vertical padding around its text and the refresh
+ * cadence of the spinner and clock. */
+#define STATUSBAR_VPAD 4
+#define STATUSBAR_TIMER_MS 100
+#define GIT_REFRESH_MS 500
+#define STATUSBAR_MAX_FRAMES 16
+#define STATUSBAR_LINE_BYTES 4096
+#define STATUSBAR_MAX_RUNS 64
+
+/* The three containers the bar lays out into. */
+enum {
+    STATUSBAR_LEFT = 0,
+    STATUSBAR_CENTER,
+    STATUSBAR_RIGHT
+};
 
 /* Room for uncommitted IME text. SDL3 hands the string over for the
  * duration of the event, so the app keeps its own copy; 128 bytes is
@@ -127,6 +146,25 @@ typedef struct App {
     bool           mouse_held;      /* a button is down over the grid   */
     bool           bar_drag;        /* the scrollbar thumb is being dragged */
     Settings       settings;
+    Statusbar      statusbar;
+    Glyphs         statusbar_glyphs;
+    Git           *git;
+
+    /* Cached git result for the current directory, and when we last asked
+     * for a refresh. */
+    GitStatus      git_status;
+    bool           git_have;
+    uint64_t       last_git_request_ms;
+
+    /* Spinner frames from `[busy] symbols`, and which one is showing. */
+    char           busy_frames[STATUSBAR_MAX_FRAMES][8];
+    int            busy_frame_count;
+    int            busy_frame_index;
+
+    /* Last clock second the bar drew, so the clock only redraws on a
+     * rollover. */
+    int            last_time_second;
+    bool           command_was_running;
 
     /* The pointer shape the program last asked for, and the cursor made
      * from it. NULL cursor means the system default. */
@@ -148,6 +186,7 @@ typedef struct App {
     bool           cursor_lit;      /* blink phase                      */
     bool           cursor_blinks;   /* the terminal asked for a blink   */
     SDL_TimerID    blink_timer;
+    SDL_TimerID    statusbar_timer;
 } App;
 
 /* Everything the cell drawing needs from the frame it belongs to. */
@@ -254,6 +293,17 @@ static int chrome_top(const App *app)
     if (app->decoration == WINDOW_DECORATION_COMPACT)
         return (int)(WINDOW_COMPACT_DRAG_STRIP * app->display_scale);
     return (int)((WINDOW_DRAG_STRIP + 4.0f) * app->display_scale);
+}
+
+/* The bottom band the status bar occupies, from its own font metrics plus
+ * a little breathing room above and below the text. */
+static int statusbar_height(const App *app)
+{
+    int cell = app->statusbar_glyphs.cell_height;
+
+    if (cell < 1)
+        cell = app->glyphs.cell_height;
+    return cell + 2 * (int)(STATUSBAR_VPAD * app->display_scale);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1500,7 +1550,7 @@ static void fit_grid(App *app)
     app->grid_top = chrome_top(app);
 
     columns = (pixel_width - 2 * padding) / app->glyphs.cell_width;
-    rows = (pixel_height - app->grid_top - padding - app->glyphs.cell_height) /
+    rows = (pixel_height - app->grid_top - padding - statusbar_height(app)) /
            app->glyphs.cell_height;
     if (columns < 1)
         columns = 1;
@@ -1572,21 +1622,16 @@ static void pump_shell(App *app)
         parsed = true;
     }
 
-    /* The direct child is gone. Report it once, and leave the last output
-     * on screen; the window can be closed after reading it. */
+    /* The direct child is gone. This is what `exit` (or a shell that ends
+     * for any reason) does, so close the app with it: the window is only
+     * hosting that shell, and leaving it up with a dead shell is not useful.
+     * The main loop exits and cleanup tears the tree down. */
     if (!app->shell_exited) {
         uint32_t code = 0;
 
         if (pty_exit_code(app->pty, &code)) {
-            char message[128];
-
             app->shell_exited = true;
-            SDL_snprintf(message, sizeof message,
-                         "\r\n\x1b[90m[process exited with code %u]"
-                         "\x1b[0m\r\n",
-                         (unsigned)code);
-            term_write(&app->term, message, strlen(message));
-            parsed = true;
+            app->running = false;
         }
     }
 
@@ -1598,35 +1643,268 @@ static void pump_shell(App *app)
 /* Frame rendering from the render state                                      */
 /* ------------------------------------------------------------------------- */
 
-static void draw_status_line(App *app, int row, int cursor_column,
-                             int cursor_row)
+/* How many UTF-8 codepoints a run holds. The status bar font is monospace,
+ * so this is also how many cells wide it is. */
+static int utf8_codepoint_count(const char *text, size_t length)
 {
-    char status[160];
-    const char *text = status;
-    int column = 0;
+    const char *p = text;
+    const char *end = text + length;
+    int count = 0;
 
-    SDL_snprintf(status, sizeof status,
-                 "%dx%d cells | cursor %d,%d | opacity %d%% | %s | %s%s",
-                 app->columns, app->rows, cursor_column + 1, cursor_row + 1,
-                 (int)(app->panel_opacity * 100.0f + 0.5f),
-                 window_backdrop_name(app->backdrop),
-                 window_decoration_name(app->decoration),
-                 app->title_bar ? " + bar" : "");
+    while (p < end) {
+        if (!SDL_StepUTF8(&p, NULL))
+            break;
+        count++;
+    }
+    return count;
+}
 
-    while (*text) {
+/* Draw one styled run with the status bar font, advancing past it. */
+static float statusbar_draw_text(App *app, const char *text, size_t length,
+                                 float x, float y, bool bold, bool italic,
+                                 SDL_Color color)
+{
+    const char *p = text;
+    const char *end = text + length;
+
+    while (p < end) {
         char utf8[8];
-        char *end;
-        Uint32 codepoint = SDL_StepUTF8(&text, NULL);
+        char *term;
+        Uint32 codepoint = SDL_StepUTF8(&p, NULL);
 
         if (!codepoint)
             break;
-        end = SDL_UCS4ToUTF8(codepoint, utf8);
-        *end = '\0';
-        glyphs_draw_text(&app->glyphs, utf8, (size_t)(end - utf8),
-                         cell_x(app, column), cell_y(app, row), false, false,
-                         STATUS_TEXT);
-        column++;
+        term = SDL_UCS4ToUTF8(codepoint, utf8);
+        *term = '\0';
+        glyphs_draw_text(&app->statusbar_glyphs, utf8, (size_t)(term - utf8),
+                         x, y, bold, italic, color);
+        x += (float)app->statusbar_glyphs.cell_width;
     }
+    return x;
+}
+
+/* Draw every styled run of a rendered line, left to right from `x`. */
+static void statusbar_draw_runs(App *app, const char *line,
+                                const StatusbarRun *runs, int run_count,
+                                float x, float y)
+{
+    int index;
+
+    for (index = 0; index < run_count; index++) {
+        const StatusbarRun *run = &runs[index];
+        SDL_Color color = run->style.has_fg ? run->style.fg
+                                            : app->statusbar.bar_fg;
+        bool bold = run->style.bold;
+        bool italic = run->style.italic;
+        int width = utf8_codepoint_count(line + run->start,
+                                         (size_t)run->length) *
+                    app->statusbar_glyphs.cell_width;
+
+        if (run->style.dim) {
+            color.r = (Uint8)(color.r * 0.5f);
+            color.g = (Uint8)(color.g * 0.5f);
+            color.b = (Uint8)(color.b * 0.5f);
+        }
+        if (run->style.has_bg)
+            fill_rectangle(app, x, y, (float)width,
+                           (float)app->statusbar_glyphs.cell_height,
+                           run->style.bg);
+
+        x = statusbar_draw_text(app, line + run->start, (size_t)run->length,
+                                x, y, bold, italic, color);
+    }
+}
+
+/* Turn the app's current state into the module values the renderer needs.
+ * The strings point into the caller's buffers, which must outlive the
+ * render calls that follow. */
+static void statusbar_fill_state(App *app, StatusbarState *state,
+                                 char *dir_buf, size_t dir_cap,
+                                 char *git_buf, size_t git_cap,
+                                 char *dur_buf, size_t dur_cap,
+                                 char *time_buf, size_t time_cap)
+{
+    const Statusbar *sb = &app->statusbar;
+    const char *pwd = term_pwd(&app->term);
+
+    memset(state, 0, sizeof *state);
+
+    if (pwd) {
+        statusbar_shorten_path(sb, pwd, dir_buf, dir_cap);
+        state->directory.value = dir_buf;
+    }
+
+    if (app->git_have && app->git_status.in_repo && pwd) {
+        state->git_branch.value = app->git_status.branch;
+        statusbar_git_status_text(sb, app->git_status.ahead,
+                                  app->git_status.behind,
+                                  app->git_status.dirty,
+                                  app->git_status.conflicted,
+                                  app->git_status.clean,
+                                  git_buf, git_cap);
+        state->git_status.value = git_buf;
+    }
+
+    if (!app->term.command_running && app->term.last_command_known) {
+        const StatusbarModule *m = &sb->modules[STATUSBAR_CMD_STATUS];
+        bool ok = app->term.last_exit_code == 0;
+
+        state->cmd_status.symbol = ok ? m->symbol_success : m->symbol_failure;
+        state->cmd_status.style = ok ? &m->parsed_success : &m->parsed_failure;
+    }
+
+    if (!app->term.command_running && app->term.last_command_known &&
+        app->term.last_command_ms >=
+            (uint64_t)sb->modules[STATUSBAR_CMD_DURATION].min_time_ms) {
+        statusbar_format_duration(app->term.last_command_ms, dur_buf,
+                                  dur_cap);
+        state->cmd_duration.value = dur_buf;
+    }
+
+    if (statusbar_format_time(sb->modules[STATUSBAR_TIME].time_format,
+                              time_buf, time_cap))
+        state->time.value = time_buf;
+
+    /* busy: a fixed braille frame while a command runs; at rest the `[busy]
+     * idle` override if set, otherwise the fixed resting icon. Either way the
+     * slot keeps its width, so the bar does not reflow. */
+    {
+        const StatusbarModule *busy = &sb->modules[STATUSBAR_BUSY];
+
+        if (app->term.command_running && app->busy_frame_count > 0)
+            state->busy.symbol = app->busy_frames[app->busy_frame_index];
+        else if (busy->idle[0])
+            state->busy.symbol = busy->idle;
+        else
+            state->busy.symbol = statusbar_busy_idle_default();
+    }
+}
+
+/* Render and draw one container line. mode is left, centered, or
+ * right-aligned within the bar. */
+static void statusbar_draw_line(App *app, const StatusbarState *state,
+                                const char *format, float y, int mode,
+                                int pixel_width)
+{
+    char line[STATUSBAR_LINE_BYTES];
+    StatusbarRun runs[STATUSBAR_MAX_RUNS];
+    int count = statusbar_render(&app->statusbar, state, format, line,
+                                 sizeof line, runs, STATUSBAR_MAX_RUNS);
+    int width = 0;
+    int index;
+    float x;
+
+    if (count == 0)
+        return;
+
+    for (index = 0; index < count; index++) {
+        width += utf8_codepoint_count(line + runs[index].start,
+                                       (size_t)runs[index].length) *
+                 app->statusbar_glyphs.cell_width;
+    }
+
+    switch (mode) {
+    case STATUSBAR_CENTER:
+        x = (float)pixel_width / 2.0f - (float)width / 2.0f;
+        break;
+    case STATUSBAR_RIGHT:
+        x = (float)(pixel_width - chrome_padding(app)) - (float)width;
+        break;
+    default:
+        x = (float)app->grid_left;
+        break;
+    }
+    if (x < (float)chrome_padding(app))
+        x = (float)chrome_padding(app);
+
+    statusbar_draw_runs(app, line, runs, count, x, y);
+}
+
+static void draw_statusbar(App *app, int pixel_width, int pixel_height)
+{
+    int height = statusbar_height(app);
+    int top = pixel_height - height;
+    SDL_Color bg = app->statusbar.bar_bg;
+    SDL_Color separator = { 90, 100, 112, 140 };
+    StatusbarState state;
+    char dir_buf[512];
+    char git_buf[256];
+    char dur_buf[64];
+    char time_buf[64];
+    float y;
+
+    bg.a = (Uint8)(app->statusbar.bar_opacity * 255.0f + 0.5f);
+    fill_rectangle(app, 0.0f, (float)top, (float)pixel_width, (float)height,
+                   bg);
+    fill_rectangle(app, 0.0f, (float)top, (float)pixel_width, 1.0f,
+                   separator);
+
+    y = (float)top +
+        ((float)height - (float)app->statusbar_glyphs.cell_height) / 2.0f;
+    if (y < (float)top)
+        y = (float)top;
+
+    statusbar_fill_state(app, &state, dir_buf, sizeof dir_buf, git_buf,
+                         sizeof git_buf, dur_buf, sizeof dur_buf, time_buf,
+                         sizeof time_buf);
+
+    statusbar_draw_line(app, &state, app->statusbar.format, y,
+                        STATUSBAR_LEFT, pixel_width);
+    if (app->statusbar.center_format[0])
+        statusbar_draw_line(app, &state, app->statusbar.center_format, y,
+                            STATUSBAR_CENTER, pixel_width);
+    if (app->statusbar.right_format[0])
+        statusbar_draw_line(app, &state, app->statusbar.right_format, y,
+                             STATUSBAR_RIGHT, pixel_width);
+}
+
+/* The status bar timer: 100 ms wakes the event loop so the spinner can
+ * advance and the clock can roll over. */
+static Uint32 SDLCALL on_statusbar_timer(void *userdata, SDL_TimerID timer_id,
+                                         Uint32 interval)
+{
+    SDL_Event event;
+
+    (void)userdata;
+    (void)timer_id;
+    SDL_zero(event);
+    event.type = SDL_EVENT_USER;
+    event.user.code = 4;
+    SDL_PushEvent(&event);
+    return interval;
+}
+
+/* Advance the spinner and refresh the clock when either actually changed. */
+static void statusbar_tick(App *app)
+{
+    bool redraw = false;
+    time_t now;
+    struct tm local;
+    int second;
+
+    if (app->term.command_running && app->busy_frame_count > 0) {
+        app->busy_frame_index =
+            (app->busy_frame_index + 1) % app->busy_frame_count;
+        redraw = true;
+    }
+
+    now = time(NULL);
+#ifdef _WIN32
+    if (localtime_s(&local, &now) != 0) {
+#else
+    if (!localtime_r(&now, &local)) {
+#endif
+        second = -1;
+    } else {
+        second = local.tm_sec;
+    }
+    if (second != app->last_time_second) {
+        app->last_time_second = second;
+        redraw = true;
+    }
+
+    if (redraw)
+        app->needs_redraw = true;
 }
 
 /* A thin bar on the right edge while the viewport is not at the bottom:
@@ -1944,8 +2222,8 @@ static void draw_frame(App *app)
     /* 8. The scrollback indicator, over the right edge of the grid. */
     draw_scrollbar(app);
 
-    /* 9. Status line, one row below the grid. */
-    draw_status_line(app, app->rows, cursor_column, cursor_row);
+    /* 9. Status bar, in the band below the grid. */
+    draw_statusbar(app, pixel_width, pixel_height);
 
     SDL_RenderPresent(renderer);
 }
@@ -2130,7 +2408,9 @@ int main(int argc, char **argv)
     memset(&app, 0, sizeof app);
     app.running = true;
     app.cursor_lit = true;
+    app.last_time_second = -1;
     settings_load(&app.settings);
+    statusbar_load(&app.statusbar);
 
     /* Command-line arguments win over the file: the file is what the app
      * remembers, the arguments are what the user asked for this once. */
@@ -2211,6 +2491,37 @@ int main(int argc, char **argv)
         goto cleanup;
     }
 
+    /* The status bar font is separate: smaller (never below 9 pt) and,
+     * when installed, Geist Mono NF. It falls back to the grid font and
+     * then the built-in Maple Mono NF, so the bar always has Nerd glyphs. */
+    {
+        const char *face = app.statusbar.font[0] ? app.statusbar.font : NULL;
+        const char *sb_font = NULL;
+        char resolved[512];
+
+        if (face) {
+            if (font_lookup_path(face, resolved, sizeof resolved))
+                sb_font = resolved;
+            else
+                sb_font = face;
+        }
+        if (!sb_font)
+            sb_font = font_path;   /* the grid font, or built-in */
+
+        if (!glyphs_open(&app.statusbar_glyphs, app.renderer, sb_font,
+                         app.statusbar.point_size, app.display_scale)) {
+            /* A bad statusbar face must not kill the app: retry the grid
+             * font, then give up quietly with an empty band. */
+            if (sb_font != font_path &&
+                glyphs_open(&app.statusbar_glyphs, app.renderer, font_path,
+                            app.statusbar.point_size, app.display_scale)) {
+                /* retried with the grid font */
+            } else {
+                fprintf(stderr, "statusbar font: %s\n", SDL_GetError());
+            }
+        }
+    }
+
     /* Terminal: create at a default size, then fit to the window. */
     if (!term_init(&app.term, 80, 24)) {
         fprintf(stderr, "libghostty-vt setup failed\n");
@@ -2259,7 +2570,27 @@ int main(int argc, char **argv)
         }
     }
 
+    /* The status bar's git status comes from a background worker. */
+    git_init(&app.git);
+
+    /* Until the shell reports a directory over OSC 7, the directory module
+     * shows the directory termica (and therefore the shell) started in. */
+    {
+        char *cwd = SDL_GetCurrentDirectory();
+
+        if (cwd) {
+            snprintf(app.term.pwd, sizeof app.term.pwd, "%s", cwd);
+            SDL_free(cwd);
+        }
+    }
+    app.busy_frame_count =
+        statusbar_busy_frames(app.busy_frames, STATUSBAR_MAX_FRAMES);
+    git_request(app.git, term_pwd(&app.term));
+    app.last_git_request_ms = SDL_GetTicks();
+
     app.blink_timer = SDL_AddTimer(500, on_blink_timer, &app);
+    app.statusbar_timer = SDL_AddTimer(STATUSBAR_TIMER_MS, on_statusbar_timer,
+                                       &app);
 
     while (app.running) {
         SDL_Event event;
@@ -2278,6 +2609,8 @@ int main(int argc, char **argv)
                         app.needs_redraw = true;
                 } else if (event.user.code == 3) {
                     autoscroll_tick(&app);
+                } else if (event.user.code == 4) {
+                    statusbar_tick(&app);
                 }
                 break;
             case SDL_EVENT_KEY_DOWN:
@@ -2332,6 +2665,33 @@ int main(int argc, char **argv)
                 SDL_SetWindowTitle(app.window, app.term.title);
         }
 
+        /* A fresh directory or a finished command both invalidate the git
+         * view, so ask the worker again (throttled). */
+        if (app.term.pwd_changed) {
+            app.term.pwd_changed = false;
+            app.git_have = false;
+            if (SDL_GetTicks() - app.last_git_request_ms >= GIT_REFRESH_MS) {
+                git_request(app.git, term_pwd(&app.term));
+                app.last_git_request_ms = SDL_GetTicks();
+            }
+        }
+        if (app.command_was_running && !app.term.command_running &&
+            SDL_GetTicks() - app.last_git_request_ms >= GIT_REFRESH_MS) {
+            git_request(app.git, term_pwd(&app.term));
+            app.last_git_request_ms = SDL_GetTicks();
+        }
+        app.command_was_running = app.term.command_running;
+
+        {
+            GitStatus result;
+
+            if (git_poll(app.git, &result)) {
+                app.git_status = result;
+                app.git_have = true;
+                app.needs_redraw = true;
+            }
+        }
+
         if (app.running && app.needs_redraw) {
             draw_frame(&app);
             app.needs_redraw = false;
@@ -2343,18 +2703,24 @@ cleanup:
     /* Every step is safe on a partly initialised app, so a failure in the
      * middle of setup leaks nothing either. What the user changed while the
      * window was open (opacity, backdrop) is remembered for next time. */
-    if (app.window)
+    if (app.window) {
         settings_save(&app.settings);
+        statusbar_save(&app.statusbar);
+    }
+    if (app.statusbar_timer)
+        SDL_RemoveTimer(app.statusbar_timer);
     if (app.blink_timer)
         SDL_RemoveTimer(app.blink_timer);
     if (app.autoscroll_timer)
         SDL_RemoveTimer(app.autoscroll_timer);
     if (app.cursor)
         SDL_DestroyCursor(app.cursor);
+    git_close(app.git);
     pty_close(app.pty);
     term_free(&app.term);
     panel_free(&app.panel);
     glyphs_close(&app.glyphs);
+    glyphs_close(&app.statusbar_glyphs);
     if (app.renderer)
         SDL_DestroyRenderer(app.renderer);
     if (app.window)

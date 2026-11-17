@@ -15,6 +15,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /* Which program to start. */
 typedef enum {
@@ -64,6 +65,17 @@ void settings_format(const Settings *settings, char *out, size_t capacity);
 /* Where the file lives. False when no config directory could be worked
  * out, in which case nothing is read or written. */
 bool settings_path(char *out, size_t capacity);
+
+/* Where a named file in the same config directory lives (termica.toml,
+ * statusbar.toml, ...). False when no config directory could be worked
+ * out. */
+bool config_path(const char *name, char *out, size_t capacity);
+
+/* Create the directory part of a config file path, when needed. */
+void config_create_directory(const char *path);
+
+/* FNV-1a fingerprint used by the safe-save logic. */
+uint64_t config_hash_bytes(const char *data, size_t length);
 
 /* A missing file is not an error: the defaults stay in place and false is
  * returned so the app knows nothing was read. */

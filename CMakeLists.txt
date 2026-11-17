@@ -124,9 +124,11 @@ add_executable(termica
     src/embed.c
     src/console.c
     src/settings.c
+    src/statusbar.c
     src/font_lookup.c
     src/selftest.c
     src/glyph.c
+    src/git.c
     src/style.c
     src/panel.c
     src/geometry.c
@@ -136,8 +138,10 @@ add_executable(termica
     src/embed.h
     src/console.h
     src/settings.h
+    src/statusbar.h
     src/font_lookup.h
     src/glyph.h
+    src/git.h
     src/style.h
     src/panel.h
     src/geometry.h

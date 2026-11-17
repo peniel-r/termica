@@ -81,6 +81,22 @@ struct Term {
      * this up and applies it to the window. */
     bool title_changed;
     char title[128];
+
+    /* The shell reported a working directory (OSC 7, OSC 9 or OSC 1337).
+     * Stored decoded: a file:// URI becomes a bare path with percent
+     * escapes resolved, so the status bar and git runner can use it
+     * directly. Empty until the shell reports one. */
+    bool pwd_changed;
+    char pwd[4096];
+
+    /* Shell integration state from OSC 133 semantic prompts: whether a
+     * command is running now, and what the last finished command reported.
+     * `command_started_at` and `last_command_ms` are SDL_GetTicks values. */
+    bool     command_running;
+    bool     last_command_known;
+    int32_t  last_exit_code;
+    uint64_t last_command_ms;
+    uint64_t command_started_at;
 };
 
 /* Install the sink for term_write replies (usually pty_write). */
@@ -100,6 +116,10 @@ void term_free(Term *term);
 /* Feed bytes a program wrote. The parser handles every escape sequence:
  * SGR colors and attributes, cursor movement, erase, scroll, OSC, ... */
 void term_write(Term *term, const void *data, size_t length);
+
+/* The current working directory the shell reported, decoded to a bare
+ * path. NULL or empty until the shell emits one (OSC 7/9/1337). */
+const char *term_pwd(const Term *term);
 
 /* Resize the grid. cell_width and cell_height are in pixels. */
 void term_resize(Term *term, uint16_t columns, uint16_t rows,

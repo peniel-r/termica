@@ -7,6 +7,8 @@ commits interleaved; documentation commits sit on top, so `origin/main` is
 ahead of the shas named here. Milestone 4 was reported as committed before it
 had been, so its work and milestone 5's share one commit. Milestone 6 (TOML
 settings) is implemented in the working tree; it is described at the end.
+Milestone 9 (the customizable status bar) is also implemented in the working
+tree and is described after milestone 8.
 Each section keeps the design that was written before the code, with the
 measured results folded into it, and closes with what actually verified -
 including, where a feature could not be verified without a real keyboard,
@@ -694,3 +696,97 @@ being overwritten by the old in-memory values when the app exits.
   change the first case was forced to 16 pt.
 - `run.ps1 -SelfTest` still returns the app's exit code.
 - Build clean under `-Wall -Wextra -pedantic`; ASan/UBSan self test passes.
+
+---
+
+# Milestone 9: the customizable status bar
+
+## Goal
+
+Replace the hard-coded status line with a bottom status bar configured by a
+second TOML file, `statusbar.toml`, using the Starship model: a `format`
+string of `$module` tokens plus one `[module]` table per module. The bar shows
+the working directory, git branch and status, the previous command's exit
+status and duration, a busy spinner and the clock, in its own smaller font
+(never below 9 pt, Geist Mono Nerd Font by default).
+
+## User stories
+
+- Edit `statusbar.toml` to put the current folder path at the bottom of the
+  terminal.
+- See the time, last command status, last command duration, git status in a
+  repository, and a spinner while the terminal is busy.
+- A status-bar font at least 9 pt, a Mono Nerd Font such as Geist.
+
+## Design
+
+- **`src/statusbar.{h,c}`** mirrors `settings.c`: tomlc17, folded keys, typed
+  and bounded values, canonical rewrite on exit guarded by the same FNV-1a
+  hand-edit fingerprint. `format` / `right_format` carry `$module` tokens and
+  literals; each module has `format = "[$symbol$value]($style)"`, a `symbol`,
+  a `style` (grammar `fg:#RRGGBB bg:#RRGGBB bold italic underline dim`), and
+  module-specific keys. A single space after an empty module is dropped.
+- **Data plumbing** uses libghostty-vt callbacks that already decode the wire
+  protocol: `GHOSTTY_TERMINAL_OPT_PWD_CHANGED` (OSC 7/9/1337) feeds
+  `term.pwd` after `file://` and percent decoding; `OPT_SEMANTIC_PROMPT`
+  (OSC 133 A/B/C/D) drives `command_running`, `last_exit_code` and
+  `last_command_ms`; `OPT_RESET` clears the cached state on RIS. The shell
+  must emit these sequences, so `pty.c` sets `TERMICA=1` and
+  `TERMICA_SHELL_INTEGRATION=1` in the child environment and `shell/` ships
+  opt-in PowerShell, bash and zsh snippets. The snippets *wrap* the prompt
+  that is already installed (starship, oh-my-posh, the default), so a prompt
+  framework keeps rendering; the source is dot-sourced after the prompt init.
+  Reading the child's working directory from its PEB was tried first and
+  abandoned: `cmd`/`bash` keep the process current directory in sync with the
+  prompt, but PowerShell does not, so the PEB path stays at the launch folder
+  and would show the wrong directory - `$PWD` over OSC 7 is the only source
+  that tracks a pwsh prompt. Without the snippet the bar still renders: the
+  directory stays at the spawn folder and the command modules stay hidden.
+- **Git** runs `git status --porcelain=v2 --branch` in the reported directory
+  on a background thread (`src/git.c`); the main loop polls the result.
+  Requests are throttled and fired on pwd change and command end.
+  The subprocess read closes its own write handle before draining the pipe
+  and is bounded by a deadline, so a `git` run always terminates and `git_close`
+  on shutdown can never wait on a wedged worker (an early build leaked the pipe
+  write handle, which hung every quit path).
+- **Rendering** reserves a bottom band from the status-bar font's metrics,
+  draws its background and separator, then lays out the three containers -
+  `format` (left), `center_format` (centred) and `right_format`
+  (right-aligned) - as styled runs over the second `Glyphs` instance. The
+  spinner is fixed by the code: ten braille frames (U+2800 block) and a
+  resting icon of U+F1807 (a Material Design spinner), so there is no
+  configurable `symbols`/`symbol` to get wrong. The slot always reserves one
+  cell so the bar does not reflow; `[busy] idle` is the only override.
+- **Out-of-BMP glyphs.** The glyph cache is BMP-only (`GLYPH_MAX_CODEPOINT =
+  0x10000`); a codepoint above U+FFFF such as the resting icon or any Symbol
+  set glyph can never be cached, so an earlier build drew blank. `glyphs.c`
+  now routes single out-of-BMP codepoints through the uncached render path
+  and adds **Symbols Nerd Font Mono** (embedded as RCDATA resource 5, MIT)
+  as a last-resort face in `font_with_glyph`, mirroring WezTerm's fallback.
+  (An earlier "U+F1C07 is missing from the fonts" diagnosis was wrong: the
+  pasted icon decodes to U+F1807, which Maple Mono NF does carry - the real
+  fault was the cache ceiling, not coverage.)
+- **Lifecycle**: when the direct child (the shell) is gone - which is what
+  `exit` does - the app sets its running flag false and tears down, so the
+  window closes with the shell instead of lingering on a dead grid.
+
+## Verification
+
+- `--selftest` grew to 204 checks: `statusbar.toml` parse/format round trip
+  with the 9 pt floor, the format and style grammars, the three containers
+  (`center_format`/`right_format`/`[busy] idle`) parsing and surviving the
+  round trip, module value rendering with space elision, the reserved idle
+  cell, path shortening (trailing separator, `~` re-join), duration text, git
+  glyphs, the fixed spinner frames and resting-icon default, the built-in
+  Maple and Symbols Nerd Font Mono embedded resources, the porcelain-v2
+  parser, and OSC 7 / OSC 133 / RIS feeding the terminal's pwd and command
+  state.
+- Build clean under `-Wall -Wextra -pedantic`; self test passes 204/204.
+- The chained PowerShell snippet was driven directly: with an installed
+  prompt present it emits `133;A`, `7;file://<live $PWD>`, the user's prompt,
+  then `133;B`, so the directory and command modules track `cd`.
+- Launch smoke: the app opened its window, loaded the grid font and ran the
+  event loop without error. The bar's visual look, the exit-closes-window
+  path and the live shell integration are manual checks (need a real window,
+  `git` and the profile snippet), as with the earlier input-dependent
+  milestones.

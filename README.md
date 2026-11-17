@@ -42,7 +42,7 @@ encoder. This is the flow from
 The program itself is a real process in a Windows pseudoconsole (ConPTY): `pwsh.exe` if it
 is installed, else `powershell.exe`, else `cmd.exe`. Its output drives the grid, keystrokes
 go into its console, the window size is the console size, and closing the window kills the
-process tree.
+process tree - while `exit`, or the shell ending for any other reason, closes the window.
 
 | Key | Action |
 |---|---|
@@ -61,6 +61,7 @@ process tree.
 | Ctrl+Shift+= / Ctrl+Shift+- | panel opacity (text must stay fully opaque) |
 | Ctrl+Shift+B | cycle the backdrop: panel, Mica, Mica Alt, Acrylic |
 | Ctrl+Shift+Q | quit |
+| `exit` (or the shell ending for any reason) | closes the window with it |
 
 Mouse, history and focus: a program that asks for the pointer (modes 9,
 1000, 1002, 1003, with the 1005/1006/1015/1016 formats) gets encoded
@@ -280,6 +281,112 @@ the program with what the user chose; `allow` writes it, `deny` refuses. The
 default is `ask`, because a host you ssh into can otherwise replace your
 clipboard unnoticed.
 
+## 4b. Status bar (`statusbar.toml`)
+
+The bar along the bottom of the window is configured by a second file,
+`statusbar.toml`, next to `termica.toml`. It uses the Starship model: a
+top-level `format` string of `$module` tokens and literal text, and one
+`[module]` table per module. The bar's font is separate from the grid font
+and never smaller than 9 pt.
+
+```toml
+format = "$directory$git_branch$git_status $cmd_status$cmd_duration"
+center_format = "$busy"
+right_format = "$time"
+
+[font]
+face = "GeistMono NF"          # installed family; falls back to Maple Mono NF
+size = 9                       # points; values below 9 are refused
+
+[style]
+fg = "#d8dee9"
+bg = "#0e1216"
+opacity = 0.9
+
+[directory]
+style = "fg:#9ccfd8 bold"
+truncation_length = 3          # trailing path components; 0 = full path
+home_symbol = "~"
+
+[cmd_status]
+style_success = "fg:#a3be8c"
+style_failure = "fg:#bf616a"
+symbol_success = "\u2713"
+symbol_failure = "\u2717"
+
+[cmd_duration]
+min_time = 2000                # ms; hide commands faster than this
+
+[time]
+time_format = "%H:%M:%S"
+
+[busy]
+style = "fg:#81a1c1"
+idle = ""                        # optional resting-icon override (U+F1807 if unset)
+```
+
+The bar has three containers, laid out left, centred and right-aligned:
+`format`, `center_format` and `right_format`, each a string of `$module`
+tokens and literal text.
+
+Modules: `$directory` (the shell's working directory), `$git_branch` and
+`$git_status` (branch, ahead/behind, dirty and conflicted counts, shown only
+inside a repository), `$cmd_status` and `$cmd_duration` (the previous
+command's exit status and wall time), `$busy` (a spinner while a command is
+running) and `$time`. A single space directly after a `$module` is dropped
+when that module renders empty, which is what makes the git section disappear
+cleanly outside a repository. See `[busy]` below for keeping a slot's width
+fixed.
+
+A module's `format` is a mini template of `[text]($style)` groups, with
+`$symbol` and `$value` substituted; `($style)` uses the module's own style.
+The style grammar is `fg:#RRGGBB`, `bg:#RRGGBB`, `bold`, `italic`,
+`underline`, `dim`. `center_format` and `right_format` are the optional
+centre and right containers (the example puts `$busy` centred and `$time`
+right-aligned, lualine-style).
+
+The `[busy]` spinner is fixed: the ten braille frames (U+2800 block) and the
+resting icon (U+F1807, a Material Design spinner) are built in and cannot be
+changed, so there is no `symbols` or `symbol` to get wrong. The slot always
+keeps its cell - a frame while a command runs, the resting icon at idle - so
+the bar does not reflow. `[busy] idle` is the one knob: set it to a glyph to
+override the resting icon at idle (leave it empty or remove the line for the
+built-in U+F1807).
+
+Symbol glyphs like these live above U+FFFF, which the glyph cache does not
+cover; termica draws them uncached and, when the terminal font lacks one,
+falls back to **Symbols Nerd Font Mono** (compiled into the executable,
+resource 5) - the same per-glyph fallback WezTerm uses, so a Nerd icon pastes
+onto the grid and renders even under a base font that does not carry it. As
+with all settings, `statusbar.toml` is read at startup: restart termica after
+editing.
+
+The dynamic modules need the shell to cooperate: termica sets
+`TERMICA_SHELL_INTEGRATION=1` in the child's environment, and the snippets in
+`shell/` (PowerShell, bash, zsh) emit the standard OSC 7 (directory) and
+OSC 133 (prompt / command steps) sequences when they see it. The directory is
+taken from the shell's own location (`$PWD`), not the process working
+directory, because PowerShell keeps those separate: `cd` changes `$PWD` and
+what your prompt shows, but not the process's current directory, so OSC 7 is
+the only thing that makes the bar's path track your prompt.
+
+The snippets **wrap** whatever prompt you already have (starship, oh-my-posh,
+pure, the default), so your prompt keeps rendering — capture its definition
+and call it from inside the integration. For that to work, dot-source the
+snippet **after** your prompt init in the profile, e.g.:
+
+```powershell
+Invoke-Expression (&starship init powershell)
+. C:\path\to\termica\shell\termica-pwsh.ps1
+```
+
+Without the snippet the bar still renders; the directory stays at the folder
+the shell started in and the command modules stay hidden, since no command
+boundaries or directory changes are reported.
+
+`statusbar.toml` is read at startup and rewritten in canonical form on exit
+with the same hand-edit protection as `termica.toml`.
+
 ## 5. Testing: the self test and a sanitizer run
 
 The terminal half has a self test that follows the documentation example, so the stack can
@@ -306,7 +413,12 @@ The last checks start a real ConPTY: `cmd.exe /c "echo termica-pty-ok"` and a no
 have to come back through the pipes as UTF-8 with exit code 0, and a `powershell.exe` child
 that writes an OSC 52 request has to reach the app's clipboard callback decoded. The settings
 checks also cover the `decoration` enum and the `title_bar` boolean, including refused values
-and the format round trip. That is 143 checks; the exit code is the number of failures.
+and the format round trip. The status-bar checks cover `statusbar.toml` (the 9 pt floor, the
+format string, the style grammar, the canonical format round trip), the renderer (module
+values and empty-module space elision), the pure helpers (path shortening, duration text, git
+glyphs, spinner frames), the `git status --porcelain=v2` parser, and the OSC 7 / OSC 133
+callbacks that feed the bar's directory, exit-status, duration and busy modules. That is 188
+checks; the exit code is the number of failures.
 
 Everything in that list runs without a window and without touching the keyboard or mouse of
 whoever is logged in, which is deliberate: the features that can only be exercised by a real
@@ -542,6 +654,8 @@ The app itself only does the parts the library leaves to the embedder:
 | `src/embed.{h,c}` | the Maple Mono NF bytes linked into the executable |
 | `src/console.{h,c}` | reclaiming the launching console, since the exe is GUI-subsystem |
 | `src/settings.{h,c}` | the `termica.toml` settings file (TOML via tomlc17): read at startup, written on exit when untouched |
+| `src/statusbar.{h,c}` | `statusbar.toml`, the style/format grammar, module helpers and the line renderer |
+| `src/git.{h,c}` | the background `git status --porcelain=v2` runner and its parser |
 | `src/font_lookup.{h,c}` | a font path or installed family name -> the font file to open |
 | `src/fonts.rc.in` | the Windows resource script that carries those bytes |
 | `src/glyph.{h,c}` | fonts, the glyph cache, drawing a cell's text (bold/italic faces) |

@@ -87,6 +87,9 @@ static TTF_Font *font_with_glyph(const Glyphs *glyphs, int slot,
         return font;
     if (glyphs->fallback && TTF_FontHasGlyph(glyphs->fallback, codepoint))
         return glyphs->fallback;
+    if (glyphs->symbol_fallback &&
+        TTF_FontHasGlyph(glyphs->symbol_fallback, codepoint))
+        return glyphs->symbol_fallback;
     return NULL;
 }
 
@@ -252,6 +255,14 @@ bool glyphs_open(Glyphs *glyphs, SDL_Renderer *renderer, const char *font_path,
          * built-in counterpart fills those codepoints in. */
         glyphs->fallback = open_embedded(EMBEDDED_FONT_REGULAR, scaled_size);
     }
+
+    /* Symbols Nerd Font Mono, compiled in, as the last-resort face for
+     * symbols - notably codepoints above U+FFFF, which neither the cache nor
+     * the main font may carry. Opened whether the main font came from disk or
+     * is the built-in family; NULL when this build has no such resource. */
+    glyphs->symbol_fallback =
+        open_embedded(EMBEDDED_FONT_SYMBOLS_MONO, scaled_size);
+
     TTF_SetFontHinting(glyphs->regular, TTF_HINTING_LIGHT);
 
     /* The cell is as wide as 'M' advances and as tall as the line. */
@@ -283,6 +294,8 @@ void glyphs_close(Glyphs *glyphs)
     }
     if (glyphs->fallback)
         TTF_CloseFont(glyphs->fallback);
+    if (glyphs->symbol_fallback)
+        TTF_CloseFont(glyphs->symbol_fallback);
     if (glyphs->bold_italic)
         TTF_CloseFont(glyphs->bold_italic);
     if (glyphs->italic)
@@ -312,8 +325,9 @@ void glyphs_draw_text(Glyphs *glyphs, const char *text, size_t length,
 
     slot = style_slot(glyphs, bold, italic);
 
-    if ((size_t)(cursor - text) == length) {
-        /* The usual case: one codepoint per cell, served from the cache. */
+    if ((size_t)(cursor - text) == length &&
+        first_codepoint < GLYPH_MAX_CODEPOINT) {
+        /* The usual case: one BMP codepoint per cell, served from the cache. */
         glyph = glyph_lookup(glyphs, slot, first_codepoint);
         if (!glyph)
             return;
@@ -328,7 +342,8 @@ void glyphs_draw_text(Glyphs *glyphs, const char *text, size_t length,
     }
 
     /* A grapheme cluster (a base character plus combining marks, an emoji
-     * with a ZWJ, ...): render the whole cluster, uncached. */
+     * with a ZWJ, ...), or a single codepoint above U+FFFF that the cache
+     * cannot hold: render it, uncached, from whichever face has it. */
     {
         TTF_Font *font = font_with_glyph(glyphs, slot, first_codepoint);
         SDL_Texture *texture;

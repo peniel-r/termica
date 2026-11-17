@@ -327,23 +327,3 @@ WindowBackdrop window_sync_chrome(SDL_Window *window, WindowBackdrop backdrop,
     apply_region(window, rounded_by_backdrop ? corner_radius : 0);
     return backdrop;
 }
-
-const char *window_backdrop_name(WindowBackdrop backdrop)
-{
-    switch (backdrop) {
-    case WINDOW_BACKDROP_MICA:     return "mica";
-    case WINDOW_BACKDROP_MICA_ALT: return "mica alt";
-    case WINDOW_BACKDROP_ACRYLIC:  return "acrylic";
-    default:                       return "panel";
-    }
-}
-
-const char *window_decoration_name(WindowDecoration decoration)
-{
-    switch (decoration) {
-    case WINDOW_DECORATION_SQUARE:  return "square";
-    case WINDOW_DECORATION_COMPACT: return "compact";
-    case WINDOW_DECORATION_NATIVE:  return "native";
-    default:                        return "rounded";
-    }
-}

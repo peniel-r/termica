@@ -53,7 +53,7 @@
 static bool loaded_file_seen;
 static uint64_t loaded_file_hash;
 
-static uint64_t hash_bytes(const char *data, size_t length)
+uint64_t config_hash_bytes(const char *data, size_t length)
 {
     uint64_t hash = 14695981039346656037ULL;
     size_t index;
@@ -433,7 +433,7 @@ void settings_format(const Settings *settings, char *out, size_t capacity)
              settings->copy_on_select ? "true" : "false", shell, osc52);
 }
 
-static bool settings_path_named(const char *name, char *out, size_t capacity)
+bool config_path(const char *name, char *out, size_t capacity)
 {
     const char *base = NULL;
     char directory[512];
@@ -473,10 +473,10 @@ static bool settings_path_named(const char *name, char *out, size_t capacity)
 
 bool settings_path(char *out, size_t capacity)
 {
-    return settings_path_named(SETTINGS_FILE_NAME, out, capacity);
+    return config_path(SETTINGS_FILE_NAME, out, capacity);
 }
 
-static void settings_create_directory(const char *path)
+void config_create_directory(const char *path)
 {
     char directory[512];
     char *slash;
@@ -511,7 +511,7 @@ bool settings_load(Settings *settings)
     if (!settings_path(path, sizeof path))
         return false;
 
-    settings_create_directory(path);
+    config_create_directory(path);
     if (!SDL_GetPathInfo(path, &info) || info.type != SDL_PATHTYPE_FILE)
         return false;
     contents = (char *)SDL_LoadFile(path, &length);
@@ -524,7 +524,7 @@ bool settings_load(Settings *settings)
     }
 
     loaded_file_seen = true;
-    loaded_file_hash = hash_bytes(contents, length);
+    loaded_file_hash = config_hash_bytes(contents, length);
     parsed = parse_toml(settings, contents, length, error, sizeof error);
     SDL_free(contents);
     if (error[0])
@@ -559,13 +559,13 @@ bool settings_save(const Settings *settings)
             SDL_free(current);
             return false;
         }
-        same = hash_bytes(current, current_length) == loaded_file_hash;
+        same = config_hash_bytes(current, current_length) == loaded_file_hash;
         SDL_free(current);
         if (!same)
             return false;
     }
 
-    settings_create_directory(path);
+    config_create_directory(path);
     settings_format(settings, text, sizeof text);
     length = strlen(text);
 
@@ -590,6 +590,6 @@ bool settings_save(const Settings *settings)
         return false;
     }
     loaded_file_seen = true;
-    loaded_file_hash = hash_bytes(text, length);
+    loaded_file_hash = config_hash_bytes(text, length);
     return true;
 }

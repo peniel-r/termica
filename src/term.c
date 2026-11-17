@@ -4,6 +4,8 @@
 
 #include "term.h"
 
+#include <SDL3/SDL.h>
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -29,6 +31,154 @@ static void on_title_changed(GhosttyTerminal terminal, void *userdata)
         memcpy(term->title, title.ptr, length);
     term->title[length] = '\0';
     term->title_changed = true;
+}
+
+/* One hex digit, or -1 when the character is not one. */
+static int hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    return -1;
+}
+
+/* Decode what the library stored as the pwd. OSC 7 gives a file:// URI
+ * (typically file://C:/Users/... or file:///home/...), OSC 9 and OSC 1337
+ * give a bare path that may still be percent-encoded. The result is a bare
+ * path with percent escapes resolved, so the status bar and git runner can
+ * use it without knowing which sequence produced it. */
+static void term_decode_pwd(const GhosttyString *raw, char *out, size_t cap)
+{
+    const char *src = raw && raw->ptr ? (const char *)raw->ptr : "";
+    size_t length = raw ? raw->len : 0;
+    size_t in = 0;
+    size_t used = 0;
+
+    if (cap == 0)
+        return;
+    out[0] = '\0';
+    if (length == 0)
+        return;
+
+    /* Strip a file:// URI down to its path part. */
+    if (length >= 7 && memcmp(src, "file://", 7) == 0) {
+        in = 7;
+        if (in < length && src[in] == '/') {
+            /* file:///path: an empty authority. */
+            in++;
+        } else {
+            /* An authority. file://C:/... is a Windows drive, not a host,
+             * so keep it; anything else is a hostname to skip up to the
+             * next slash. */
+            if (!(in + 2 < length &&
+                  ((src[in] >= 'A' && src[in] <= 'Z') ||
+                   (src[in] >= 'a' && src[in] <= 'z')) &&
+                  src[in + 1] == ':' && src[in + 2] == '/')) {
+                while (in < length && src[in] != '/')
+                    in++;
+                if (in < length)
+                    in++;   /* the slash after the host */
+            }
+        }
+    }
+
+    /* Percent-decode the rest. Invalid escapes are copied literally. */
+    while (in < length && used + 1 < cap) {
+        unsigned char c = (unsigned char)src[in];
+
+        if (c == '%' && in + 2 < length) {
+            int high = hex_nibble(src[in + 1]);
+            int low = hex_nibble(src[in + 2]);
+
+            if (high >= 0 && low >= 0) {
+                c = (unsigned char)((high << 4) | low);
+                in += 3;
+            } else {
+                in++;
+            }
+        } else {
+            in++;
+        }
+        out[used++] = (char)c;
+    }
+    out[used] = '\0';
+
+#ifdef _WIN32
+    /* Windows OSC 7 arrives as a file:// URI with '/' separators. A Windows
+     * path never legitimately contains '/', and the rest of the app (the bar
+     * display and `git -C`) uses the native separator, so convert them. */
+    for (size_t i = 0; i < used; i++) {
+        if (out[i] == '/')
+            out[i] = '\\';
+    }
+#endif
+}
+
+/* The shell reported a new working directory (OSC 7, OSC 9 or OSC 1337).
+ * Read the value back and store it decoded. */
+static void on_pwd_changed(GhosttyTerminal terminal, void *userdata)
+{
+    Term *term = (Term *)userdata;
+    GhosttyString pwd = { 0 };
+
+    if (!term)
+        return;
+    if (ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_PWD, &pwd)
+            != GHOSTTY_SUCCESS)
+        return;
+    term_decode_pwd(&pwd, term->pwd, sizeof term->pwd);
+    term->pwd_changed = true;
+}
+
+/* Shell integration (OSC 133) reports the steps of a command. The status
+ * bar's spinner, duration and exit status all come from these edges. */
+static void on_semantic_prompt(GhosttyTerminal terminal, void *userdata,
+                               const GhosttyTerminalSemanticPrompt *event)
+{
+    Term *term = (Term *)userdata;
+
+    (void)terminal;
+    if (!term || !event)
+        return;
+    switch (event->kind) {
+    case GHOSTTY_SEMANTIC_PROMPT_OUTPUT_START:
+        term->command_running = true;
+        term->command_started_at = SDL_GetTicks();
+        break;
+    case GHOSTTY_SEMANTIC_PROMPT_COMMAND_END:
+        if (term->command_running)
+            term->last_command_ms = SDL_GetTicks() - term->command_started_at;
+        term->command_running = false;
+        if (event->has_exit_code) {
+            term->last_exit_code = event->exit_code;
+            term->last_command_known = true;
+        } else {
+            term->last_command_known = false;
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+/* A hard reset (RIS) clears the title and pwd without firing their changed
+ * callbacks, so our cached copies must be cleared here too. */
+static void on_reset(GhosttyTerminal terminal, void *userdata)
+{
+    Term *term = (Term *)userdata;
+
+    (void)terminal;
+    if (!term)
+        return;
+    term->pwd[0] = '\0';
+    term->pwd_changed = true;
+    term->command_running = false;
+    term->last_command_known = false;
+    term->last_exit_code = 0;
+    term->last_command_ms = 0;
 }
 
 /* The library needs to answer device status reports, mode queries and
@@ -181,6 +331,12 @@ bool term_init(Term *term, uint16_t columns, uint16_t rows)
     ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_USERDATA, term);
     ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_TITLE_CHANGED,
                          (const void *)on_title_changed);
+    ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_PWD_CHANGED,
+                         (const void *)on_pwd_changed);
+    ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_SEMANTIC_PROMPT,
+                         (const void *)on_semantic_prompt);
+    ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_RESET,
+                         (const void *)on_reset);
     ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_WRITE_PTY,
                          (const void *)on_write_pty);
     /* Only useful once the app installs a handler; registering it always is
@@ -216,6 +372,11 @@ void term_write(Term *term, const void *data, size_t length)
     if (!term->handle || length == 0)
         return;
     ghostty_terminal_vt_write(term->handle, (const uint8_t *)data, length);
+}
+
+const char *term_pwd(const Term *term)
+{
+    return term && term->pwd[0] ? term->pwd : NULL;
 }
 
 void term_resize(Term *term, uint16_t columns, uint16_t rows,
