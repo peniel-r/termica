@@ -219,25 +219,33 @@ static void set_module_defaults(Statusbar *sb)
         memset(&m->parsed_style, 0, sizeof m->parsed_style);
     }
 
+    /* These defaults mirror the shipped statusbar.toml sample exactly, so
+     * the bar looks the same with no config file at all. */
+
     m = &sb->modules[STATUSBAR_DIRECTORY];
+    snprintf(m->format, sizeof m->format, "%s", "[$symbol $value]($style)");
+    snprintf(m->symbol, sizeof m->symbol, "%s", "\uF07C");
     snprintf(m->style, sizeof m->style, "%s", "fg:#9ccfd8 bold");
-    m->truncation_length = 3;
-    snprintf(m->home_symbol, sizeof m->home_symbol, "%s", "~");
+    m->truncation_length = 1;
+    snprintf(m->home_symbol, sizeof m->home_symbol, "%s", "\uF015");
 
     m = &sb->modules[STATUSBAR_GIT_BRANCH];
+    snprintf(m->format, sizeof m->format, "%s", "[$symbol $value]($style)");
+    snprintf(m->symbol, sizeof m->symbol, "%s", "\uE725");
     snprintf(m->style, sizeof m->style, "%s", "fg:#c4a7e7 bold");
-    snprintf(m->symbol, sizeof m->symbol, "%s", "\uE0A0");
 
     m = &sb->modules[STATUSBAR_GIT_STATUS];
+    snprintf(m->format, sizeof m->format, "%s", "[$value]($style)");
     snprintf(m->style, sizeof m->style, "%s", "fg:#ebcb8b");
-    snprintf(m->ahead, sizeof m->ahead, "%s", "\u21E1");
-    snprintf(m->behind, sizeof m->behind, "%s", "\u21E3");
-    snprintf(m->diverged, sizeof m->diverged, "%s", "\u21D5");
-    snprintf(m->dirty, sizeof m->dirty, "%s", "\u2717");
-    snprintf(m->clean, sizeof m->clean, "%s", "\u2713");
-    snprintf(m->conflicted, sizeof m->conflicted, "%s", "=");
+    snprintf(m->ahead, sizeof m->ahead, "%s", "\u21E1 ");
+    snprintf(m->behind, sizeof m->behind, "%s", "\u21E3 ");
+    snprintf(m->diverged, sizeof m->diverged, "%s", "\u21D5 ");
+    snprintf(m->dirty, sizeof m->dirty, "%s", "\uF044 ");
+    snprintf(m->clean, sizeof m->clean, "%s", "\u2713 ");
+    snprintf(m->conflicted, sizeof m->conflicted, "%s", "= ");
 
     m = &sb->modules[STATUSBAR_CMD_STATUS];
+    snprintf(m->format, sizeof m->format, "%s", "[$symbol]($style)");
     snprintf(m->style_success, sizeof m->style_success, "%s",
              "fg:#a3be8c");
     snprintf(m->style_failure, sizeof m->style_failure, "%s",
@@ -247,14 +255,15 @@ static void set_module_defaults(Statusbar *sb)
 
     m = &sb->modules[STATUSBAR_CMD_DURATION];
     snprintf(m->style, sizeof m->style, "%s", "fg:#ebcb8b");
-    m->min_time_ms = 2000;
+    m->min_time_ms = 0;
 
     m = &sb->modules[STATUSBAR_TIME];
+    snprintf(m->symbol, sizeof m->symbol, "%s", "\U000F0954 ");
     snprintf(m->style, sizeof m->style, "%s", "fg:#d8dee9");
-    snprintf(m->time_format, sizeof m->time_format, "%s", "%H:%M:%S");
+    snprintf(m->time_format, sizeof m->time_format, "%s", "%H:%M");
 
     m = &sb->modules[STATUSBAR_BUSY];
-    snprintf(m->style, sizeof m->style, "%s", "fg:#81a1c1");
+    snprintf(m->style, sizeof m->style, "%s", "fg:#F54F2E");
     snprintf(m->format, sizeof m->format, "%s", "[$symbol]($style)");
     /* The frames and the resting icon are constants; an empty `idle` means
      * "use the fixed resting icon". Only `[busy] idle` overrides it. */
@@ -264,12 +273,13 @@ static void set_module_defaults(Statusbar *sb)
 void statusbar_default(Statusbar *sb)
 {
     memset(sb, 0, sizeof *sb);
-    sb->point_size = 9.0f;
-    snprintf(sb->format, sizeof sb->format, "%s",
-             "$directory$git_branch$git_status $cmd_status$cmd_duration"
-             " $busy$time");
-    sb->right_format[0] = '\0';
-    sb->center_format[0] = '\0';
+    sb->font[0] = '\0';
+    sb->point_size = 11.0f;
+    snprintf(sb->format, sizeof sb->format, "%s", "$directory");
+    snprintf(sb->center_format, sizeof sb->center_format, "%s",
+             "$git_branch $git_status");
+    snprintf(sb->right_format, sizeof sb->right_format, "%s",
+             "$cmd_duration $cmd_status $time  $busy");
     set_module_defaults(sb);
 
     /* Resolve the style strings written above. */

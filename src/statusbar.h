@@ -105,7 +105,7 @@ typedef struct StatusbarModule {
 
 typedef struct Statusbar {
     char font[512];            /* empty = built-in Maple Mono NF       */
-    float point_size;          /* default 9, never below 9             */
+    float point_size;          /* default 11, never below 9            */
     char format[512];          /* left container                       */
     char center_format[512];   /* center container                     */
     char right_format[512];    /* right container                      */

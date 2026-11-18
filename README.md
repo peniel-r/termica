@@ -289,35 +289,65 @@ top-level `format` string of `$module` tokens and literal text, and one
 `[module]` table per module. The bar's font is separate from the grid font
 and never smaller than 9 pt.
 
+This is the built-in default; the app looks exactly this way with no
+`statusbar.toml` file at all.
+
 ```toml
-format = "$directory$git_branch$git_status $cmd_status$cmd_duration"
-center_format = "$busy"
-right_format = "$time"
+format = "$directory"
+center_format = "$git_branch $git_status"
+right_format = "$cmd_duration $cmd_status $time  $busy"
 
 [font]
-face = "GeistMono NF"          # installed family; falls back to Maple Mono NF
-size = 9                       # points; values below 9 are refused
+face = ""
+size = 11.0
 
 [directory]
+format = "[$symbol $value]($style)"
+symbol = ""
 style = "fg:#9ccfd8 bold"
-truncation_length = 3          # trailing path components; 0 = full path
-home_symbol = "~"
+truncation_length = 1
+home_symbol = ""
+
+[git_branch]
+format = "[$symbol $value]($style)"
+symbol = ""
+style = "fg:#c4a7e7 bold"
+
+[git_status]
+format = "[$value]($style)"
+symbol = ""
+style = "fg:#ebcb8b"
+ahead = "⇡ "
+behind = "⇣ "
+diverged = "⇕ "
+dirty = " "
+clean = "✓ "
+conflicted = "= "
 
 [cmd_status]
+format = "[$symbol]($style)"
+symbol = ""
+style = ""
 style_success = "fg:#a3be8c"
 style_failure = "fg:#bf616a"
-symbol_success = "\u2713"
-symbol_failure = "\u2717"
+symbol_success = "✓"
+symbol_failure = "✗"
 
 [cmd_duration]
-min_time = 2000                # ms; hide commands faster than this
+format = "[$symbol$value]($style)"
+symbol = ""
+style = "fg:#ebcb8b"
+min_time = 0
 
 [time]
-time_format = "%H:%M:%S"
+format = "[$symbol$value]($style)"
+symbol = "󰥔 "
+style = "fg:#d8dee9"
+time_format = "%H:%M"
 
 [busy]
-style = "fg:#81a1c1"
-idle = ""                        # optional resting-icon override (U+F1807 if unset)
+format = "[$symbol]($style)"
+style = "fg:#F54F2E"
 ```
 
 The bar has three containers, laid out left, centred and right-aligned:
@@ -337,8 +367,8 @@ A module's `format` is a mini template of `[text]($style)` groups, with
 `$symbol` and `$value` substituted; `($style)` uses the module's own style.
 The style grammar is `fg:#RRGGBB`, `bg:#RRGGBB`, `bold`, `italic`,
 `underline`, `dim`. `center_format` and `right_format` are the optional
-centre and right containers (the example puts `$busy` centred and `$time`
-right-aligned, lualine-style).
+centre and right containers (the default puts the git modules centred and
+duration, status, time and busy right-aligned, lualine-style).
 
 The `[busy]` spinner is fixed: the ten braille frames (U+2800 block) and the
 resting icon (U+F1807, a Material Design spinner) are built in and cannot be

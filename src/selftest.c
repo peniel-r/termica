@@ -1262,14 +1262,14 @@ static void test_statusbar_settings(void)
         "min_time = 1000\n";
 
     statusbar_default(&sb);
-    check(sb.point_size == 9.0f, "default statusbar size is 9");
-    check(sb.modules[STATUSBAR_DIRECTORY].truncation_length == 3,
-          "default directory truncation is 3");
+    check(sb.point_size == 11.0f, "default statusbar size is 11");
+    check(sb.modules[STATUSBAR_DIRECTORY].truncation_length == 1,
+          "default directory truncation is 1");
     check(sb.modules[STATUSBAR_CMD_STATUS].parsed_success.has_fg,
           "cmd success style resolves");
 
     statusbar_parse_toml(&sb, document, strlen(document));
-    check(sb.point_size == 9.0f, "a statusbar size below 9 is refused");
+    check(sb.point_size == 11.0f, "a statusbar size below 9 is refused");
     check(sb.modules[STATUSBAR_DIRECTORY].truncation_length == 2,
           "directory truncation parses");
     check(sb.modules[STATUSBAR_DIRECTORY].parsed_style.has_fg &&
@@ -1281,14 +1281,14 @@ static void test_statusbar_settings(void)
           "top-level format parses");
 
     statusbar_format(&sb, text, sizeof text);
-    check(strstr(text, "size = 9") != NULL, "formatted file keeps the size");
+    check(strstr(text, "size = 11") != NULL, "formatted file keeps the size");
     check(strstr(text, "truncation_length = 2") != NULL,
           "formatted file keeps truncation");
 
     statusbar_default(&again);
     check(statusbar_parse_toml(&again, text, strlen(text)),
           "the formatted file reparses");
-    check(again.point_size == 9.0f &&
+    check(again.point_size == 11.0f &&
               again.modules[STATUSBAR_DIRECTORY].truncation_length == 2,
           "the statusbar format round trip holds");
 
@@ -1345,6 +1345,7 @@ static void test_statusbar_render(void)
 
     memset(&state, 0, sizeof state);
     state.time.value = "12:00:00";
+    state.time.symbol = "";
     count = statusbar_render(&sb, &state, "$directory $time", out,
                              sizeof out, runs, 32);
     check(strcmp(out, "12:00:00") == 0,
@@ -1372,6 +1373,7 @@ static void test_statusbar_render(void)
     memset(&state, 0, sizeof state);
     state.busy.symbol = "";
     state.time.value = "12:00:00";
+    state.time.symbol = "";
     count = statusbar_render(&sb, &state, "$busy $time", out,
                              sizeof out, runs, 32);
     check(strcmp(out, "12:00:00") == 0,
@@ -1396,6 +1398,9 @@ static void test_statusbar_helpers(void)
     int count;
 
     statusbar_default(&sb);
+    /* The shipped default is 1 component; the truncation cases below are
+     * written for three, so set that explicitly. */
+    sb.modules[STATUSBAR_DIRECTORY].truncation_length = 3;
 
     statusbar_shorten_path(&sb, "C:/Users/me/proj/src", out, sizeof out);
     check(strcmp(out, "me/proj/src") == 0, "path truncation keeps 3 parts");
@@ -1410,14 +1415,18 @@ static void test_statusbar_helpers(void)
           "a trailing separator is dropped");
     sb.modules[STATUSBAR_DIRECTORY].truncation_length = 3;
 
-    /* Home substitution: the leading home components become home_symbol and
-     * the rest re-joins with a separator ("~", not "~Music"). */
+    /* Home substitution: the leading home components become the configured
+     * home symbol and the rest re-joins with a separator. */
     {
+        char expected[64];
+
         SDL_setenv_unsafe("USERPROFILE", "C:\\Users\\tester", 1);
         statusbar_shorten_path(&sb, "C:\\Users\\tester\\Music\\", out,
                                sizeof out);
-        check(strcmp(out, "~\\Music") == 0,
-              "home becomes ~ and re-joins with a separator");
+        snprintf(expected, sizeof expected, "%s\\Music",
+                 sb.modules[STATUSBAR_DIRECTORY].home_symbol);
+        check(strcmp(out, expected) == 0,
+              "the home symbol re-joins with a separator");
     }
 
     statusbar_format_duration(750, out, sizeof out);
