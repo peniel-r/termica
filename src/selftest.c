@@ -1350,6 +1350,14 @@ static void test_statusbar_render(void)
     check(strcmp(out, "12:00:00") == 0,
           "an empty module drops its following space");
 
+    /* Outside a repository the git modules have no data at all. They must
+     * collapse entirely, including git_branch's configured symbol. */
+    memset(&state, 0, sizeof state);
+    count = statusbar_render(&sb, &state, "$git_branch$git_status ", out,
+                             sizeof out, runs, 32);
+    check(count == 0 && out[0] == '\0',
+          "git modules hide completely when there is no repository");
+
     /* The busy slot keeps its cell when it carries a placeholder, so the
      * bar does not reflow when a command starts; only an empty placeholder
      * collapses. */

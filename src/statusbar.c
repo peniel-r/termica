@@ -1113,8 +1113,17 @@ static bool render_module(const StatusbarModule *module,
 {
     const char *template_ = module->format[0] ? module->format
                                               : "[$symbol$value]($style)";
-    const char *symbol = value && value->symbol ? value->symbol : module->symbol;
-    const char *content = value && value->value ? value->value : "";
+    const char *symbol;
+    const char *content;
+
+    /* A module with no data at all collapses completely. Without this, a
+     * configured symbol renders on its own: git_branch's default glyph would
+     * otherwise be shown outside a repository, where there is no branch. */
+    if (value && !value->value && !value->symbol)
+        return false;
+
+    symbol = value && value->symbol ? value->symbol : module->symbol;
+    content = value && value->value ? value->value : "";
     StatusbarStyle mod_style = module_style(module, value);
     StatusbarStyle plain = bar_default_style();
     float scale = value && value->scale > 0.0f ? value->scale : 1.0f;

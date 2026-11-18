@@ -180,7 +180,9 @@ float statusbar_busy_idle_scale(void);
 /* ------------------------------------------------------------------------- */
 
 /* What a module evaluates to for this frame. `style` overrides the module's
- * configured style when non-NULL (used by cmd_status success/failure). */
+ * configured style when non-NULL (used by cmd_status success/failure). A
+ * module with neither a value nor a symbol has no data and renders nothing,
+ * even when it has a configured symbol (git_branch outside a repository). */
 typedef struct StatusbarModuleValue {
     const char *value;         /* substituted for $value, NULL = ""   */
     const char *symbol;        /* substituted for $symbol, NULL = module's */
