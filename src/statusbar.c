@@ -270,9 +270,6 @@ void statusbar_default(Statusbar *sb)
              " $busy$time");
     sb->right_format[0] = '\0';
     sb->center_format[0] = '\0';
-    sb->bar_fg = (SDL_Color){ 216, 222, 233, 255 };
-    sb->bar_bg = (SDL_Color){ 14, 18, 22, 255 };
-    sb->bar_opacity = 0.9f;
     set_module_defaults(sb);
 
     /* Resolve the style strings written above. */
@@ -311,34 +308,6 @@ static bool apply_font(Statusbar *sb, toml_datum_t table)
             if (number_value(value, &number) && isfinite(number) &&
                 number >= 9.0 && number <= 200.0) {
                 sb->point_size = (float)number;
-                changed = true;
-            }
-        }
-    }
-    return changed;
-}
-
-static bool apply_style(Statusbar *sb, toml_datum_t table)
-{
-    bool changed = false;
-    int index;
-
-    for (index = 0; index < table.u.tab.size; index++) {
-        const char *key = table.u.tab.key[index];
-        toml_datum_t value = table.u.tab.value[index];
-
-        if (key_is(key, "fg") && value.type == TOML_STRING) {
-            if (parse_color(value.u.str.ptr, &sb->bar_fg))
-                changed = true;
-        } else if (key_is(key, "bg") && value.type == TOML_STRING) {
-            if (parse_color(value.u.str.ptr, &sb->bar_bg))
-                changed = true;
-        } else if (key_is(key, "opacity")) {
-            double number;
-
-            if (number_value(value, &number) && isfinite(number) &&
-                number >= 0.0 && number <= 1.0) {
-                sb->bar_opacity = (float)number;
                 changed = true;
             }
         }
@@ -482,8 +451,6 @@ static bool apply_table(Statusbar *sb, const char *name, toml_datum_t table)
         return false;
     if (key_is(name, "font"))
         return apply_font(sb, table);
-    if (key_is(name, "style"))
-        return apply_style(sb, table);
     id = module_id(name);
     if (id >= 0)
         return apply_module(sb, id, table);
@@ -620,16 +587,6 @@ static void append_kv_int(char *out, size_t cap, size_t *used,
     buf_append(out, cap, used, line, strlen(line));
 }
 
-static void append_kv_color(char *out, size_t cap, size_t *used,
-                            const char *key, SDL_Color color)
-{
-    char line[64];
-
-    snprintf(line, sizeof line, "%s = \"#%02x%02x%02x\"\n", key, color.r,
-             color.g, color.b);
-    buf_append(out, cap, used, line, strlen(line));
-}
-
 static void append_module_table(char *out, size_t cap, size_t *used,
                                 const char *name, const StatusbarModule *m,
                                 bool with_symbol)
@@ -648,7 +605,6 @@ void statusbar_format(const Statusbar *sb, char *out, size_t capacity)
 {
     const StatusbarModule *m;
     char size[32];
-    char opacity[32];
     size_t used = 0;
 
     if (!out || capacity == 0)
@@ -658,7 +614,6 @@ void statusbar_format(const Statusbar *sb, char *out, size_t capacity)
         return;
 
     format_float((double)sb->point_size, size, sizeof size);
-    format_float((double)sb->bar_opacity, opacity, sizeof opacity);
 
     buf_append(out, capacity, &used, "# termica status bar\n",
                sizeof "# termica status bar\n" - 1);
@@ -695,11 +650,6 @@ void statusbar_format(const Statusbar *sb, char *out, size_t capacity)
                  escaped, size);
         buf_append(out, capacity, &used, line, strlen(line));
     }
-
-    buf_append(out, capacity, &used, "\n[style]\n", 9);
-    append_kv_color(out, capacity, &used, "fg", sb->bar_fg);
-    append_kv_color(out, capacity, &used, "bg", sb->bar_bg);
-    append_kv_string(out, capacity, &used, "opacity", opacity);
 
     m = &sb->modules[STATUSBAR_DIRECTORY];
     append_module_table(out, capacity, &used, "directory", m, true);
@@ -1095,13 +1045,12 @@ typedef struct RenderOut {
     int run_count;
 } RenderOut;
 
-static StatusbarStyle bar_default_style(const Statusbar *sb)
+static StatusbarStyle bar_default_style(void)
 {
     StatusbarStyle style;
 
+    /* Unstyled runs inherit the grid's default foreground at draw time. */
     memset(&style, 0, sizeof style);
-    style.fg = sb->bar_fg;
-    style.has_fg = true;
     return style;
 }
 
@@ -1159,7 +1108,7 @@ static void substitute(const char *text, const char *symbol,
     }
 }
 
-static bool render_module(const Statusbar *sb, const StatusbarModule *module,
+static bool render_module(const StatusbarModule *module,
                           const StatusbarModuleValue *value, RenderOut *out)
 {
     const char *template_ = module->format[0] ? module->format
@@ -1167,7 +1116,7 @@ static bool render_module(const Statusbar *sb, const StatusbarModule *module,
     const char *symbol = value && value->symbol ? value->symbol : module->symbol;
     const char *content = value && value->value ? value->value : "";
     StatusbarStyle mod_style = module_style(module, value);
-    StatusbarStyle plain = bar_default_style(sb);
+    StatusbarStyle plain = bar_default_style();
     float scale = value && value->scale > 0.0f ? value->scale : 1.0f;
     bool emitted = false;
     const char *p = template_;
@@ -1290,7 +1239,7 @@ int statusbar_render(const Statusbar *sb, const StatusbarState *state,
             }
             name[n] = '\0';
             if (n == 0) {
-                render_append(&ro, p, 1, bar_default_style(sb), 1.0f);
+                render_append(&ro, p, 1, bar_default_style(), 1.0f);
                 p++;
                 continue;
             }
@@ -1299,7 +1248,7 @@ int statusbar_render(const Statusbar *sb, const StatusbarState *state,
                 bool rendered = false;
 
                 if (id >= 0)
-                    rendered = render_module(sb, &sb->modules[id],
+                    rendered = render_module(&sb->modules[id],
                                              state_value(state, id), &ro);
                 if (!rendered && *q == ' ')
                     q++;
@@ -1312,7 +1261,7 @@ int statusbar_render(const Statusbar *sb, const StatusbarState *state,
                 p++;
             if (p > start)
                 render_append(&ro, start, (size_t)(p - start),
-                              bar_default_style(sb), 1.0f);
+                              bar_default_style(), 1.0f);
         }
     }
     return ro.run_count;

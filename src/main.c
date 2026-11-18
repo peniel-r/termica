@@ -1690,14 +1690,13 @@ static float statusbar_draw_text(App *app, const char *text, size_t length,
 /* Draw every styled run of a rendered line, left to right from `x`. */
 static void statusbar_draw_runs(App *app, const char *line,
                                 const StatusbarRun *runs, int run_count,
-                                float x, float y)
+                                float x, float y, SDL_Color default_fg)
 {
     int index;
 
     for (index = 0; index < run_count; index++) {
         const StatusbarRun *run = &runs[index];
-        SDL_Color color = run->style.has_fg ? run->style.fg
-                                            : app->statusbar.bar_fg;
+        SDL_Color color = run->style.has_fg ? run->style.fg : default_fg;
         bool bold = run->style.bold;
         bool italic = run->style.italic;
         float scale = run->scale > 0.0f ? run->scale : 1.0f;
@@ -1791,7 +1790,7 @@ static void statusbar_fill_state(App *app, StatusbarState *state,
  * right-aligned within the bar. */
 static void statusbar_draw_line(App *app, const StatusbarState *state,
                                 const char *format, float y, int mode,
-                                int pixel_width)
+                                int pixel_width, SDL_Color default_fg)
 {
     char line[STATUSBAR_LINE_BYTES];
     StatusbarRun runs[STATUSBAR_MAX_RUNS];
@@ -1824,10 +1823,11 @@ static void statusbar_draw_line(App *app, const StatusbarState *state,
     if (x < (float)chrome_padding(app))
         x = (float)chrome_padding(app);
 
-    statusbar_draw_runs(app, line, runs, count, x, y);
+    statusbar_draw_runs(app, line, runs, count, x, y, default_fg);
 }
 
-static void draw_statusbar(App *app, int pixel_width, int pixel_height)
+static void draw_statusbar(App *app, int pixel_width, int pixel_height,
+                           SDL_Color default_fg)
 {
     int height = statusbar_height(app);
     int top = pixel_height - height;
@@ -1853,13 +1853,13 @@ static void draw_statusbar(App *app, int pixel_width, int pixel_height)
                          sizeof time_buf);
 
     statusbar_draw_line(app, &state, app->statusbar.format, y,
-                        STATUSBAR_LEFT, pixel_width);
+                        STATUSBAR_LEFT, pixel_width, default_fg);
     if (app->statusbar.center_format[0])
         statusbar_draw_line(app, &state, app->statusbar.center_format, y,
-                            STATUSBAR_CENTER, pixel_width);
+                            STATUSBAR_CENTER, pixel_width, default_fg);
     if (app->statusbar.right_format[0])
         statusbar_draw_line(app, &state, app->statusbar.right_format, y,
-                             STATUSBAR_RIGHT, pixel_width);
+                             STATUSBAR_RIGHT, pixel_width, default_fg);
 }
 
 /* The status bar timer: 100 ms wakes the event loop so the spinner can
@@ -2233,7 +2233,7 @@ static void draw_frame(App *app)
     draw_scrollbar(app);
 
     /* 9. Status bar, in the band below the grid. */
-    draw_statusbar(app, pixel_width, pixel_height);
+    draw_statusbar(app, pixel_width, pixel_height, frame.default_foreground);
 
     SDL_RenderPresent(renderer);
 }

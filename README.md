@@ -298,11 +298,6 @@ right_format = "$time"
 face = "GeistMono NF"          # installed family; falls back to Maple Mono NF
 size = 9                       # points; values below 9 are refused
 
-[style]
-fg = "#d8dee9"
-bg = "#0e1216"
-opacity = 0.9
-
 [directory]
 style = "fg:#9ccfd8 bold"
 truncation_length = 3          # trailing path components; 0 = full path

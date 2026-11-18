@@ -109,9 +109,6 @@ typedef struct Statusbar {
     char format[512];          /* left container                       */
     char center_format[512];   /* center container                     */
     char right_format[512];    /* right container                      */
-    SDL_Color bar_fg;
-    SDL_Color bar_bg;
-    float bar_opacity;
     StatusbarModule modules[STATUSBAR_MODULE_COUNT];
 } Statusbar;
 
