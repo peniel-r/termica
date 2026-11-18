@@ -78,6 +78,9 @@ static const SDL_Color PANEL_BORDER = { 90, 100, 112, PANEL_BORDER_ALPHA };
 static const SDL_Color STATUS_TEXT = { 130, 138, 148, 255 };
 static const SDL_Color TITLE_TEXT = { 205, 212, 220, 255 };
 
+/* The name shown in the title bar, both custom-drawn and OS-managed. */
+#define APP_TITLE "Termica"
+
 /* What the built-in family is called, for the startup line. */
 #define BUILT_IN_FONT "Maple Mono NF (built in)"
 
@@ -289,7 +292,7 @@ static int chrome_top(const App *app)
     if (!custom_frame(app))
         return chrome_padding(app);
     if (app->title_bar)
-        return (int)((WINDOW_TITLE_BAR_HEIGHT + 4.0f) * app->display_scale);
+        return title_bar_height(app);
     if (app->decoration == WINDOW_DECORATION_COMPACT)
         return (int)(WINDOW_COMPACT_DRAG_STRIP * app->display_scale);
     return (int)((WINDOW_DRAG_STRIP + 4.0f) * app->display_scale);
@@ -1828,8 +1831,6 @@ static void draw_statusbar(App *app, int pixel_width, int pixel_height)
 {
     int height = statusbar_height(app);
     int top = pixel_height - height;
-    SDL_Color bg = app->statusbar.bar_bg;
-    SDL_Color separator = { 90, 100, 112, 140 };
     StatusbarState state;
     char dir_buf[512];
     char git_buf[256];
@@ -1837,11 +1838,10 @@ static void draw_statusbar(App *app, int pixel_width, int pixel_height)
     char time_buf[64];
     float y;
 
-    bg.a = (Uint8)(app->statusbar.bar_opacity * 255.0f + 0.5f);
-    fill_rectangle(app, 0.0f, (float)top, (float)pixel_width, (float)height,
-                   bg);
-    fill_rectangle(app, 0.0f, (float)top, (float)pixel_width, 1.0f,
-                   separator);
+    /* The full-window panel draw already filled this band with the grid's
+     * backdrop (panel_fill_color() and PANEL_BORDER, including the rounded
+     * bottom corners). Don't paint a separate opaque bar or separator over
+     * it, so the status bar shares the exact same backdrop as the grid. */
 
     y = (float)top +
         ((float)height - (float)app->statusbar_glyphs.cell_height) / 2.0f;
@@ -1978,7 +1978,7 @@ static void draw_title_bar(App *app, int pixel_width, int pixel_height)
     int buttons_left = pixel_width - WINDOW_TITLE_BAR_BUTTONS * button_width;
     SDL_Color tint = { 255, 255, 255, 16 };
     SDL_Color separator = { 90, 100, 112, 90 };
-    const char *title = app->term.title[0] ? app->term.title : "termica";
+    const char *title = APP_TITLE;
     bool maximized = (SDL_GetWindowFlags(app->window) &
                       SDL_WINDOW_MAXIMIZED) != 0;
     SDL_Rect clip;
@@ -2013,6 +2013,8 @@ static void draw_title_bar(App *app, int pixel_width, int pixel_height)
         area.w = (float)button_width;
         area.h = (float)height;
         if (app->title_hover == index) {
+            int radius = chrome_corner_radius(app);
+
             if (index == WINDOW_TITLE_BAR_BUTTONS - 1) {
                 hover.r = 196;
                 hover.g = 48;
@@ -2024,17 +2026,21 @@ static void draw_title_bar(App *app, int pixel_width, int pixel_height)
                 hover.b = 255;
                 hover.a = 26;
             }
-            if (index == WINDOW_TITLE_BAR_BUTTONS - 1 &&
-                chrome_corner_radius(app) > 0 &&
-                chrome_corner_radius(app) < height) {
-                /* Keep the close button's hover inside the top-right
-                 * rounded corner. */
-                int radius = chrome_corner_radius(app);
+            if (index == WINDOW_TITLE_BAR_BUTTONS - 1 && radius > 0) {
+                /* Paint the close button through the panel's own shape, so
+                 * its hover follows the top-right squircle instead of
+                 * leaving a square notch beside the curve. */
+                SDL_Color no_border = { 0, 0, 0, 0 };
+                SDL_Rect button_clip;
 
-                fill_rectangle(app, area.x, area.y, area.w - (float)radius,
-                               (float)radius, hover);
-                fill_rectangle(app, area.x, area.y + (float)radius, area.w,
-                               (float)(height - radius), hover);
+                button_clip.x = (int)area.x;
+                button_clip.y = 0;
+                button_clip.w = (int)area.w;
+                button_clip.h = height;
+                SDL_SetRenderClipRect(renderer, &button_clip);
+                panel_draw(&app->panel, renderer, pixel_width, pixel_height,
+                           radius, hover, no_border);
+                SDL_SetRenderClipRect(renderer, NULL);
             } else {
                 fill_rectangle(app, area.x, area.y, area.w, area.h, hover);
             }
@@ -2458,7 +2464,7 @@ int main(int argc, char **argv)
         goto cleanup;
     }
 
-    app.window = window_create("termica", 900, 480, app.decoration,
+    app.window = window_create(APP_TITLE, 900, 480, app.decoration,
                                app.title_bar);
     if (!app.window) {
         fprintf(stderr, "window_create: %s\n", SDL_GetError());
@@ -2662,11 +2668,11 @@ int main(int argc, char **argv)
          * timer, which is what notices an exit that produced no output. */
         pump_shell(&app);
 
-        /* The program changed the window title with an OSC sequence. */
+        /* Consume the program's OSC title change, but keep the title bar
+         * showing the app name rather than the shell-provided title. */
         if (app.term.title_changed) {
             app.term.title_changed = false;
-            if (app.term.title[0])
-                SDL_SetWindowTitle(app.window, app.term.title);
+            SDL_SetWindowTitle(app.window, APP_TITLE);
         }
 
         /* A fresh directory or a finished command both invalidate the git

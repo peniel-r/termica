@@ -647,6 +647,16 @@ terminal title and working window buttons.
   Windows 10 fallback for the `native` frame. Neither needs new code paths;
   they need hardware this build did not have.
 
+## Follow-up: the close button's hover at the rounded corner
+
+The red hover was two rectangles that stepped around the top-right radius,
+which left the part of the corner square inside the squircle unpainted - a
+dark notch beside the curve. The hover is now painted through the panel's
+own shape: the close button's rectangle is the clip, and `panel_draw` with
+the hover colour supplies the fill, so the red follows the same squircle as
+the window region. A windowed screenshot with the pointer held over the
+close button showed the colour continuous through the top-right curve.
+
 ---
 
 # Milestone 8: the font face key, safe saves and the launcher
