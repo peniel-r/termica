@@ -17,6 +17,7 @@
 #include "font_lookup.h"
 #include "git.h"
 #include "glyph.h"
+#include "input.h"
 #include "keys.h"
 #include "settings.h"
 #include "statusbar.h"
@@ -1511,12 +1512,38 @@ static void test_term_pwd_and_prompts(void)
           "OSC 7 decodes the file URI");
 #endif
 
+    write_string(term.handle, "\x1b]9;9;\"C:\\work\\termica\"\x07");
+    check(term_pwd(&term) && strcmp(term_pwd(&term), "C:\\work\\termica") == 0,
+          "quoted OSC 9;9 Windows directory has no quotes");
+    write_string(term.handle, "\x1b]9;9;C:\\work\\termica\x07");
+    check(term_pwd(&term) && strcmp(term_pwd(&term), "C:\\work\\termica") == 0,
+          "unquoted OSC 9;9 Windows directory is preserved");
+    write_string(term.handle, "\x1b]9;9;\"\\\\server\\share\\dir\"\x07");
+    check(term_pwd(&term) && strcmp(term_pwd(&term), "\\\\server\\share\\dir") == 0,
+          "quoted OSC 9;9 UNC directory has no quotes");
+    write_string(term.handle, "\x1b]9;9;C:\\work\\termica\"\x07");
+    check(term_pwd(&term) && strcmp(term_pwd(&term), "C:\\work\\termica\"") == 0,
+          "an unmatched quote is preserved");
+    write_string(term.handle, "\x1b]7;file:///C:/work/%22name%22\x07");
+#ifdef _WIN32
+    check(term_pwd(&term) && strcmp(term_pwd(&term), "C:\\work\\\"name\"") == 0,
+          "OSC 7 URI-encoded quotes are preserved");
+#else
+    check(term_pwd(&term) && strcmp(term_pwd(&term), "C:/work/\"name\"") == 0,
+          "OSC 7 URI-encoded quotes are preserved");
+#endif
+
+    write_string(term.handle, "\x1b]133;D;0\x07");
+    check(term.last_command_known && !term.last_duration_known,
+          "command end without start does not invent a duration");
+
     write_string(term.handle, "\x1b]133;C\x07");
     check(term.command_running, "OSC 133 C marks a running command");
 
     write_string(term.handle, "\x1b]133;D;7\x07");
     check(!term.command_running, "OSC 133 D ends the command");
     check(term.last_command_known, "the exit code is known");
+    check(term.last_duration_known, "OSC 133 C and D measure a duration");
     check(term.last_exit_code == 7, "the exit code is stored");
 
     write_string(term.handle, "\x1b" "c");
@@ -1524,6 +1551,62 @@ static void test_term_pwd_and_prompts(void)
     check(term_pwd(&term) == NULL, "a hard reset clears the pwd");
 
     term_free(&term);
+}
+
+/* An integration may report prompt and command end without output start. */
+static void test_prompt_duration_without_output_start(void)
+{
+    App *app = (App *)calloc(1, sizeof *app);
+    Session session;
+    SDL_KeyboardEvent enter = { 0 };
+    uint64_t provisional_start;
+
+    check(app != NULL, "allocate app for prompt duration");
+    if (!app)
+        return;
+    if (!session_init(&session, 40, 10, NULL, NULL)) {
+        check(false, "initialize session for prompt duration");
+        free(app);
+        return;
+    }
+    settings_default(&app->settings);
+    app->sessions[0] = &session;
+    app->session_count = 1;
+    enter.scancode = SDL_SCANCODE_RETURN;
+
+    write_string(session.term.handle, "\x1b]133;A\x07\x1b]133;B\x07");
+    enter.mod = SDL_KMOD_SHIFT;
+    input_handle_key_down(app, &enter);
+    check(!session.term.command_start_pending,
+          "modified Enter does not start a command timer");
+    enter.mod = 0;
+    input_handle_key_down(app, &enter);
+    check(session.term.command_start_pending,
+          "Enter at a marked prompt records a possible start");
+    SDL_Delay(40);
+    write_string(session.term.handle, "\x1b]133;D;0\x07");
+    check(session.term.last_duration_known && session.term.last_command_ms >= 30,
+          "command end without C uses elapsed time since Enter");
+
+    write_string(session.term.handle, "\x1b]133;A\x07\x1b]133;B\x07");
+    input_handle_key_down(app, &enter);
+    provisional_start = session.term.command_started_at;
+    SDL_Delay(40);
+    write_string(session.term.handle, "\x1b]133;C\x07");
+    check(session.term.command_running && !session.term.command_start_pending &&
+              session.term.command_started_at >= provisional_start + 30,
+          "OSC 133 C supersedes the provisional start");
+    write_string(session.term.handle, "\x1b]133;D;0\x07");
+    check(session.term.last_duration_known,
+          "the real OSC 133 start produces a duration");
+
+    write_string(session.term.handle, "\x1b]133;A\x07\x1b]133;B\x07");
+    input_handle_key_down(app, &enter);
+    write_string(session.term.handle, "\x1b]133;A\x07\x1b]133;D;0\x07");
+    check(!session.term.last_duration_known,
+          "a new prompt discards an unused provisional start");
+    session_free(&session);
+    free(app);
 }
 
 /* 1.1: shell profiles (command argv, cwd, [terminal.env]) and Windows
@@ -1955,6 +2038,7 @@ int term_selftest(void)
     test_statusbar_helpers();
     test_git_parser();
     test_term_pwd_and_prompts();
+    test_prompt_duration_without_output_start();
     test_embedded_fonts();
     test_font_lookup();
     test_clipboard_write();

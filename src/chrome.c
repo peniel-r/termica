@@ -829,7 +829,7 @@ static void statusbar_fill_state(App *app, StatusbarState *state,
     }
 
     if (!term->command_running && term->last_command_known &&
-        term->last_command_ms >=
+        term->last_duration_known && term->last_command_ms >=
             (uint64_t)sb->modules[STATUSBAR_CMD_DURATION].min_time_ms) {
         statusbar_format_duration(term->last_command_ms, dur_buf, dur_cap);
         state->cmd_duration.value = dur_buf;

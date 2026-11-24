@@ -242,6 +242,17 @@ static void write_key(App *app, const SDL_KeyboardEvent *event)
         return;
     session_jump_to_bottom(s);
     session_send(s, encoded, byte_count);
+    /* Some shell integrations report B and D but omit C. Record the last
+     * unmodified Enter at the prompt as an approximate start; a real C
+     * supersedes it. Do not treat Enter inside a running program as a start. */
+    if (!event->repeat && (key == GHOSTTY_KEY_ENTER ||
+                           key == GHOSTTY_KEY_NUMPAD_ENTER) &&
+        !(event->mod & (SDL_KMOD_SHIFT | SDL_KMOD_CTRL | SDL_KMOD_ALT |
+                        SDL_KMOD_GUI)) &&
+        s->term.prompt_input_active && !s->term.command_running) {
+        s->term.command_started_at = SDL_GetTicks();
+        s->term.command_start_pending = true;
+    }
 }
 
 void input_handle_key_down(App *app, const SDL_KeyboardEvent *event)

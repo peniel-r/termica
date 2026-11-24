@@ -233,6 +233,12 @@ Invoke-Expression (&starship init powershell)
 Snippets are provided for PowerShell (`termica-pwsh.ps1`), bash
 (`termica-bash.sh`) and zsh (`termica-zsh.sh`).
 
+For integrations that report prompt and command-end markers but omit the
+command-start marker, the duration is estimated from the last unmodified
+Enter at the prompt. It includes shell and prompt overhead and may differ
+from Starship's execution time. Without either start marker or Enter, the
+duration is hidden rather than reused from a previous command.
+
 ## Known limitations
 
 These are tracked in [PLAN.md](PLAN.md):

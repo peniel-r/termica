@@ -281,6 +281,12 @@ flowchart LR
     pwd & cmd & gitstate & clock["clock"] --> render["statusbar render -> styled runs"]
 ```
 
+OSC 9;9 emitters may wrap absolute Windows paths in quotes; the callback
+removes a matching pair for drive and UNC paths. For integrations that emit
+OSC 133 B and D but no C, an unmodified Enter at the marked prompt supplies
+an approximate start time. A C marker takes precedence. An unmatched D
+updates status but cannot supply a duration.
+
 <details>
 <summary>The built-in default <code>statusbar.toml</code></summary>
 

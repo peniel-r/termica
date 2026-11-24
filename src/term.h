@@ -91,11 +91,13 @@ struct Term {
     bool pwd_changed;
     char pwd[4096];
 
-    /* Shell integration state from OSC 133 semantic prompts: whether a
-     * command is running now, and what the last finished command reported.
-     * `command_started_at` and `last_command_ms` are SDL_GetTicks values. */
+    /* OSC 133 command state. Some integrations omit C: in that case a
+     * plain Enter at the marked prompt is an approximate start time. */
     bool     command_running;
     bool     last_command_known;
+    bool     last_duration_known;
+    bool     prompt_input_active;
+    bool     command_start_pending;
     int32_t  last_exit_code;
     uint64_t last_command_ms;
     uint64_t command_started_at;

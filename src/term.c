@@ -73,6 +73,20 @@ static void term_decode_pwd(const GhosttyString *raw, char *out, size_t cap)
     out[0] = '\0';
     if (length == 0)
         return;
+    /* OSC 9;9 emitters on Windows commonly quote the whole native path.
+     * Quotes cannot occur in a Windows path; leave URI-encoded quotes and
+     * ordinary unquoted paths alone. */
+    if (length >= 5 && src[0] == '"' && src[length - 1] == '"' &&
+        (((src[1] >= 'A' && src[1] <= 'Z') ||
+          (src[1] >= 'a' && src[1] <= 'z')) && src[2] == ':' &&
+         (src[3] == '\\' || src[3] == '/'))) {
+        in = 1;
+        length--;
+    } else if (length >= 5 && src[0] == '"' && src[length - 1] == '"' &&
+               src[1] == '\\' && src[2] == '\\') {
+        in = 1;
+        length--;
+    }
 
     /* Strip a file:// URI down to its path part. */
     if (length >= 7 && memcmp(src, "file://", 7) == 0) {
@@ -155,14 +169,30 @@ static void on_semantic_prompt(GhosttyTerminal terminal, void *userdata,
     if (!term || !event)
         return;
     switch (event->kind) {
+    case GHOSTTY_SEMANTIC_PROMPT_PROMPT_START:
+        if (event->prompt_kind == GHOSTTY_SEMANTIC_PROMPT_PROMPT_PRIMARY) {
+            term->prompt_input_active = false;
+            term->command_start_pending = false;
+        }
+        break;
+    case GHOSTTY_SEMANTIC_PROMPT_INPUT_START:
+        term->prompt_input_active = true;
+        break;
     case GHOSTTY_SEMANTIC_PROMPT_OUTPUT_START:
+        if (!term->command_running)
+            term->command_started_at = SDL_GetTicks();
         term->command_running = true;
-        term->command_started_at = SDL_GetTicks();
+        term->prompt_input_active = false;
+        term->command_start_pending = false;
         break;
     case GHOSTTY_SEMANTIC_PROMPT_COMMAND_END:
-        if (term->command_running)
+        term->last_duration_known = term->command_running ||
+                                    term->command_start_pending;
+        if (term->last_duration_known)
             term->last_command_ms = SDL_GetTicks() - term->command_started_at;
         term->command_running = false;
+        term->prompt_input_active = false;
+        term->command_start_pending = false;
         if (event->has_exit_code) {
             term->last_exit_code = event->exit_code;
             term->last_command_known = true;
@@ -188,6 +218,9 @@ static void on_reset(GhosttyTerminal terminal, void *userdata)
     term->pwd_changed = true;
     term->command_running = false;
     term->last_command_known = false;
+    term->last_duration_known = false;
+    term->prompt_input_active = false;
+    term->command_start_pending = false;
     term->last_exit_code = 0;
     term->last_command_ms = 0;
 }
