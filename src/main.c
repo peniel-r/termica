@@ -54,6 +54,7 @@ static void fit_grid(App *app)
     int rows;
     int grid_right;
     int grid_bottom;
+    int i;
 
     SDL_GetWindowSizeInPixels(app->window, &pixel_width, &pixel_height);
     padding = chrome_padding(app);
@@ -72,20 +73,26 @@ static void fit_grid(App *app)
     if (columns != app->columns || rows != app->rows) {
         app->columns = columns;
         app->rows = rows;
-        session_resize(&app->session, (uint16_t)columns, (uint16_t)rows,
-                       (uint32_t)app->glyphs.cell_width,
-                       (uint32_t)app->glyphs.cell_height);
+        for (i = 0; i < app->session_count; i++) {
+            session_resize(app->sessions[i], (uint16_t)columns, (uint16_t)rows,
+                           (uint32_t)app->glyphs.cell_width,
+                           (uint32_t)app->glyphs.cell_height);
+        }
     }
-    /* The window region follows the window size. */
+    /* The window region and clickable tab region follow the window size. */
     window_sync_chrome(app->window, app->backdrop, app->decoration,
                        chrome_corner_radius(app));
+    chrome_sync_tab_hit_region(app);
 
     grid_right = app->grid_left + app->columns * app->glyphs.cell_width;
     grid_bottom = app->grid_top + app->rows * app->glyphs.cell_height;
-    session_update_geometry(&app->session, (uint32_t)pixel_width,
-                            (uint32_t)pixel_height, (uint32_t)app->grid_left,
-                            (uint32_t)app->grid_top, (uint32_t)grid_right,
-                            (uint32_t)grid_bottom);
+    for (i = 0; i < app->session_count; i++) {
+        session_update_geometry(app->sessions[i], (uint32_t)pixel_width,
+                                (uint32_t)pixel_height,
+                                (uint32_t)app->grid_left,
+                                (uint32_t)app->grid_top, (uint32_t)grid_right,
+                                (uint32_t)grid_bottom);
+    }
     app->needs_redraw = true;
 }
 
@@ -147,6 +154,115 @@ static void handle_display_scale_changed(App *app)
     glyphs_close(&app->statusbar_glyphs);
     open_statusbar_font(app, path);
     fit_grid(app);
+}
+
+static void on_pty_output(void *userdata);
+
+static void refresh_git_for_active(App *app)
+{
+    const Session *s = app_active_session_const(app);
+
+    app->git_have = false;
+    if (app->git && s) {
+        git_request(app->git, term_pwd(&s->term));
+        app->last_git_request_ms = SDL_GetTicks();
+    }
+}
+
+bool app_new_tab(App *app)
+{
+    Session *s;
+    uint16_t cols = (uint16_t)(app->columns > 0 ? app->columns : 80);
+    uint16_t rows = (uint16_t)(app->rows > 0 ? app->rows : 24);
+
+    if (app->session_count >= APP_MAX_TABS)
+        return false;
+    s = (Session *)calloc(1, sizeof *s);
+    if (!s)
+        return false;
+    if (!session_init(s, cols, rows, input_handle_clipboard_write, app)) {
+        free(s);
+        return false;
+    }
+    term_set_colors(&s->term, &app->settings.colors);
+    if (app->glyphs.cell_width > 0 && app->glyphs.cell_height > 0) {
+        term_resize(&s->term, cols, rows, (uint32_t)app->glyphs.cell_width,
+                    (uint32_t)app->glyphs.cell_height);
+    }
+
+    input_autoscroll_start(app, 0);
+    app->sessions[app->session_count] = s;
+    app->active_session = app->session_count;
+    app->session_count++;
+
+    /* Refit first if the tab strip just appeared, so the new shell spawns at
+     * the exact post-strip grid dimensions. */
+    fit_grid(app);
+    session_spawn_shell(s, &app->settings, (uint16_t)app->columns,
+                        (uint16_t)app->rows, on_pty_output, app);
+    refresh_git_for_active(app);
+    app->needs_redraw = true;
+    return true;
+}
+
+void app_close_tab(App *app, int index)
+{
+    int i;
+
+    if (index < 0 || index >= app->session_count)
+        return;
+    input_autoscroll_start(app, 0);
+    session_free(app->sessions[index]);
+    free(app->sessions[index]);
+    for (i = index; i + 1 < app->session_count; i++)
+        app->sessions[i] = app->sessions[i + 1];
+    app->session_count--;
+    app->sessions[app->session_count] = NULL;
+    app->tab_hover = -1;
+    app->tab_new_hover = false;
+
+    if (app->session_count == 0) {
+        app->active_session = 0;
+        app->running = false;
+        return;
+    }
+    if (app->active_session >= app->session_count)
+        app->active_session = app->session_count - 1;
+    else if (index < app->active_session)
+        app->active_session--;
+
+    fit_grid(app);
+    refresh_git_for_active(app);
+    app->needs_redraw = true;
+}
+
+void app_switch_tab(App *app, int index)
+{
+    if (app->session_count <= 0)
+        return;
+    if (index < 0)
+        index = 0;
+    if (index >= app->session_count)
+        index = app->session_count - 1;
+    if (index == app->active_session)
+        return;
+    input_autoscroll_start(app, 0);
+    app->active_session = index;
+    app->command_was_running = app->sessions[index]->term.command_running;
+    refresh_git_for_active(app);
+    app->needs_redraw = true;
+}
+
+void app_next_tab(App *app, int delta)
+{
+    int next;
+
+    if (app->session_count <= 1)
+        return;
+    next = (app->active_session + delta) % app->session_count;
+    if (next < 0)
+        next += app->session_count;
+    app_switch_tab(app, next);
 }
 
 /* The reader thread only announces that bytes are waiting. SDL_PushEvent is
@@ -321,6 +437,8 @@ static void dispatch_event(App *app, const SDL_Event *event)
     case SDL_EVENT_WINDOW_MOUSE_LEAVE:
         input_reset_mouse_shape(app);
         app->title_hover = -1;
+        app->tab_hover = -1;
+        app->tab_new_hover = false;
         app->needs_redraw = true;
         input_autoscroll_start(app, 0);
         break;
@@ -343,23 +461,41 @@ static void dispatch_event(App *app, const SDL_Event *event)
 
 static void sync_session_and_git(App *app)
 {
-    Session *s = &app->session;
-    bool exited_now = false;
+    Session *active;
     GitStatus result;
+    int i;
 
-    /* Drain the program's output: the pty event, but also the blink timer,
-     * which is what notices an exit that produced no output. */
-    if (session_pump(s, &exited_now))
-        app->needs_redraw = true;
+    /* Drain every session's output so background tabs never stall their pty
+     * ring buffers, and close any tab whose shell has exited. */
+    for (i = 0; i < app->session_count; ) {
+        Session *s = app->sessions[i];
+        bool exited_now = false;
 
-    /* The direct child is gone. Close the app with it: the window is only
-     * hosting that shell, and leaving it up with a dead shell is not useful. */
-    if (exited_now)
-        app->running = false;
+        if (session_pump(s, &exited_now) && i == app->active_session)
+            app->needs_redraw = true;
+
+        if (s->term.title_changed) {
+            s->term.title_changed = false;
+            if (chrome_tab_strip_visible(app))
+                app->needs_redraw = true;
+            if (i == app->active_session)
+                SDL_SetWindowTitle(app->window, APP_TITLE);
+        }
+
+        if (exited_now) {
+            app_close_tab(app, i);
+            continue;
+        }
+        i++;
+    }
+
+    active = app_active_session(app);
+    if (!active)
+        return;
 
     /* Handle BEL (0x07) according to [terminal] bell. */
-    if (s->term.bell_rang) {
-        s->term.bell_rang = false;
+    if (active->term.bell_rang) {
+        active->term.bell_rang = false;
         if (app->settings.bell == SETTINGS_BELL_VISUAL) {
             app->bell_flash_until_ms = SDL_GetTicks() + 120;
             app->needs_redraw = true;
@@ -370,29 +506,24 @@ static void sync_session_and_git(App *app)
         }
     }
 
-    /* Consume the program's OSC title change, but keep the title bar
-     * showing the app name rather than the shell-provided title. */
-    if (s->term.title_changed) {
-        s->term.title_changed = false;
-        SDL_SetWindowTitle(app->window, APP_TITLE);
-    }
-
     /* A fresh directory or a finished command both invalidate the git view,
      * so ask the worker again (throttled). */
-    if (s->term.pwd_changed) {
-        s->term.pwd_changed = false;
+    if (active->term.pwd_changed) {
+        active->term.pwd_changed = false;
         app->git_have = false;
+        if (chrome_tab_strip_visible(app))
+            app->needs_redraw = true;
         if (SDL_GetTicks() - app->last_git_request_ms >= GIT_REFRESH_MS) {
-            git_request(app->git, term_pwd(&s->term));
+            git_request(app->git, term_pwd(&active->term));
             app->last_git_request_ms = SDL_GetTicks();
         }
     }
-    if (app->command_was_running && !s->term.command_running &&
+    if (app->command_was_running && !active->term.command_running &&
         SDL_GetTicks() - app->last_git_request_ms >= GIT_REFRESH_MS) {
-        git_request(app->git, term_pwd(&s->term));
+        git_request(app->git, term_pwd(&active->term));
         app->last_git_request_ms = SDL_GetTicks();
     }
-    app->command_was_running = s->term.command_running;
+    app->command_was_running = active->term.command_running;
 
     if (git_poll(app->git, &result)) {
         app->git_status = result;
@@ -450,6 +581,7 @@ int main(int argc, char **argv)
     app.title_bar = app.settings.title_bar &&
                     app.decoration != WINDOW_DECORATION_NATIVE;
     app.title_hover = -1;
+    app.tab_hover = -1;
 
     font_path = pick_font(requested_font, app.settings.font);
     /* A settings file may name the installed family instead of a file. */
@@ -515,32 +647,23 @@ int main(int argc, char **argv)
 
     open_statusbar_font(&app, font_path);
 
-    /* Session: create at a default size, then fit to the window. */
-    if (!session_init(&app.session, 80, 24, input_handle_clipboard_write,
-                      &app)) {
-        fprintf(stderr, "libghostty-vt setup failed\n");
-        goto cleanup;
-    }
-    term_set_colors(&app.session.term, &app.settings.colors);
-
     /* Keep the material that is really in effect: Mica may be unavailable
      * on an older Windows, and the window falls back to the panel. */
     app.backdrop = window_sync_chrome(app.window, app.backdrop,
                                       app.decoration,
                                       chrome_corner_radius(&app));
-    fit_grid(&app);
-
-    /* The grid is final now, so the console starts at the right size. */
-    session_spawn_shell(&app.session, &app.settings,
-                        (uint16_t)app.columns, (uint16_t)app.rows,
-                        on_pty_output, &app);
 
     /* The status bar's git status comes from a background worker. */
     git_init(&app.git);
     app.busy_frame_count =
         statusbar_busy_frames(app.busy_frames, STATUSBAR_MAX_FRAMES);
-    git_request(app.git, term_pwd(&app.session.term));
-    app.last_git_request_ms = SDL_GetTicks();
+
+    /* Open the initial tab (measures the grid, spawns the shell, requests
+     * initial git status). */
+    if (!app_new_tab(&app)) {
+        fprintf(stderr, "libghostty-vt setup failed\n");
+        goto cleanup;
+    }
 
     app.blink_timer = SDL_AddTimer(500, on_blink_timer, &app);
     app.statusbar_timer = SDL_AddTimer(STATUSBAR_TIMER_MS, on_statusbar_timer,
@@ -581,7 +704,12 @@ cleanup:
     if (app.cursor)
         SDL_DestroyCursor(app.cursor);
     git_close(app.git);
-    session_free(&app.session);
+    for (index = 0; index < app.session_count; index++) {
+        session_free(app.sessions[index]);
+        free(app.sessions[index]);
+        app.sessions[index] = NULL;
+    }
+    app.session_count = 0;
     panel_free(&app.panel);
     glyphs_close(&app.glyphs);
     glyphs_close(&app.statusbar_glyphs);

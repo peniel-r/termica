@@ -12,6 +12,7 @@
 
 #include "term.h"
 #include "pty.h"
+#include "chrome.h"
 #include "embed.h"
 #include "font_lookup.h"
 #include "git.h"
@@ -1879,6 +1880,54 @@ static void test_pty_writer_queue(void)
 }
 #endif
 
+/* 2.2: tab keybindings, tab labels and multi-session lifecycle. */
+static void test_tabs(void)
+{
+    KeyMap map;
+    Session s1;
+    Session s2;
+    char label[64];
+
+    keys_default(&map);
+    check(keys_lookup(&map, SDL_SCANCODE_T,
+                      SDL_KMOD_LCTRL | SDL_KMOD_LSHIFT) == KEY_ACTION_NEW_TAB,
+          "Ctrl+Shift+T opens a new tab by default");
+    check(keys_lookup(&map, SDL_SCANCODE_W,
+                      SDL_KMOD_LCTRL | SDL_KMOD_LSHIFT) == KEY_ACTION_CLOSE_TAB,
+          "Ctrl+Shift+W closes the active tab by default");
+    check(keys_lookup(&map, SDL_SCANCODE_TAB,
+                      SDL_KMOD_LCTRL) == KEY_ACTION_NEXT_TAB,
+          "Ctrl+Tab switches to the next tab by default");
+    check(keys_lookup(&map, SDL_SCANCODE_TAB,
+                      SDL_KMOD_LCTRL | SDL_KMOD_LSHIFT) == KEY_ACTION_PREV_TAB,
+          "Ctrl+Shift+Tab switches to the previous tab by default");
+
+    check(session_init(&s1, 40, 10, NULL, NULL), "first session initializes");
+    check(session_init(&s2, 40, 10, NULL, NULL), "second session initializes");
+
+    chrome_tab_label(&s1, 0, label, sizeof label);
+    check(strcmp(label, "Tab 1") == 0,
+          "tab label falls back to Tab N when empty");
+
+    snprintf(s1.term.pwd, sizeof s1.term.pwd, "C:\\sandbox\\termica\\");
+    chrome_tab_label(&s1, 0, label, sizeof label);
+    check(strcmp(label, "termica") == 0,
+          "tab label uses last directory component of pwd");
+
+    snprintf(s2.term.title, sizeof s2.term.title, "vim init.lua");
+    chrome_tab_label(&s2, 1, label, sizeof label);
+    check(strcmp(label, "vim init.lua") == 0,
+          "tab label prefers OSC window title over pwd");
+
+    session_resize(&s1, 80, 24, 9, 22);
+    session_resize(&s2, 80, 24, 9, 22);
+    check(s1.term.columns == 80 && s2.term.rows == 24,
+          "independent sessions resize cleanly");
+
+    session_free(&s1);
+    session_free(&s2);
+}
+
 int term_selftest(void)
 {
     printf("termica self test (libghostty-vt)\n\n");
@@ -1900,6 +1949,7 @@ int term_selftest(void)
     test_font_fallback();
     test_color_schemes();
     test_bell();
+    test_tabs();
     test_statusbar_settings();
     test_statusbar_render();
     test_statusbar_helpers();

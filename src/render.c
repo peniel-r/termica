@@ -205,13 +205,14 @@ static void draw_cell(const FrameContext *frame, const CellPaint *cell)
  * while drawing rather than guessed from history. */
 static void update_text_input_area(App *app)
 {
+    Session *s = app_active_session(app);
     GhosttyRenderStateCursor cursor_state =
         GHOSTTY_INIT_SIZED(GhosttyRenderStateCursor);
     SDL_Rect area;
 
-    if (ghostty_render_state_get(app->session.term.render_state,
-                                 GHOSTTY_RENDER_STATE_DATA_CURSOR,
-                                 &cursor_state) != GHOSTTY_SUCCESS)
+    if (!s || ghostty_render_state_get(s->term.render_state,
+                                       GHOSTTY_RENDER_STATE_DATA_CURSOR,
+                                       &cursor_state) != GHOSTTY_SUCCESS)
         return;
     if (!cursor_state.visible || !cursor_state.viewport_has_value)
         return;
@@ -232,10 +233,11 @@ static void update_text_input_area(App *app)
  * without this the user types and sees nothing until the commit. */
 static void draw_composition(App *app, int cursor_column, int cursor_row)
 {
-    const char *text = app->session.composing;
+    const Session *s = app_active_session_const(app);
+    const char *text = s ? s->composing : NULL;
     int column = cursor_column;
 
-    if (app->session.composing_length == 0)
+    if (!s || s->composing_length == 0)
         return;
 
     while (*text && column < app->columns) {
@@ -259,7 +261,8 @@ static void draw_composition(App *app, int cursor_column, int cursor_row)
 void render_frame(App *app)
 {
     SDL_Renderer *renderer = app->renderer;
-    Term *term = &app->session.term;
+    Session *session = app_active_session(app);
+    Term *term = session ? &session->term : NULL;
     GhosttyRenderStateColors state_colors =
         GHOSTTY_INIT_SIZED(GhosttyRenderStateColors);
     GhosttyRenderStateCursor cursor_state =
@@ -271,6 +274,9 @@ void render_frame(App *app)
     int cursor_row = 0;
     bool cursor_drawn = false;
     bool cursor_valid = false;
+
+    if (!term)
+        return;
 
     SDL_GetWindowSizeInPixels(app->window, &pixel_width, &pixel_height);
 

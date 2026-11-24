@@ -119,6 +119,8 @@ or readline bindings.
 |---|---|
 | `Ctrl+Shift+C` | Copy the selection |
 | `Ctrl+Shift+V` | Paste (bracketed when the program enables it; `Ctrl+V` reaches the shell) |
+| `Ctrl+Shift+T` / `Ctrl+Shift+W` | Open a new tab / close the active tab |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Font zoom in / out / reset |
 | `Shift+PgUp` / `Shift+PgDn` | Scroll one page |
 | `Ctrl+Shift+Up` / `Down` | Scroll one row |

@@ -4,6 +4,7 @@
  */
 #include "chrome.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
@@ -79,13 +80,25 @@ int chrome_title_bar_height(const App *app)
     return (int)(WINDOW_TITLE_BAR_HEIGHT * app->display_scale + 0.5f);
 }
 
+bool chrome_tab_strip_visible(const App *app)
+{
+    return app && app->session_count > 1;
+}
+
 int chrome_top(const App *app)
 {
-    /* A native frame has no strip to drag, only the usual padding. */
-    if (!chrome_custom_frame(app))
+    /* A native frame has no drag strip, only padding - unless multiple tabs
+     * are open, in which case the tab strip sits at the top of the client. */
+    if (!chrome_custom_frame(app)) {
+        if (chrome_tab_strip_visible(app))
+            return (int)(WINDOW_TAB_STRIP_HEIGHT * app->display_scale + 0.5f) +
+                   chrome_padding(app) / 2;
         return chrome_padding(app);
+    }
     if (app->title_bar)
         return chrome_title_bar_height(app);
+    if (chrome_tab_strip_visible(app))
+        return (int)(WINDOW_TAB_STRIP_HEIGHT * app->display_scale + 0.5f);
     if (app->decoration == WINDOW_DECORATION_COMPACT)
         return (int)(WINDOW_COMPACT_DRAG_STRIP * app->display_scale);
     return (int)((WINDOW_DRAG_STRIP + 4.0f) * app->display_scale);
@@ -108,14 +121,15 @@ int chrome_statusbar_height(const App *app)
 
 void chrome_scrollbar_geometry(App *app, ScrollBar *bar)
 {
+    Session *s = app_active_session(app);
     GhosttyTerminalScrollbar data;
     int pixel_width;
     int pixel_height;
 
     memset(bar, 0, sizeof *bar);
-    if (!term_scrollbar(&app->session.term, &data) || data.total <= data.len)
+    if (!s || !term_scrollbar(&s->term, &data) || data.total <= data.len)
         return;
-    if (term_viewport_at_bottom(&app->session.term))
+    if (term_viewport_at_bottom(&s->term))
         return;
 
     SDL_GetWindowSizeInPixels(app->window, &pixel_width, &pixel_height);
@@ -185,12 +199,15 @@ bool chrome_scrollbar_hit(const ScrollBar *bar, float x, float y,
  * click. Returns true when the event belonged to the bar. */
 bool chrome_scrollbar_press(App *app, const ScrollBar *bar, float y)
 {
+    Session *s = app_active_session(app);
     bool on_thumb = y >= bar->track_top + bar->thumb_top &&
                     y <= bar->track_top + bar->thumb_top + bar->thumb_height;
     uint64_t row;
 
+    if (!s)
+        return false;
     if (on_thumb) {
-        app->session.bar_drag = true;
+        s->bar_drag = true;
         return true;
     }
     if (y < bar->track_top + bar->thumb_top) {
@@ -203,7 +220,7 @@ bool chrome_scrollbar_press(App *app, const ScrollBar *bar, float y)
         if (row > bar->scrollable)
             row = bar->scrollable;
     }
-    term_scroll_row(&app->session.term, (uint32_t)row);
+    term_scroll_row(&s->term, (uint32_t)row);
     app->needs_redraw = true;
     return true;
 }
@@ -214,19 +231,260 @@ bool chrome_scrollbar_press(App *app, const ScrollBar *bar, float y)
  * drawn when the whole history fits. */
 void chrome_draw_scrollbar(App *app)
 {
+    Session *s = app_active_session(app);
     ScrollBar bar;
     SDL_Color color = { 150, 158, 168, 190 };
 
+    if (!s)
+        return;
     chrome_scrollbar_geometry(app, &bar);
     if (!bar.visible)
         return;
 
     /* The thumb brightens while it is held, so a drag has feedback even
      * when the view itself is a moment behind. */
-    if (app->session.bar_drag)
+    if (s->bar_drag)
         color.a = 255;
     chrome_fill_rect(app->renderer, bar.x, bar.track_top + bar.thumb_top,
                      bar.width, bar.thumb_height, color);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Tab strip                                                                  */
+/* ------------------------------------------------------------------------- */
+
+#define TAB_MIN_WIDTH   80
+#define TAB_MAX_WIDTH   180
+#define TAB_NEW_WIDTH   28
+#define TAB_CLOSE_WIDTH 20
+
+typedef struct TabLayout {
+    int start_x;
+    int strip_height;
+    int tab_width;
+    int new_x;
+    int right_edge;
+} TabLayout;
+
+static bool compute_tab_layout(const App *app, TabLayout *out)
+{
+    int win_w = 0;
+    int win_h = 0;
+    int right_reserved = 0;
+    int available;
+    int tab_w;
+
+    memset(out, 0, sizeof *out);
+    if (!chrome_tab_strip_visible(app))
+        return false;
+
+    SDL_GetWindowSize(app->window, &win_w, &win_h);
+    (void)win_h;
+    if (chrome_custom_frame(app) && app->title_bar) {
+        out->strip_height = WINDOW_TITLE_BAR_HEIGHT;
+        right_reserved = WINDOW_TITLE_BAR_BUTTONS *
+                         WINDOW_TITLE_BAR_BUTTON_WIDTH + 16;
+        out->start_x = 8;
+    } else {
+        out->strip_height = WINDOW_TAB_STRIP_HEIGHT;
+        right_reserved = 8;
+        out->start_x = chrome_custom_frame(app) ? 8 : 4;
+    }
+
+    available = win_w - out->start_x - right_reserved - TAB_NEW_WIDTH;
+    if (available < TAB_MIN_WIDTH)
+        available = TAB_MIN_WIDTH;
+    tab_w = available / app->session_count;
+    if (tab_w > TAB_MAX_WIDTH)
+        tab_w = TAB_MAX_WIDTH;
+    if (tab_w < TAB_MIN_WIDTH)
+        tab_w = TAB_MIN_WIDTH;
+
+    out->tab_width = tab_w;
+    out->new_x = out->start_x + app->session_count * tab_w;
+    out->right_edge = out->new_x + TAB_NEW_WIDTH;
+    return true;
+}
+
+void chrome_sync_tab_hit_region(const App *app)
+{
+    TabLayout layout;
+
+    if (chrome_custom_frame(app) && compute_tab_layout(app, &layout))
+        window_set_tabs_width(layout.right_edge);
+    else
+        window_set_tabs_width(0);
+}
+
+void chrome_tab_label(const Session *s, int index, char *out, size_t capacity)
+{
+    const char *pwd;
+
+    if (!out || capacity == 0)
+        return;
+    if (s && s->term.title[0]) {
+        snprintf(out, capacity, "%s", s->term.title);
+        return;
+    }
+    pwd = s ? term_pwd(&s->term) : NULL;
+    if (pwd && pwd[0]) {
+        size_t len = strlen(pwd);
+        const char *slash;
+
+        while (len > 1 && (pwd[len - 1] == '\\' || pwd[len - 1] == '/'))
+            len--;
+        slash = pwd + len;
+        while (slash > pwd && slash[-1] != '\\' && slash[-1] != '/')
+            slash--;
+        if ((size_t)(pwd + len - slash) > 0) {
+            size_t part = (size_t)(pwd + len - slash);
+
+            if (part >= capacity)
+                part = capacity - 1;
+            memcpy(out, slash, part);
+            out[part] = '\0';
+            return;
+        }
+    }
+    snprintf(out, capacity, "Tab %d", index + 1);
+}
+
+bool chrome_tab_hit(const App *app, float x, float y, int *out_tab,
+                    bool *out_close, bool *out_new)
+{
+    TabLayout layout;
+    int ix = (int)x;
+    int iy = (int)y;
+
+    if (out_tab) *out_tab = -1;
+    if (out_close) *out_close = false;
+    if (out_new) *out_new = false;
+    if (!compute_tab_layout(app, &layout))
+        return false;
+    if (iy < 0 || iy >= layout.strip_height)
+        return false;
+
+    if (ix >= layout.new_x && ix < layout.new_x + TAB_NEW_WIDTH) {
+        if (out_new)
+            *out_new = true;
+        return true;
+    }
+    if (ix >= layout.start_x && ix < layout.new_x) {
+        int index = (ix - layout.start_x) / layout.tab_width;
+        int local_x = (ix - layout.start_x) % layout.tab_width;
+
+        if (index >= 0 && index < app->session_count) {
+            if (out_tab)
+                *out_tab = index;
+            if (out_close && local_x >= layout.tab_width - TAB_CLOSE_WIDTH)
+                *out_close = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+void chrome_update_tab_hover(App *app, float x, float y)
+{
+    int tab = -1;
+    bool is_new = false;
+
+    chrome_tab_hit(app, x, y, &tab, NULL, &is_new);
+    if (tab != app->tab_hover || is_new != app->tab_new_hover) {
+        app->tab_hover = tab;
+        app->tab_new_hover = is_new;
+        app->needs_redraw = true;
+    }
+}
+
+static void draw_tab_strip_items(App *app, const TabLayout *layout)
+{
+    SDL_Renderer *renderer = app->renderer;
+    float s = app->display_scale;
+    int strip_h = (int)(layout->strip_height * s + 0.5f);
+    int tab_w = (int)(layout->tab_width * s + 0.5f);
+    int start_x = (int)(layout->start_x * s + 0.5f);
+    int new_w = (int)(TAB_NEW_WIDTH * s + 0.5f);
+    int close_w = (int)(TAB_CLOSE_WIDTH * s + 0.5f);
+    int pad_x = (int)(8.0f * s + 0.5f);
+    int i;
+
+    for (i = 0; i < app->session_count; i++) {
+        int tx = start_x + i * tab_w;
+        bool active = (i == app->active_session);
+        bool hovered = (i == app->tab_hover);
+        SDL_Color bg = { 255, 255, 255, active ? 32 : (hovered ? 18 : 6) };
+        SDL_Color accent = { 136, 192, 208, 220 };
+        SDL_Color fg = active ? CHROME_TITLE_TEXT : CHROME_STATUS_TEXT;
+        char label[128];
+        const char *p;
+        SDL_Rect clip;
+        int text_y = (strip_h - app->glyphs.cell_height) / 2;
+        int col = 0;
+
+        chrome_fill_rect(renderer, (float)tx + 1.0f, 2.0f, (float)tab_w - 2.0f,
+                         (float)strip_h - 3.0f, bg);
+        if (active)
+            chrome_fill_rect(renderer, (float)tx + 1.0f, (float)strip_h - 3.0f,
+                             (float)tab_w - 2.0f, 2.0f, accent);
+
+        chrome_tab_label(app->sessions[i], i, label, sizeof label);
+        if (text_y < 0)
+            text_y = 0;
+        clip.x = tx + pad_x;
+        clip.y = 0;
+        clip.w = tab_w - pad_x - close_w;
+        clip.h = strip_h;
+        if (clip.w > 0) {
+            SDL_SetRenderClipRect(renderer, &clip);
+            p = label;
+            while (*p) {
+                char utf8[8];
+                char *end;
+                Uint32 cp = SDL_StepUTF8(&p, NULL);
+
+                if (!cp)
+                    break;
+                end = SDL_UCS4ToUTF8(cp, utf8);
+                *end = '\0';
+                glyphs_draw_text(&app->glyphs, utf8, (size_t)(end - utf8),
+                                 (float)(clip.x + col * app->glyphs.cell_width),
+                                 (float)text_y, false, false, fg);
+                col++;
+            }
+            SDL_SetRenderClipRect(renderer, NULL);
+        }
+
+        /* Small 'x' close icon on the right side of each tab. */
+        {
+            float cx = (float)(tx + tab_w - close_w / 2);
+            float cy = (float)strip_h * 0.5f;
+            float r = 3.0f * s;
+
+            SDL_SetRenderDrawColor(renderer, fg.r, fg.g, fg.b,
+                                   active || hovered ? 200 : 110);
+            SDL_RenderLine(renderer, cx - r, cy - r, cx + r, cy + r);
+            SDL_RenderLine(renderer, cx - r, cy + r, cx + r, cy - r);
+        }
+    }
+
+    /* '+' button to open a new tab. */
+    {
+        int nx = start_x + app->session_count * tab_w;
+        float cx = (float)nx + (float)new_w * 0.5f;
+        float cy = (float)strip_h * 0.5f;
+        float r = 4.0f * s;
+
+        if (app->tab_new_hover) {
+            SDL_Color hover = { 255, 255, 255, 24 };
+            chrome_fill_rect(renderer, (float)nx + 1.0f, 2.0f,
+                             (float)new_w - 2.0f, (float)strip_h - 3.0f, hover);
+        }
+        SDL_SetRenderDrawColor(renderer, CHROME_TITLE_TEXT.r,
+                               CHROME_TITLE_TEXT.g, CHROME_TITLE_TEXT.b, 200);
+        SDL_RenderLine(renderer, cx - r, cy, cx + r, cy);
+        SDL_RenderLine(renderer, cx, cy - r, cx, cy + r);
+    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -339,9 +597,23 @@ void chrome_draw_title_bar(App *app, int pixel_width, int pixel_height)
     int text_y;
     int column = 0;
     int index;
+    TabLayout tab_layout;
+    bool has_tabs = compute_tab_layout(app, &tab_layout);
 
-    if (height <= 0)
+    if (height <= 0) {
+        /* No custom title bar (e.g. native frame or title_bar = false): draw
+         * a standalone top tab strip only when more than one tab is open. */
+        if (has_tabs) {
+            int strip_h = (int)(tab_layout.strip_height * app->display_scale +
+                                0.5f);
+            chrome_fill_rect(renderer, 0.0f, 0.0f, (float)pixel_width,
+                             (float)strip_h, tint);
+            chrome_fill_rect(renderer, 0.0f, (float)strip_h - 1.0f,
+                             (float)pixel_width, 1.0f, separator);
+            draw_tab_strip_items(app, &tab_layout);
+        }
         return;
+    }
 
     /* The tint follows the panel's rounded top corners instead of painting
      * a square band over them. */
@@ -400,6 +672,11 @@ void chrome_draw_title_bar(App *app, int pixel_width, int pixel_height)
             }
         }
         draw_title_symbol(app, index, &area, maximized);
+    }
+
+    if (has_tabs) {
+        draw_tab_strip_items(app, &tab_layout);
+        return;
     }
 
     /* The title is clipped to the space left of the buttons. */
@@ -519,10 +796,13 @@ static void statusbar_fill_state(App *app, StatusbarState *state,
                                  char *time_buf, size_t time_cap)
 {
     const Statusbar *sb = &app->statusbar;
-    const Term *term = &app->session.term;
-    const char *pwd = term_pwd(term);
+    const Session *s = app_active_session_const(app);
+    const Term *term = s ? &s->term : NULL;
+    const char *pwd = term ? term_pwd(term) : NULL;
 
     memset(state, 0, sizeof *state);
+    if (!term)
+        return;
 
     if (pwd) {
         statusbar_shorten_path(sb, pwd, dir_buf, dir_cap);
@@ -656,12 +936,13 @@ void chrome_draw_statusbar(App *app, int pixel_width, int pixel_height,
 /* Advance the spinner and refresh the clock when either actually changed. */
 void chrome_statusbar_tick(App *app)
 {
+    const Session *s = app_active_session_const(app);
     bool redraw = false;
     time_t now;
     struct tm local;
     int second;
 
-    if (app->session.term.command_running && app->busy_frame_count > 0) {
+    if (s && s->term.command_running && app->busy_frame_count > 0) {
         app->busy_frame_index =
             (app->busy_frame_index + 1) % app->busy_frame_count;
         redraw = true;

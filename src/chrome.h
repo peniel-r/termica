@@ -48,7 +48,13 @@ bool chrome_scrollbar_hit(const ScrollBar *bar, float x, float y,
 bool chrome_scrollbar_press(App *app, const ScrollBar *bar, float y);
 void chrome_draw_scrollbar(App *app);
 
-/* Custom title bar hit testing, button actions and rendering. */
+/* Custom title bar and tab strip hit testing, actions and rendering. */
+bool chrome_tab_strip_visible(const App *app);
+void chrome_sync_tab_hit_region(const App *app);
+void chrome_tab_label(const Session *s, int index, char *out, size_t capacity);
+bool chrome_tab_hit(const App *app, float x, float y, int *out_tab,
+                    bool *out_close, bool *out_new);
+void chrome_update_tab_hover(App *app, float x, float y);
 bool chrome_title_button_at(const App *app, float x, float y, int *index);
 void chrome_title_button_action(App *app, int index);
 void chrome_update_title_hover(App *app, float x, float y);

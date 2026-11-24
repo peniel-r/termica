@@ -218,13 +218,13 @@ TermClipboardResult input_handle_clipboard_write(void *userdata,
  * what the terminal modes ask for; the program echoes them back. */
 static void write_key(App *app, const SDL_KeyboardEvent *event)
 {
-    Session *s = &app->session;
+    Session *s = app_active_session(app);
     uint8_t encoded[64];
     size_t byte_count;
     GhosttyKey key = ghostty_key_for(event->scancode);
     SDL_Keycode unshifted;
 
-    if (key == GHOSTTY_KEY_UNIDENTIFIED)
+    if (!s || key == GHOSTTY_KEY_UNIDENTIFIED)
         return;
 
     /* The unshifted codepoint (layout dependent, e.g. 'a' for the A key)
@@ -246,14 +246,30 @@ static void write_key(App *app, const SDL_KeyboardEvent *event)
 
 void input_handle_key_down(App *app, const SDL_KeyboardEvent *event)
 {
-    Session *s = &app->session;
+    Session *s = app_active_session(app);
     KeyAction action = keys_lookup(&app->settings.keys, event->scancode,
                                    event->mod);
 
+    if (!s)
+        return;
     switch (action) {
     case KEY_ACTION_QUIT:
         if (!event->repeat)
             app->running = false;
+        return;
+    case KEY_ACTION_NEW_TAB:
+        if (!event->repeat)
+            app_new_tab(app);
+        return;
+    case KEY_ACTION_CLOSE_TAB:
+        if (!event->repeat)
+            app_close_tab(app, app->active_session);
+        return;
+    case KEY_ACTION_NEXT_TAB:
+        app_next_tab(app, 1);
+        return;
+    case KEY_ACTION_PREV_TAB:
+        app_next_tab(app, -1);
         return;
     case KEY_ACTION_COPY:
         if (!event->repeat)
@@ -339,9 +355,13 @@ void input_handle_key_down(App *app, const SDL_KeyboardEvent *event)
  * separately from key events; feed it straight through. */
 void input_handle_text_input(App *app, const SDL_TextInputEvent *event)
 {
-    session_send_text(&app->session, event->text);
+    Session *s = app_active_session(app);
+
+    if (!s)
+        return;
+    session_send_text(s, event->text);
     /* A commit ends the composition. */
-    session_clear_composing(&app->session);
+    session_clear_composing(s);
 }
 
 /* Uncommitted IME text. Empty text means the composition was cancelled, so
@@ -349,7 +369,11 @@ void input_handle_text_input(App *app, const SDL_TextInputEvent *event)
  * the cursor until the commit event above clears it. */
 void input_handle_text_editing(App *app, const SDL_TextEditingEvent *event)
 {
-    session_set_composing(&app->session, event->text);
+    Session *s = app_active_session(app);
+
+    if (!s)
+        return;
+    session_set_composing(s, event->text);
     app->needs_redraw = true;
 }
 
@@ -473,10 +497,11 @@ static SDL_SystemCursor cursor_for_shape(GhosttyMouseShape shape)
  * the pointer. */
 static void apply_mouse_shape(App *app)
 {
+    Session *s = app_active_session(app);
     GhosttyMouseShape shape;
     SDL_Cursor *cursor;
 
-    if (!term_mouse_shape(&app->session.term, &shape))
+    if (!s || !term_mouse_shape(&s->term, &shape))
         return;
     if (app->cursor && shape == app->shape)
         return;
@@ -528,11 +553,14 @@ static Uint32 SDLCALL on_autoscroll_timer(void *userdata, SDL_TimerID timer_id,
 
 void input_autoscroll_start(App *app, int direction)
 {
-    Session *s = &app->session;
+    Session *s = app_active_session(app);
 
-    if (s->autoscroll == direction && app->autoscroll_timer)
+    if (!s)
+        direction = 0;
+    if (s && s->autoscroll == direction && app->autoscroll_timer)
         return;
-    s->autoscroll = direction;
+    if (s)
+        s->autoscroll = direction;
     if (direction == 0) {
         if (app->autoscroll_timer) {
             SDL_RemoveTimer(app->autoscroll_timer);
@@ -547,9 +575,9 @@ void input_autoscroll_start(App *app, int direction)
 
 void input_autoscroll_tick(App *app)
 {
-    Session *s = &app->session;
+    Session *s = app_active_session(app);
 
-    if (s->autoscroll == 0 || !s->select.dragging)
+    if (!s || s->autoscroll == 0 || !s->select.dragging)
         return;
     term_scroll_rows(&s->term, s->autoscroll > 0 ? AUTOSCROLL_ROWS
                                                  : -AUTOSCROLL_ROWS);
@@ -562,7 +590,7 @@ void input_autoscroll_tick(App *app)
 
 void input_handle_mouse_button(App *app, const SDL_MouseButtonEvent *event)
 {
-    Session *s = &app->session;
+    Session *s = app_active_session(app);
     bool pressed = event->down;
     SDL_Keymod modifiers = mouse_modifiers();
     ScrollBar bar;
@@ -571,13 +599,37 @@ void input_handle_mouse_button(App *app, const SDL_MouseButtonEvent *event)
     int cx = 0;
     int cy = 0;
     int title_button;
+    int tab_index = -1;
+    bool tab_close = false;
+    bool tab_new = false;
     bool inside;
+
+    if (!s)
+        return;
 
     /* The title bar is above the grid and owns its own clicks. */
     if (event->button == SDL_BUTTON_LEFT &&
         chrome_title_button_at(app, event->x, event->y, &title_button)) {
         if (pressed)
             chrome_title_button_action(app, title_button);
+        return;
+    }
+
+    /* Tab strip clicks (switch, close, or '+' new tab). */
+    if ((event->button == SDL_BUTTON_LEFT ||
+         event->button == SDL_BUTTON_MIDDLE) &&
+        chrome_tab_hit(app, event->x, event->y, &tab_index, &tab_close,
+                       &tab_new)) {
+        if (pressed) {
+            if (tab_new && event->button == SDL_BUTTON_LEFT)
+                app_new_tab(app);
+            else if (tab_index >= 0) {
+                if (tab_close || event->button == SDL_BUTTON_MIDDLE)
+                    app_close_tab(app, tab_index);
+                else
+                    app_switch_tab(app, tab_index);
+            }
+        }
         return;
     }
 
@@ -667,14 +719,19 @@ void input_handle_mouse_button(App *app, const SDL_MouseButtonEvent *event)
 
 void input_handle_mouse_motion(App *app, const SDL_MouseMotionEvent *event)
 {
-    Session *s = &app->session;
+    Session *s = app_active_session(app);
     /* SDL does not carry the modifier state on motion events. */
     SDL_Keymod modifiers = mouse_modifiers();
     int cx = 0;
     int cy = 0;
-    bool inside = cell_at(app, event->x, event->y, &cx, &cy);
+    bool inside;
+
+    if (!s)
+        return;
+    inside = cell_at(app, event->x, event->y, &cx, &cy);
 
     chrome_update_title_hover(app, event->x, event->y);
+    chrome_update_tab_hover(app, event->x, event->y);
 
     /* OSC 22 only says what the shape should be; the only moment it can
      * matter is when the pointer moves over the grid. */
@@ -724,13 +781,13 @@ void input_handle_mouse_motion(App *app, const SDL_MouseMotionEvent *event)
 
 void input_handle_mouse_wheel(App *app, const SDL_MouseWheelEvent *event)
 {
-    Session *s = &app->session;
+    Session *s = app_active_session(app);
     SDL_Keymod modifiers = mouse_modifiers();
     float ticks = event->integer_y != 0 ? (float)event->integer_y
                                         : event->y;
     intptr_t delta;
 
-    if (ticks == 0.0f)
+    if (!s || ticks == 0.0f)
         return;
     if (event->direction == SDL_MOUSEWHEEL_FLIPPED)
         ticks = -ticks;
@@ -771,11 +828,11 @@ void input_handle_mouse_wheel(App *app, const SDL_MouseWheelEvent *event)
  * for a remote shell want to know when the window comes and goes. */
 void input_handle_focus(App *app, bool gained)
 {
-    Session *s = &app->session;
+    Session *s = app_active_session(app);
     uint8_t encoded[32];
     size_t bytes;
 
-    if (!term_focus_reporting(&s->term))
+    if (!s || !term_focus_reporting(&s->term))
         return;
     bytes = term_encode_focus(&s->term, gained, encoded, sizeof encoded);
     session_send(s, encoded, bytes);

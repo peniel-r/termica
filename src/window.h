@@ -45,6 +45,7 @@ typedef enum {
 #define WINDOW_DRAG_STRIP 30
 #define WINDOW_COMPACT_DRAG_STRIP 22
 #define WINDOW_TITLE_BAR_HEIGHT 30
+#define WINDOW_TAB_STRIP_HEIGHT 28
 #define WINDOW_TITLE_BAR_BUTTON_WIDTH 46
 #define WINDOW_TITLE_BAR_BUTTONS 3
 
@@ -67,5 +68,10 @@ WindowBackdrop window_sync_chrome(SDL_Window *window, WindowBackdrop backdrop,
 /* Flash the window's taskbar button until it gains focus (Windows
  * FlashWindowEx with FLASHW_TRAY | FLASHW_TIMERNOFG; no-op elsewhere). */
 void window_flash_taskbar(SDL_Window *window);
+
+/* Tell the custom-frame hit test how wide (in logical window coordinates)
+ * the clickable tab strip is on the left side of the title bar, so clicks
+ * on tabs are delivered to the app instead of starting a window drag. */
+void window_set_tabs_width(int logical_width);
 
 #endif /* TERMICA_WINDOW_H */

@@ -95,7 +95,7 @@ codebase that can grow.
 | # | Item | Acceptance criteria |
 |---|---|---|
 | 2.1 | **Split up `main.c`** (done) | Extract `Session` (terminal + pty + selection + scroll state) from `App`, and separate `input.c`, `render.c`, `chrome.c` and `session.c`. No behaviour change, and the self test is unchanged. `main.c` shrunk from 2,741 to 513 lines. See [DESIGN.md › Modules](DESIGN.md#modules). |
-| 2.2 | **Tabs** | `Ctrl+Shift+T` opens a tab, `Ctrl+Shift+W` closes one, `Ctrl+Tab` switches. Each tab can use a profile from 1.1. The tab strip is drawn in the title-bar area for custom frames, and a native strip is used under `native`. Closing the last tab closes the window. |
+| 2.2 | **Tabs** (done) | `Ctrl+Shift+T` opens a tab, `Ctrl+Shift+W` closes one, `Ctrl+Tab` / `Ctrl+Shift+Tab` switches (plus mouse click, middle-click/× close, `+` button). The tab strip is drawn in the title-bar area for custom frames, and as a top strip under `native` when >1 tab is open. Closing the last tab closes the window. |
 | 2.3 | **Scrollback search** | `Ctrl+Shift+F` opens an overlay. Matches are highlighted across scrollback, with next/previous navigation and case/regex toggles. |
 | 2.4 | **Hyperlinks** | OSC 8 links and auto-detected URLs are underlined on hover and open on `Ctrl+click` through `ShellExecuteW`, after scheme allow-listing. |
 | 2.5 | **Hot reload** | `termica.toml` and `statusbar.toml` are watched with `ReadDirectoryChangesW`. Changes apply live: font, colours, keys, status bar. Invalid edits keep the old config and show a toast. |

@@ -39,6 +39,9 @@
 #define STATUSBAR_LINE_BYTES 4096
 #define STATUSBAR_MAX_RUNS 64
 
+/* Maximum simultaneous tabs in one window. */
+#define APP_MAX_TABS 16
+
 /* SDL_EVENT_USER codes pushed by timers and the pty reader thread. */
 enum {
     APP_EVENT_BLINK      = 1,
@@ -52,7 +55,12 @@ typedef struct App {
     SDL_Renderer    *renderer;
     Glyphs           glyphs;
     Panel            panel;
-    Session          session;
+
+    Session         *sessions[APP_MAX_TABS];
+    int              session_count;
+    int              active_session;
+    int              tab_hover;       /* tab index under pointer, or -1    */
+    bool             tab_new_hover;   /* '+' button under pointer          */
 
     float            display_scale;
     char             font_path[512];  /* resolved grid font, or "" built-in */
@@ -106,8 +114,31 @@ typedef struct App {
     uint64_t         bell_flash_until_ms; /* visual bell end tick, or 0    */
 } App;
 
+/* Active tab session, or NULL if no sessions exist. */
+static inline Session *app_active_session(App *app)
+{
+    if (!app || app->session_count <= 0 || app->active_session < 0 ||
+        app->active_session >= app->session_count)
+        return NULL;
+    return app->sessions[app->active_session];
+}
+
+static inline const Session *app_active_session_const(const App *app)
+{
+    if (!app || app->session_count <= 0 || app->active_session < 0 ||
+        app->active_session >= app->session_count)
+        return NULL;
+    return app->sessions[app->active_session];
+}
+
 /* Live font zoom (PLAN 1.3): re-open grid glyphs at `point_size`, refit the
- * grid and resize the pty. Does not modify settings.point_size. */
+ * grid and resize all sessions. Does not modify settings.point_size. */
 void app_set_font_size(App *app, float point_size);
+
+/* Tab management (PLAN 2.2). Closing the last tab sets app->running = false. */
+bool app_new_tab(App *app);
+void app_close_tab(App *app, int index);
+void app_switch_tab(App *app, int index);
+void app_next_tab(App *app, int delta);
 
 #endif /* TERMICA_APP_H */

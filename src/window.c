@@ -25,6 +25,12 @@
 static bool hit_custom_frame;
 static int hit_drag_strip;
 static int hit_buttons_width;
+static int hit_tabs_width;
+
+void window_set_tabs_width(int logical_width)
+{
+    hit_tabs_width = logical_width > 0 ? logical_width : 0;
+}
 
 static SDL_HitTestResult SDLCALL hit_test(SDL_Window *window,
                                           const SDL_Point *point, void *data)
@@ -55,8 +61,11 @@ static SDL_HitTestResult SDLCALL hit_test(SDL_Window *window,
     if (top)             return SDL_HITTEST_RESIZE_TOP;
     if (bottom)          return SDL_HITTEST_RESIZE_BOTTOM;
     if (point->y < hit_drag_strip) {
-        /* The title bar buttons are ordinary clicks, not a window drag. */
+        /* The title bar buttons and tab strip are ordinary clicks, not a
+         * window drag. */
         if (hit_buttons_width > 0 && point->x >= width - hit_buttons_width)
+            return SDL_HITTEST_NORMAL;
+        if (hit_tabs_width > 0 && point->x < hit_tabs_width)
             return SDL_HITTEST_NORMAL;
         return SDL_HITTEST_DRAGGABLE;
     }

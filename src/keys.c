@@ -132,6 +132,10 @@ static const NamedAction ACTION_NAMES[] = {
     { "font_size_up",     KEY_ACTION_FONT_SIZE_UP },
     { "font_size_down",   KEY_ACTION_FONT_SIZE_DOWN },
     { "font_size_reset",  KEY_ACTION_FONT_SIZE_RESET },
+    { "new_tab",          KEY_ACTION_NEW_TAB },
+    { "close_tab",        KEY_ACTION_CLOSE_TAB },
+    { "next_tab",         KEY_ACTION_NEXT_TAB },
+    { "prev_tab",         KEY_ACTION_PREV_TAB },
     { "quit",             KEY_ACTION_QUIT },
 };
 
@@ -368,4 +372,8 @@ void keys_default(KeyMap *map)
     keys_set(map, SDL_SCANCODE_KP_MINUS, KEY_MOD_CTRL,  KEY_ACTION_FONT_SIZE_DOWN);
     keys_set(map, SDL_SCANCODE_0,        KEY_MOD_CTRL,  KEY_ACTION_FONT_SIZE_RESET);
     keys_set(map, SDL_SCANCODE_KP_0,     KEY_MOD_CTRL,  KEY_ACTION_FONT_SIZE_RESET);
+    keys_set(map, SDL_SCANCODE_T,        cs,            KEY_ACTION_NEW_TAB);
+    keys_set(map, SDL_SCANCODE_W,        cs,            KEY_ACTION_CLOSE_TAB);
+    keys_set(map, SDL_SCANCODE_TAB,      KEY_MOD_CTRL,  KEY_ACTION_NEXT_TAB);
+    keys_set(map, SDL_SCANCODE_TAB,      cs,            KEY_ACTION_PREV_TAB);
 }
