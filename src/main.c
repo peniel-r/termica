@@ -34,6 +34,7 @@
 #include "input.h"
 #include "render.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -86,6 +87,54 @@ static void fit_grid(App *app)
                             (uint32_t)app->grid_top, (uint32_t)grid_right,
                             (uint32_t)grid_bottom);
     app->needs_redraw = true;
+}
+
+static void open_statusbar_font(App *app, const char *grid_font_path);
+
+void app_set_font_size(App *app, float point_size)
+{
+    const char *path = app->font_path[0] ? app->font_path : NULL;
+    Glyphs next;
+
+    if (point_size < 4.0f)
+        point_size = 4.0f;
+    if (point_size > 200.0f)
+        point_size = 200.0f;
+    if (fabsf(point_size - app->current_point_size) < 0.01f)
+        return;
+
+    if (!glyphs_open(&next, app->renderer, path, point_size,
+                     app->display_scale))
+        return;
+    glyphs_close(&app->glyphs);
+    app->glyphs = next;
+    app->current_point_size = point_size;
+    fit_grid(app);
+}
+
+static void handle_display_scale_changed(App *app)
+{
+    float new_scale = SDL_GetWindowDisplayScale(app->window);
+    const char *path = app->font_path[0] ? app->font_path : NULL;
+    Glyphs next_glyphs;
+    Panel next_panel;
+
+    if (new_scale <= 0.0f || fabsf(new_scale - app->display_scale) < 0.001f)
+        return;
+
+    app->display_scale = new_scale;
+    if (glyphs_open(&next_glyphs, app->renderer, path,
+                    app->current_point_size, new_scale)) {
+        glyphs_close(&app->glyphs);
+        app->glyphs = next_glyphs;
+    }
+    if (panel_init(&next_panel, app->renderer, new_scale)) {
+        panel_free(&app->panel);
+        app->panel = next_panel;
+    }
+    glyphs_close(&app->statusbar_glyphs);
+    open_statusbar_font(app, path);
+    fit_grid(app);
 }
 
 /* The reader thread only announces that bytes are waiting. SDL_PushEvent is
@@ -272,6 +321,9 @@ static void dispatch_event(App *app, const SDL_Event *event)
     case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
         fit_grid(app);
         break;
+    case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
+        handle_display_scale_changed(app);
+        break;
     default:
         break;
     }
@@ -414,6 +466,11 @@ int main(int argc, char **argv)
     if (app.display_scale <= 0.0f)
         app.display_scale = 1.0f;
 
+    app.base_point_size = point_size;
+    app.current_point_size = point_size;
+    if (font_path)
+        snprintf(app.font_path, sizeof app.font_path, "%s", font_path);
+
     if (!glyphs_open(&app.glyphs, app.renderer, font_path, point_size,
                      app.display_scale)) {
         fprintf(stderr, "font: %s: %s\n", font_label, SDL_GetError());
@@ -449,7 +506,7 @@ int main(int argc, char **argv)
     fit_grid(&app);
 
     /* The grid is final now, so the console starts at the right size. */
-    session_spawn_shell(&app.session, (int)app.settings.shell,
+    session_spawn_shell(&app.session, &app.settings,
                         (uint16_t)app.columns, (uint16_t)app.rows,
                         on_pty_output, &app);
 

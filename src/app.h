@@ -55,6 +55,9 @@ typedef struct App {
     Session          session;
 
     float            display_scale;
+    char             font_path[512];  /* resolved grid font, or "" built-in */
+    float            base_point_size; /* configured/CLI size for Ctrl+0     */
+    float            current_point_size; /* live zoomed size                */
     float            panel_opacity;   /* 0..1                              */
     WindowBackdrop   backdrop;
     WindowDecoration decoration;
@@ -101,5 +104,9 @@ typedef struct App {
     bool             cursor_lit;      /* blink phase                       */
     bool             cursor_blinks;   /* the terminal asked for a blink    */
 } App;
+
+/* Live font zoom (PLAN 1.3): re-open grid glyphs at `point_size`, refit the
+ * grid and resize the pty. Does not modify settings.point_size. */
+void app_set_font_size(App *app, float point_size);
 
 #endif /* TERMICA_APP_H */

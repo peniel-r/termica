@@ -26,6 +26,12 @@
 
 typedef struct Pty Pty;
 
+/* One key/value environment override passed to pty_spawn_ex. */
+typedef struct PtyEnvEntry {
+    const char *key;
+    const char *value;
+} PtyEnvEntry;
+
 /* Called from the reader thread when output is waiting or the program's
  * output ended. It must be thread-safe and must not block for long. */
 typedef void (*PtyNotifyFn)(void *userdata);
@@ -41,10 +47,27 @@ wchar_t *pty_default_shell(void);
  * returns NULL rather than silently starting another one. */
 wchar_t *pty_shell_for(int which);
 
-/* Start command_line (a complete, quoted command line, as
- * CreateProcessW wants it) behind a pseudoconsole of columns x rows. The
- * child inherits this process's environment and working directory.
+/* Build a Windows CreateProcessW command line from a UTF-8 argv array using
+ * standard Windows quoting rules. Returns a malloc'd wide string the caller
+ * frees, or NULL on invalid input / allocation failure. */
+wchar_t *pty_build_command_line(const char *const *argv, int argc);
+
+/* Build a double-NUL Unicode environment block inheriting the current
+ * process's environment, filling in TERM/COLORTERM/TERMICA defaults, and
+ * overlaying `extra` entries (case-insensitive replacement). Exposed for the
+ * self test; caller frees the returned buffer. */
+wchar_t *pty_build_environment(const PtyEnvEntry *extra, int extra_count);
+
+/* Start command_line behind a pseudoconsole of columns x rows, with an
+ * optional UTF-8 working directory and optional environment overlays.
  * Returns NULL on failure and fills error. */
+Pty *pty_spawn_ex(const wchar_t *command_line, const char *cwd_utf8,
+                  const PtyEnvEntry *env, int env_count,
+                  uint16_t columns, uint16_t rows,
+                  PtyNotifyFn notify, void *notify_userdata,
+                  char *error, size_t error_size);
+
+/* Convenience wrapper for pty_spawn_ex with inherited cwd and environment. */
 Pty *pty_spawn(const wchar_t *command_line, uint16_t columns, uint16_t rows,
                PtyNotifyFn notify, void *notify_userdata,
                char *error, size_t error_size);

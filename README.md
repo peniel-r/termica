@@ -118,13 +118,18 @@ or readline bindings.
 | Keys | Action |
 |---|---|
 | `Ctrl+Shift+C` | Copy the selection |
-| `Ctrl+V` / `Ctrl+Shift+V` | Paste (bracketed when the program enables it) |
+| `Ctrl+Shift+V` | Paste (bracketed when the program enables it; `Ctrl+V` reaches the shell) |
+| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Font zoom in / out / reset |
 | `Shift+PgUp` / `Shift+PgDn` | Scroll one page |
 | `Ctrl+Shift+Up` / `Down` | Scroll one row |
 | `Ctrl+Shift+Home` / `End` | Scroll to the top / back to the live view |
 | `Ctrl+Shift+=` / `Ctrl+Shift+-` | Panel opacity up / down |
 | `Ctrl+Shift+B` | Cycle the backdrop: panel → Mica → Mica Alt → Acrylic |
 | `Ctrl+Shift+Q` | Quit |
+
+Bindings are configurable in `[keys]` inside `termica.toml` (for example,
+`"Ctrl+V" = "paste"` to restore `Ctrl+V` paste, or `"Ctrl+Shift+Q" = "none"`
+to disable a binding).
 
 | Mouse | Action |
 |---|---|
@@ -133,10 +138,6 @@ or readline bindings.
 | `Shift` + drag or wheel | Take the pointer back from a program that is tracking the mouse |
 | Wheel | Scroll the scrollback by 3 rows (or report the wheel to the program) |
 | Scrollbar | Drag the thumb, or click the track to page |
-
-> [!NOTE]
-> `Ctrl+V` currently pastes, which hides vim's visual-block key. That will be
-> configurable in v0.1 (see [PLAN.md](PLAN.md)).
 
 ## Configuration
 

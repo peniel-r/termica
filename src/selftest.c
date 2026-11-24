@@ -15,6 +15,7 @@
 #include "embed.h"
 #include "font_lookup.h"
 #include "git.h"
+#include "keys.h"
 #include "settings.h"
 #include "statusbar.h"
 #include "style.h"
@@ -22,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 
 static int failure_count;
 
@@ -1522,6 +1524,179 @@ static void test_term_pwd_and_prompts(void)
     term_free(&term);
 }
 
+/* 1.1: shell profiles (command argv, cwd, [terminal.env]) and Windows
+ * command-line quoting / environment block construction. */
+static void test_shell_profiles(void)
+{
+    Settings s;
+    Settings roundtrip;
+    char formatted[16384];
+    const char *doc =
+        "[terminal]\n"
+        "command = [\"wsl.exe\", \"-d\", \"Ubuntu 24.04\"]\n"
+        "cwd = 'C:\\Users\\dev'\n"
+        "\n"
+        "[terminal.env]\n"
+        "EDITOR = \"nvim\"\n"
+        "TERM = \"xterm-ghostty\"\n";
+    const char *bad_cmd =
+        "[terminal]\n"
+        "command = [\"ok\", 42]\n";
+
+    settings_default(&s);
+    check(settings_parse_toml(&s, doc, strlen(doc)),
+          "shell profile TOML parses");
+    check(s.command_argc == 3, "command argv count is 3");
+    check(strcmp(s.command[0], "wsl.exe") == 0 &&
+              strcmp(s.command[1], "-d") == 0 &&
+              strcmp(s.command[2], "Ubuntu 24.04") == 0,
+          "command argv elements are stored");
+    check(strcmp(s.cwd, "C:\\Users\\dev") == 0, "cwd is stored");
+    check(s.env_count == 2, "two env entries are stored");
+    check(strcmp(s.env[0].key, "EDITOR") == 0 &&
+              strcmp(s.env[0].value, "nvim") == 0,
+          "first env entry is stored");
+
+    /* Non-string command elements are rejected without clobbering. */
+    check(!settings_parse_toml(&s, bad_cmd, strlen(bad_cmd)),
+          "non-string command element is refused");
+    check(s.command_argc == 3, "refused command leaves previous argv intact");
+
+    /* Format round trip preserves command, cwd and [terminal.env]. */
+    settings_format(&s, formatted, sizeof formatted);
+    settings_default(&roundtrip);
+    check(settings_parse_toml(&roundtrip, formatted, strlen(formatted)),
+          "formatted shell profile reparses");
+    check(roundtrip.command_argc == 3 &&
+              strcmp(roundtrip.command[2], "Ubuntu 24.04") == 0,
+          "command survives format round trip");
+    check(strcmp(roundtrip.cwd, "C:\\Users\\dev") == 0,
+          "cwd survives format round trip");
+    check(roundtrip.env_count == 2 &&
+              strcmp(roundtrip.env[1].key, "TERM") == 0 &&
+              strcmp(roundtrip.env[1].value, "xterm-ghostty") == 0,
+          "env survives format round trip");
+
+#ifdef _WIN32
+    {
+        const char *argv[] = {
+            "C:\\Program Files\\app.exe",
+            "-m",
+            "hello \"world\"",
+            "trail\\",
+            ""
+        };
+        wchar_t *line = pty_build_command_line(argv, 5);
+
+        check(line != NULL, "pty_build_command_line succeeds");
+        check(line && wcscmp(line,
+                             L"\"C:\\Program Files\\app.exe\" -m "
+                             L"\"hello \\\"world\\\"\" trail\\ \"\"") == 0,
+              "Windows command-line quoting matches MSVC rules");
+        free(line);
+    }
+    {
+        PtyEnvEntry extras[2] = {
+            { "TERMICA_TEST_VAR", "hello_env" },
+            { "TERM", "xterm-custom" }
+        };
+        wchar_t *block = pty_build_environment(extras, 2);
+        const wchar_t *cursor;
+        bool saw_custom = false;
+        bool saw_term_custom = false;
+        int term_count = 0;
+
+        check(block != NULL, "pty_build_environment succeeds");
+        if (block) {
+            for (cursor = block; *cursor; cursor += wcslen(cursor) + 1) {
+                if (wcscmp(cursor, L"TERMICA_TEST_VAR=hello_env") == 0)
+                    saw_custom = true;
+                if (wcsncmp(cursor, L"TERM=", 5) == 0) {
+                    term_count++;
+                    if (wcscmp(cursor, L"TERM=xterm-custom") == 0)
+                        saw_term_custom = true;
+                }
+            }
+            free(block);
+        }
+        check(saw_custom, "env block contains custom variable");
+        check(saw_term_custom && term_count == 1,
+              "env block overrides TERM without duplicating it");
+    }
+#endif
+}
+
+/* 1.2: configurable key bindings (chord parsing, defaults, overrides). */
+static void test_key_bindings(void)
+{
+    KeyMap map;
+    SDL_Scancode sc;
+    uint8_t mods;
+    KeyAction act;
+    Settings s;
+    Settings roundtrip;
+    char formatted[16384];
+    const char *doc =
+        "[keys]\n"
+        "\"Ctrl+V\" = \"paste\"\n"
+        "\"Ctrl+Shift+Q\" = \"none\"\n"
+        "\"Ctrl+Alt+Z\" = \"font_size_reset\"\n";
+
+    keys_default(&map);
+    check(keys_lookup(&map, SDL_SCANCODE_V, SDL_KMOD_LCTRL) == KEY_ACTION_NONE,
+          "Ctrl+V is unbound by default (reaches vim/readline)");
+    check(keys_lookup(&map, SDL_SCANCODE_V,
+                      SDL_KMOD_LCTRL | SDL_KMOD_LSHIFT) == KEY_ACTION_PASTE,
+          "Ctrl+Shift+V pastes by default");
+    check(keys_lookup(&map, SDL_SCANCODE_EQUALS,
+                      SDL_KMOD_LCTRL) == KEY_ACTION_FONT_SIZE_UP,
+          "Ctrl+= zooms font up by default");
+    check(keys_lookup(&map, SDL_SCANCODE_MINUS,
+                      SDL_KMOD_LCTRL) == KEY_ACTION_FONT_SIZE_DOWN,
+          "Ctrl+- zooms font down by default");
+    check(keys_lookup(&map, SDL_SCANCODE_0,
+                      SDL_KMOD_RCTRL) == KEY_ACTION_FONT_SIZE_RESET,
+          "Ctrl+0 resets font size (side-independent)");
+
+    check(keys_parse_chord("Ctrl+Shift+V", &sc, &mods) &&
+              sc == SDL_SCANCODE_V && mods == (KEY_MOD_CTRL | KEY_MOD_SHIFT),
+          "chord parser handles Ctrl+Shift+V");
+    check(keys_parse_chord("Ctrl++", &sc, &mods) &&
+              sc == SDL_SCANCODE_EQUALS && mods == KEY_MOD_CTRL,
+          "chord parser handles Ctrl++");
+    check(keys_parse_chord("Ctrl+-", &sc, &mods) &&
+              sc == SDL_SCANCODE_MINUS && mods == KEY_MOD_CTRL,
+          "chord parser handles Ctrl+-");
+    check(!keys_parse_chord("Ctrl+BogusKey", &sc, &mods),
+          "chord parser refuses unknown key");
+    check(keys_parse_action("font-size-up", &act) &&
+              act == KEY_ACTION_FONT_SIZE_UP,
+          "action parser folds separators and case");
+    check(!keys_parse_action("explode", &act),
+          "action parser refuses unknown action");
+
+    settings_default(&s);
+    check(settings_parse_toml(&s, doc, strlen(doc)), "[keys] TOML parses");
+    check(keys_lookup(&s.keys, SDL_SCANCODE_V, SDL_KMOD_LCTRL) ==
+              KEY_ACTION_PASTE,
+          "user can bind Ctrl+V back to paste");
+    check(keys_lookup(&s.keys, SDL_SCANCODE_Q,
+                      SDL_KMOD_LCTRL | SDL_KMOD_LSHIFT) == KEY_ACTION_NONE,
+          "binding a chord to none disables it");
+    check(keys_lookup(&s.keys, SDL_SCANCODE_Z,
+                      SDL_KMOD_LCTRL | SDL_KMOD_LALT) ==
+              KEY_ACTION_FONT_SIZE_RESET,
+          "custom chord binds to font_size_reset");
+
+    settings_format(&s, formatted, sizeof formatted);
+    settings_default(&roundtrip);
+    check(settings_parse_toml(&roundtrip, formatted, strlen(formatted)),
+          "formatted [keys] reparses");
+    check(keys_lookup(&roundtrip.keys, SDL_SCANCODE_V, SDL_KMOD_LCTRL) ==
+              KEY_ACTION_PASTE,
+          "[keys] overrides survive format round trip");
+}
+
 int term_selftest(void)
 {
     printf("termica self test (libghostty-vt)\n\n");
@@ -1538,6 +1713,8 @@ int term_selftest(void)
     test_mouse_and_focus();
     test_underline_styles();
     test_settings();
+    test_shell_profiles();
+    test_key_bindings();
     test_statusbar_settings();
     test_statusbar_render();
     test_statusbar_helpers();

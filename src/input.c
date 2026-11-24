@@ -227,15 +227,6 @@ static void write_key(App *app, const SDL_KeyboardEvent *event)
     if (key == GHOSTTY_KEY_UNIDENTIFIED)
         return;
 
-    /* Ctrl+V and Ctrl+Shift+V paste from the clipboard, like every other
-     * Windows terminal. */
-    if (key == GHOSTTY_KEY_V && (event->mod & SDL_KMOD_CTRL) &&
-        !(event->mod & (SDL_KMOD_ALT | SDL_KMOD_GUI))) {
-        if (session_paste(s, app->window))
-            app->needs_redraw = true;
-        return;
-    }
-
     /* The unshifted codepoint (layout dependent, e.g. 'a' for the A key)
      * is what makes Ctrl+letter encode as 0x01-0x1a. */
     unshifted = SDL_GetKeyFromScancode(event->scancode, 0, false);
@@ -256,69 +247,66 @@ static void write_key(App *app, const SDL_KeyboardEvent *event)
 void input_handle_key_down(App *app, const SDL_KeyboardEvent *event)
 {
     Session *s = &app->session;
-    /* Scancodes, not keycodes: a keycode carries the shifted symbol, so
-     * "SDLK_C with Shift held" is a different value from "SDLK_C". The
-     * bindings below hold Shift and should work on any layout.
-     *
-     * SDL3 reports modifiers per side (LSHIFT, LCTRL, ...), so KMOD_SHIFT
-     * and KMOD_CTRL are unions of two bits. Test each union on its own:
-     * comparing the combined mask for equality would ask for all four
-     * bits and never match. */
-    bool ctrl_shift = (event->mod & SDL_KMOD_CTRL) != 0 &&
-                      (event->mod & SDL_KMOD_SHIFT) != 0;
+    KeyAction action = keys_lookup(&app->settings.keys, event->scancode,
+                                   event->mod);
 
-    /* Esc belongs to the program now (vim, PSReadLine). Quit with
-     * Ctrl+Shift+Q or the window's close button. */
-    if (event->scancode == SDL_SCANCODE_Q && !event->repeat && ctrl_shift) {
-        app->running = false;
+    switch (action) {
+    case KEY_ACTION_QUIT:
+        if (!event->repeat)
+            app->running = false;
         return;
-    }
-    /* Copy needs the selection to stay put, so it is handled before the
-     * key reaches the shell. Plain Ctrl+C still interrupts the program. */
-    if (event->scancode == SDL_SCANCODE_C && !event->repeat && ctrl_shift) {
-        session_copy_selection(s);
+    case KEY_ACTION_COPY:
+        if (!event->repeat)
+            session_copy_selection(s);
         return;
-    }
-    /* History and panel chrome. Both live under Ctrl+Shift because that is
-     * what no shell binds; Shift+Home/End stay with the shell (readline
-     * line start and end), and every Alt+* now reaches it as Meta.
-     * Ctrl+Alt+* is deliberately unused: on many layouts that pair is
-     * AltGr and produces a character of its own. */
-    if (ctrl_shift && !event->repeat) {
-        switch (event->scancode) {
-        case SDL_SCANCODE_UP:
-            term_scroll_rows(&s->term, -1);
+    case KEY_ACTION_PASTE:
+        if (!event->repeat && session_paste(s, app->window))
             app->needs_redraw = true;
-            return;
-        case SDL_SCANCODE_DOWN:
-            term_scroll_rows(&s->term, 1);
-            app->needs_redraw = true;
-            return;
-        case SDL_SCANCODE_HOME:
+        return;
+    case KEY_ACTION_SCROLL_UP:
+        term_scroll_rows(&s->term, -1);
+        app->needs_redraw = true;
+        return;
+    case KEY_ACTION_SCROLL_DOWN:
+        term_scroll_rows(&s->term, 1);
+        app->needs_redraw = true;
+        return;
+    case KEY_ACTION_SCROLL_PAGE_UP:
+        term_scroll_rows(&s->term, -app->rows);
+        app->needs_redraw = true;
+        return;
+    case KEY_ACTION_SCROLL_PAGE_DOWN:
+        term_scroll_rows(&s->term, app->rows);
+        app->needs_redraw = true;
+        return;
+    case KEY_ACTION_SCROLL_TOP:
+        if (!event->repeat) {
             term_scroll_top(&s->term);
             app->needs_redraw = true;
-            return;
-        case SDL_SCANCODE_END:
+        }
+        return;
+    case KEY_ACTION_SCROLL_BOTTOM:
+        if (!event->repeat) {
             term_scroll_bottom(&s->term);
             app->needs_redraw = true;
-            return;
-        case SDL_SCANCODE_MINUS:
-        case SDL_SCANCODE_KP_MINUS:
-            app->panel_opacity -= 0.05f;
-            if (app->panel_opacity < 0.0f)
-                app->panel_opacity = 0.0f;
-            app->settings.panel_opacity = app->panel_opacity;
-            app->needs_redraw = true;
-            return;
-        case SDL_SCANCODE_EQUALS:
-        case SDL_SCANCODE_KP_PLUS:
-            app->panel_opacity += 0.05f;
-            if (app->panel_opacity > 1.0f)
-                app->panel_opacity = 1.0f;
-            app->settings.panel_opacity = app->panel_opacity;
-            app->needs_redraw = true;
-            return;
-        case SDL_SCANCODE_B: {
+        }
+        return;
+    case KEY_ACTION_OPACITY_DOWN:
+        app->panel_opacity -= 0.05f;
+        if (app->panel_opacity < 0.0f)
+            app->panel_opacity = 0.0f;
+        app->settings.panel_opacity = app->panel_opacity;
+        app->needs_redraw = true;
+        return;
+    case KEY_ACTION_OPACITY_UP:
+        app->panel_opacity += 0.05f;
+        if (app->panel_opacity > 1.0f)
+            app->panel_opacity = 1.0f;
+        app->settings.panel_opacity = app->panel_opacity;
+        app->needs_redraw = true;
+        return;
+    case KEY_ACTION_CYCLE_BACKDROP:
+        if (!event->repeat) {
             WindowBackdrop next =
                 (WindowBackdrop)((app->backdrop + 1) % WINDOW_BACKDROP_COUNT);
             /* The OS may not know the material; the window says so and the
@@ -328,25 +316,21 @@ void input_handle_key_down(App *app, const SDL_KeyboardEvent *event)
                                                chrome_corner_radius(app));
             app->settings.backdrop = (int)app->backdrop;
             app->needs_redraw = true;
-            return;
         }
-        default:
-            break;
-        }
-    }
-    /* Scroll a page at a time with Shift alone. */
-    if ((event->mod & SDL_KMOD_SHIFT) && !(event->mod & SDL_KMOD_CTRL) &&
-        !event->repeat) {
-        if (event->scancode == SDL_SCANCODE_PAGEUP) {
-            term_scroll_rows(&s->term, -app->rows);
-            app->needs_redraw = true;
-            return;
-        }
-        if (event->scancode == SDL_SCANCODE_PAGEDOWN) {
-            term_scroll_rows(&s->term, app->rows);
-            app->needs_redraw = true;
-            return;
-        }
+        return;
+    case KEY_ACTION_FONT_SIZE_UP:
+        app_set_font_size(app, app->current_point_size + 1.0f);
+        return;
+    case KEY_ACTION_FONT_SIZE_DOWN:
+        app_set_font_size(app, app->current_point_size - 1.0f);
+        return;
+    case KEY_ACTION_FONT_SIZE_RESET:
+        if (!event->repeat)
+            app_set_font_size(app, app->base_point_size);
+        return;
+    case KEY_ACTION_NONE:
+    default:
+        break;
     }
     write_key(app, event);
 }

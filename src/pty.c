@@ -262,22 +262,184 @@ static bool is_dumb_terminal(const wchar_t *value)
     return name_matches(value, L"dumb", 4) && value[4] == L'\0';
 }
 
+static wchar_t *utf8_to_wide(const char *text)
+{
+    int needed;
+    wchar_t *wide;
+
+    if (!text)
+        return NULL;
+    needed = MultiByteToWideChar(CP_UTF8, 0, text, -1, NULL, 0);
+    if (needed <= 0)
+        return NULL;
+    wide = (wchar_t *)malloc((size_t)needed * sizeof *wide);
+    if (!wide)
+        return NULL;
+    if (MultiByteToWideChar(CP_UTF8, 0, text, -1, wide, needed) != needed) {
+        free(wide);
+        return NULL;
+    }
+    return wide;
+}
+
+static bool arg_needs_quotes(const wchar_t *arg)
+{
+    size_t i;
+
+    if (!arg[0])
+        return true;
+    for (i = 0; arg[i]; i++) {
+        if (arg[i] == L' ' || arg[i] == L'\t' || arg[i] == L'\n' ||
+            arg[i] == L'\v' || arg[i] == L'"')
+            return true;
+    }
+    return false;
+}
+
+/* Append one argument using standard Windows CommandLineToArgvW quoting.
+ * When `out` is NULL, only returns the number of wide characters needed. */
+static size_t append_quoted_arg(wchar_t *out, size_t offset,
+                                const wchar_t *arg)
+{
+    size_t i = 0;
+
+    if (!arg_needs_quotes(arg)) {
+        size_t len = wcslen(arg);
+
+        if (out)
+            memcpy(out + offset, arg, len * sizeof *out);
+        return offset + len;
+    }
+
+    if (out)
+        out[offset] = L'"';
+    offset++;
+
+    while (arg[i]) {
+        size_t bs = 0;
+
+        while (arg[i] == L'\\') {
+            bs++;
+            i++;
+        }
+        if (arg[i] == L'\0') {
+            size_t n = bs * 2;
+            while (n--) {
+                if (out)
+                    out[offset] = L'\\';
+                offset++;
+            }
+            break;
+        }
+        if (arg[i] == L'"') {
+            size_t n = bs * 2 + 1;
+            while (n--) {
+                if (out)
+                    out[offset] = L'\\';
+                offset++;
+            }
+            if (out)
+                out[offset] = L'"';
+            offset++;
+            i++;
+        } else {
+            while (bs--) {
+                if (out)
+                    out[offset] = L'\\';
+                offset++;
+            }
+            if (out)
+                out[offset] = arg[i];
+            offset++;
+            i++;
+        }
+    }
+
+    if (out)
+        out[offset] = L'"';
+    return offset + 1;
+}
+
+wchar_t *pty_build_command_line(const char *const *argv, int argc)
+{
+    wchar_t **wide_args;
+    wchar_t *result = NULL;
+    size_t total = 0;
+    size_t offset = 0;
+    int i;
+
+    if (!argv || argc <= 0 || !argv[0] || !argv[0][0])
+        return NULL;
+
+    wide_args = (wchar_t **)calloc((size_t)argc, sizeof *wide_args);
+    if (!wide_args)
+        return NULL;
+
+    for (i = 0; i < argc; i++) {
+        if (!argv[i])
+            goto fail;
+        wide_args[i] = utf8_to_wide(argv[i]);
+        if (!wide_args[i])
+            goto fail;
+        if (i > 0)
+            total++;
+        total = append_quoted_arg(NULL, total, wide_args[i]);
+    }
+
+    result = (wchar_t *)malloc((total + 1) * sizeof *result);
+    if (!result)
+        goto fail;
+
+    for (i = 0; i < argc; i++) {
+        if (i > 0)
+            result[offset++] = L' ';
+        offset = append_quoted_arg(result, offset, wide_args[i]);
+    }
+    result[offset] = L'\0';
+
+fail:
+    for (i = 0; i < argc; i++)
+        free(wide_args[i]);
+    free(wide_args);
+    return result;
+}
+
+static bool entry_in_extra(const wchar_t *entry, wchar_t *const *extra_wide,
+                           int extra_count)
+{
+    int i;
+
+    for (i = 0; i < extra_count; i++) {
+        const wchar_t *eq;
+        size_t prefix_len;
+
+        if (!extra_wide[i])
+            continue;
+        eq = wcschr(extra_wide[i], L'=');
+        if (!eq)
+            continue;
+        prefix_len = (size_t)(eq - extra_wide[i]) + 1;
+        if (name_matches(entry, extra_wide[i], prefix_len))
+            return true;
+    }
+    return false;
+}
+
 /* The child inherits this process's environment, except that TERM,
  * COLORTERM, TERMICA and TERMICA_SHELL_INTEGRATION are filled in: TERM
  * when missing or "dumb", COLORTERM when missing or empty, the two TERMICA
- * markers always. Programs that check whether they are talking to a real
- * terminal (git, vim, starship's prompt) key off the first two, and a
- * Windows process has neither by default; shell profiles key off TERMICA
- * to opt into the integration that feeds the status bar. The result is a
+ * markers always; then any user-configured `extra` entries overlay the
+ * result (case-insensitive replacement). The result is a
  * GetEnvironmentStringsW()-style block (double NUL) owned by the caller. */
-static wchar_t *child_environment(void)
+wchar_t *pty_build_environment(const PtyEnvEntry *extra, int extra_count)
 {
     static const wchar_t term_entry[] = L"TERM=xterm-256color";
     static const wchar_t colorterm_entry[] = L"COLORTERM=truecolor";
     static const wchar_t termica_entry[] = L"TERMICA=1";
     static const wchar_t integration_entry[] = L"TERMICA_SHELL_INTEGRATION=1";
     wchar_t *block = GetEnvironmentStringsW();
-    wchar_t *result;
+    wchar_t **extra_wide = NULL;
+    wchar_t *result = NULL;
     wchar_t *cursor;
     size_t   chars = 1;             /* the block's final NUL */
     size_t   offset = 0;
@@ -285,9 +447,44 @@ static wchar_t *child_environment(void)
     bool     replace_colorterm = true;
     bool     replace_termica = true;
     bool     replace_integration = true;
+    int      i;
 
     if (!block)
         return NULL;
+
+    if (extra && extra_count > 0) {
+        extra_wide = (wchar_t **)calloc((size_t)extra_count,
+                                        sizeof *extra_wide);
+        if (!extra_wide) {
+            FreeEnvironmentStringsW(block);
+            return NULL;
+        }
+        for (i = 0; i < extra_count; i++) {
+            wchar_t *wk;
+            wchar_t *wv;
+            size_t lk;
+            size_t lv;
+
+            if (!extra[i].key || !extra[i].key[0] || !extra[i].value)
+                continue;
+            wk = utf8_to_wide(extra[i].key);
+            wv = utf8_to_wide(extra[i].value);
+            if (wk && wv) {
+                lk = wcslen(wk);
+                lv = wcslen(wv);
+                extra_wide[i] = (wchar_t *)malloc((lk + 1 + lv + 1) *
+                                                  sizeof(wchar_t));
+                if (extra_wide[i]) {
+                    memcpy(extra_wide[i], wk, lk * sizeof(wchar_t));
+                    extra_wide[i][lk] = L'=';
+                    memcpy(extra_wide[i] + lk + 1, wv,
+                           (lv + 1) * sizeof(wchar_t));
+                }
+            }
+            free(wk);
+            free(wv);
+        }
+    }
 
     /* Pass 1: what is already there? */
     for (cursor = block; *cursor; cursor += wcslen(cursor) + 1) {
@@ -303,8 +500,22 @@ static wchar_t *child_environment(void)
             replace_integration = true;
     }
 
+    /* Explicit user overrides in `extra` take precedence over defaults. */
+    if (extra_wide) {
+        if (entry_in_extra(term_entry, extra_wide, extra_count))
+            replace_term = false;
+        if (entry_in_extra(colorterm_entry, extra_wide, extra_count))
+            replace_colorterm = false;
+        if (entry_in_extra(termica_entry, extra_wide, extra_count))
+            replace_termica = false;
+        if (entry_in_extra(integration_entry, extra_wide, extra_count))
+            replace_integration = false;
+    }
+
     /* Pass 2: size the copy, leaving out the entries being replaced. */
     for (cursor = block; *cursor; cursor += wcslen(cursor) + 1) {
+        if (extra_wide && entry_in_extra(cursor, extra_wide, extra_count))
+            continue;
         if (name_matches(cursor, L"TERM=", 5) && replace_term)
             continue;
         if (name_matches(cursor, L"COLORTERM=", 10) && replace_colorterm)
@@ -326,17 +537,25 @@ static wchar_t *child_environment(void)
         chars += sizeof termica_entry / sizeof termica_entry[0];
     if (replace_integration)
         chars += sizeof integration_entry / sizeof integration_entry[0];
+    if (extra_wide) {
+        for (i = 0; i < extra_count; i++) {
+            if (extra_wide[i])
+                chars += wcslen(extra_wide[i]) + 1;
+        }
+    }
 
     result = (wchar_t *)malloc(chars * sizeof *result);
     if (!result) {
         FreeEnvironmentStringsW(block);
-        return NULL;
+        goto done;
     }
 
-    /* Pass 3: copy what stays, then append the replacements. */
+    /* Pass 3: copy what stays, then append the replacements and extras. */
     for (cursor = block; *cursor; cursor += wcslen(cursor) + 1) {
         size_t length = wcslen(cursor) + 1;
 
+        if (extra_wide && entry_in_extra(cursor, extra_wide, extra_count))
+            continue;
         if (name_matches(cursor, L"TERM=", 5) && replace_term)
             continue;
         if (name_matches(cursor, L"COLORTERM=", 10) && replace_colorterm)
@@ -377,13 +596,32 @@ static wchar_t *child_environment(void)
         memcpy(result + offset, integration_entry, length * sizeof *result);
         offset += length;
     }
+    if (extra_wide) {
+        for (i = 0; i < extra_count; i++) {
+            if (extra_wide[i]) {
+                size_t length = wcslen(extra_wide[i]) + 1;
+
+                memcpy(result + offset, extra_wide[i], length * sizeof *result);
+                offset += length;
+            }
+        }
+    }
     result[offset] = L'\0';
+
+done:
+    if (extra_wide) {
+        for (i = 0; i < extra_count; i++)
+            free(extra_wide[i]);
+        free(extra_wide);
+    }
     return result;
 }
 
-Pty *pty_spawn(const wchar_t *command_line, uint16_t columns, uint16_t rows,
-               PtyNotifyFn notify, void *notify_userdata,
-               char *error, size_t error_size)
+Pty *pty_spawn_ex(const wchar_t *command_line, const char *cwd_utf8,
+                  const PtyEnvEntry *env, int env_count,
+                  uint16_t columns, uint16_t rows,
+                  PtyNotifyFn notify, void *notify_userdata,
+                  char *error, size_t error_size)
 {
     Pty                   *pty;
     SECURITY_ATTRIBUTES    inheritable;
@@ -394,6 +632,7 @@ Pty *pty_spawn(const wchar_t *command_line, uint16_t columns, uint16_t rows,
     SIZE_T                 attribute_bytes = 0;
     wchar_t               *mutable_line = NULL;
     wchar_t               *environment = NULL;
+    wchar_t               *wide_cwd = NULL;
     COORD                  size;
     HRESULT                result;
     bool                   attributes_ready = false;
@@ -513,14 +752,22 @@ Pty *pty_spawn(const wchar_t *command_line, uint16_t columns, uint16_t rows,
                (length + 1) * sizeof *mutable_line);
     }
 
-    environment = child_environment();
+    if (cwd_utf8 && cwd_utf8[0]) {
+        wide_cwd = utf8_to_wide(cwd_utf8);
+        if (!wide_cwd) {
+            set_error_text(error, error_size, "invalid working directory");
+            goto done;
+        }
+    }
+
+    environment = pty_build_environment(env, env_count);
 
     /* Suspended first, so the process cannot fork before it is in the job
      * that guarantees the tree dies with the window. */
     if (!CreateProcessW(NULL, mutable_line, NULL, NULL, TRUE,
                         EXTENDED_STARTUPINFO_PRESENT |
                             CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
-                        environment, NULL, &startup.StartupInfo, &process)) {
+                        environment, wide_cwd, &startup.StartupInfo, &process)) {
         describe_win32_error(error, error_size, "CreateProcessW");
         goto done;
     }
@@ -566,11 +813,20 @@ done:
         CloseHandle(process.hThread);
     free(mutable_line);
     free(environment);
+    free(wide_cwd);
     if (!ok) {
         pty_free(pty);
         return NULL;
     }
     return pty;
+}
+
+Pty *pty_spawn(const wchar_t *command_line, uint16_t columns, uint16_t rows,
+               PtyNotifyFn notify, void *notify_userdata,
+               char *error, size_t error_size)
+{
+    return pty_spawn_ex(command_line, NULL, NULL, 0, columns, rows,
+                        notify, notify_userdata, error, error_size);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -815,11 +1071,30 @@ wchar_t *pty_shell_for(int which)
     return NULL;
 }
 
-Pty *pty_spawn(const wchar_t *command_line, uint16_t columns, uint16_t rows,
-               PtyNotifyFn notify, void *notify_userdata,
-               char *error, size_t error_size)
+wchar_t *pty_build_command_line(const char *const *argv, int argc)
+{
+    (void)argv;
+    (void)argc;
+    return NULL;
+}
+
+wchar_t *pty_build_environment(const PtyEnvEntry *extra, int extra_count)
+{
+    (void)extra;
+    (void)extra_count;
+    return NULL;
+}
+
+Pty *pty_spawn_ex(const wchar_t *command_line, const char *cwd_utf8,
+                  const PtyEnvEntry *env, int env_count,
+                  uint16_t columns, uint16_t rows,
+                  PtyNotifyFn notify, void *notify_userdata,
+                  char *error, size_t error_size)
 {
     (void)command_line;
+    (void)cwd_utf8;
+    (void)env;
+    (void)env_count;
     (void)columns;
     (void)rows;
     (void)notify;
@@ -827,6 +1102,14 @@ Pty *pty_spawn(const wchar_t *command_line, uint16_t columns, uint16_t rows,
     if (error && error_size)
         snprintf(error, error_size, "ConPTY is only available on Windows");
     return NULL;
+}
+
+Pty *pty_spawn(const wchar_t *command_line, uint16_t columns, uint16_t rows,
+               PtyNotifyFn notify, void *notify_userdata,
+               char *error, size_t error_size)
+{
+    return pty_spawn_ex(command_line, NULL, NULL, 0, columns, rows,
+                        notify, notify_userdata, error, error_size);
 }
 
 bool pty_resize(Pty *pty, uint16_t columns, uint16_t rows)

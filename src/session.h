@@ -14,6 +14,7 @@
 #include <stdint.h>
 
 #include "pty.h"
+#include "settings.h"
 #include "term.h"
 
 /* Room for uncommitted IME text. SDL3 hands the string over for the
@@ -66,9 +67,10 @@ bool session_init(Session *s, uint16_t columns, uint16_t rows,
 /* Tear down the pty (if any) and the terminal. Safe on a zeroed session. */
 void session_free(Session *s);
 
-/* Spawn the configured shell at the given grid dimensions. Spawn errors are
- * printed into the session's own grid so the user sees why nothing started. */
-void session_spawn_shell(Session *s, int shell_setting, uint16_t columns,
+/* Spawn the configured shell (or custom command/cwd/env) at the given grid
+ * dimensions. Spawn errors are printed into the session's own grid so the
+ * user sees why nothing started. */
+void session_spawn_shell(Session *s, const Settings *settings, uint16_t columns,
                          uint16_t rows, PtyNotifyFn on_output,
                          void *output_userdata);
 

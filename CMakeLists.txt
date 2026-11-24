@@ -123,6 +123,7 @@ add_executable(termica
     src/input.c
     src/render.c
     src/chrome.c
+    src/keys.c
     src/term.c
     src/pty.c
     src/embed.c
@@ -142,6 +143,7 @@ add_executable(termica
     src/input.h
     src/render.h
     src/chrome.h
+    src/keys.h
     src/term.h
     src/pty.h
     src/embed.h

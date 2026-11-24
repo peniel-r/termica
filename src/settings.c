@@ -44,8 +44,8 @@
 /* Longest file we are willing to read; the real one is a dozen lines. */
 #define SETTINGS_MAX_BYTES 65536
 
-/* Room for the formatted file, including an escaped font face. */
-#define SETTINGS_FORMAT_BYTES 4096
+/* Room for the formatted file, including command, env and key overrides. */
+#define SETTINGS_FORMAT_BYTES 16384
 
 /* Fingerprint of the file as it was read. The save on exit is skipped when
  * the file changed while the app ran, so a hand edit is not overwritten by
@@ -76,6 +76,7 @@ void settings_default(Settings *settings)
     settings->copy_on_select = false;
     settings->shell = SETTINGS_SHELL_AUTO;
     settings->osc52 = SETTINGS_OSC52_ASK;
+    keys_default(&settings->keys);
 }
 
 /* `-` and `_` are the same separator, and case does not matter:
@@ -210,6 +211,81 @@ static bool apply_window(Settings *settings, toml_datum_t table)
     return changed;
 }
 
+static bool apply_terminal_command(Settings *settings, toml_datum_t array)
+{
+    char parsed[SETTINGS_MAX_ARGS][SETTINGS_ARG_MAX];
+    int count;
+    int index;
+
+    if (array.type != TOML_ARRAY)
+        return false;
+    count = array.u.arr.size;
+    if (count < 0 || count > SETTINGS_MAX_ARGS)
+        return false;
+    for (index = 0; index < count; index++) {
+        toml_datum_t elem = array.u.arr.elem[index];
+        int length;
+
+        if (elem.type != TOML_STRING)
+            return false;
+        length = elem.u.str.len;
+        if (length < 0 || (size_t)length >= SETTINGS_ARG_MAX ||
+            memchr(elem.u.str.ptr, '\0', (size_t)length))
+            return false;
+        /* argv[0] must be non-empty. */
+        if (index == 0 && length == 0)
+            return false;
+        memcpy(parsed[index], elem.u.str.ptr, (size_t)length);
+        parsed[index][length] = '\0';
+    }
+    for (index = 0; index < count; index++)
+        memcpy(settings->command[index], parsed[index], SETTINGS_ARG_MAX);
+    settings->command_argc = count;
+    return true;
+}
+
+static bool apply_terminal_env(Settings *settings, toml_datum_t table)
+{
+    bool changed = false;
+    int index;
+
+    if (table.type != TOML_TABLE)
+        return false;
+    for (index = 0; index < table.u.tab.size; index++) {
+        const char *key = table.u.tab.key[index];
+        toml_datum_t value = table.u.tab.value[index];
+        size_t key_len;
+        int val_len;
+        int slot;
+
+        if (value.type != TOML_STRING || !key || !key[0])
+            continue;
+        key_len = strlen(key);
+        if (key_len >= SETTINGS_ENV_KEY_MAX || strchr(key, '='))
+            continue;
+        val_len = value.u.str.len;
+        if (val_len < 0 || (size_t)val_len >= SETTINGS_ENV_VAL_MAX ||
+            memchr(value.u.str.ptr, '\0', (size_t)val_len))
+            continue;
+
+        /* Update an existing key in place, or append a new one. */
+        for (slot = 0; slot < settings->env_count; slot++) {
+            if (strcmp(settings->env[slot].key, key) == 0)
+                break;
+        }
+        if (slot == settings->env_count) {
+            if (settings->env_count >= SETTINGS_MAX_ENV)
+                continue;
+            settings->env_count++;
+        }
+        memcpy(settings->env[slot].key, key, key_len + 1);
+        memcpy(settings->env[slot].value, value.u.str.ptr, (size_t)val_len);
+        settings->env[slot].value[val_len] = '\0';
+        changed = true;
+    }
+    return changed;
+}
+
 static bool apply_terminal(Settings *settings, toml_datum_t table)
 {
     bool changed = false;
@@ -247,7 +323,77 @@ static bool apply_terminal(Settings *settings, toml_datum_t table)
                 settings->osc52 = SETTINGS_OSC52_DENY;
                 changed = true;
             }
+        } else if (key_is(key, "command")) {
+            if (apply_terminal_command(settings, value))
+                changed = true;
+        } else if (key_is(key, "cwd") && value.type == TOML_STRING) {
+            int length = value.u.str.len;
+
+            if (length >= 0 && (size_t)length < sizeof settings->cwd &&
+                !memchr(value.u.str.ptr, '\0', (size_t)length)) {
+                memcpy(settings->cwd, value.u.str.ptr, (size_t)length);
+                settings->cwd[length] = '\0';
+                changed = true;
+            }
+        } else if (key_is(key, "env")) {
+            if (apply_terminal_env(settings, value))
+                changed = true;
         }
+    }
+    return changed;
+}
+
+static bool apply_keys(Settings *settings, toml_datum_t table)
+{
+    bool changed = false;
+    int index;
+
+    if (table.type != TOML_TABLE)
+        return false;
+    for (index = 0; index < table.u.tab.size; index++) {
+        const char *chord = table.u.tab.key[index];
+        toml_datum_t value = table.u.tab.value[index];
+        SDL_Scancode scancode;
+        uint8_t mods;
+        KeyAction action;
+        const char *canonical;
+        int slot;
+
+        if (value.type != TOML_STRING || !chord)
+            continue;
+        if (strlen(chord) >= sizeof settings->key_overrides[0].chord)
+            continue;
+        if (!keys_parse_chord(chord, &scancode, &mods))
+            continue;
+        if (!keys_parse_action(value.u.s, &action))
+            continue;
+        if (!keys_set(&settings->keys, scancode, mods, action))
+            continue;
+
+        canonical = keys_action_name(action);
+        for (slot = 0; slot < settings->key_override_count; slot++) {
+            SDL_Scancode existing_sc;
+            uint8_t existing_mods;
+
+            if (keys_parse_chord(settings->key_overrides[slot].chord,
+                                 &existing_sc, &existing_mods) &&
+                existing_sc == scancode && existing_mods == mods)
+                break;
+        }
+        if (slot == settings->key_override_count) {
+            if (settings->key_override_count < SETTINGS_MAX_KEY_OVERRIDES)
+                settings->key_override_count++;
+            else
+                slot = -1;
+        }
+        if (slot >= 0) {
+            snprintf(settings->key_overrides[slot].chord,
+                     sizeof settings->key_overrides[slot].chord, "%s", chord);
+            snprintf(settings->key_overrides[slot].action,
+                     sizeof settings->key_overrides[slot].action, "%s",
+                     canonical);
+        }
+        changed = true;
     }
     return changed;
 }
@@ -263,6 +409,8 @@ static bool apply_table(Settings *settings, const char *name,
         return apply_window(settings, table);
     if (key_is(name, "terminal"))
         return apply_terminal(settings, table);
+    if (key_is(name, "keys"))
+        return apply_keys(settings, table);
     return false;
 }
 
@@ -411,6 +559,9 @@ void settings_format(const Settings *settings, char *out, size_t capacity)
     format_float((double)settings->point_size, size, sizeof size);
     format_float((double)settings->panel_opacity, opacity, sizeof opacity);
 
+    size_t used = 0;
+    int index;
+
     snprintf(out, capacity,
              "# termica settings\n"
              "\n"
@@ -431,6 +582,72 @@ void settings_format(const Settings *settings, char *out, size_t capacity)
              font, size, opacity, backdrop, decoration,
              settings->title_bar ? "true" : "false",
              settings->copy_on_select ? "true" : "false", shell, osc52);
+    used = strlen(out);
+
+    if (settings->command_argc > 0) {
+        append_piece(out, capacity, &used, "command = [", 11);
+        for (index = 0; index < settings->command_argc; index++) {
+            char escaped[SETTINGS_ARG_MAX * 2];
+
+            if (index > 0)
+                append_piece(out, capacity, &used, ", ", 2);
+            escape_toml_string(settings->command[index], escaped,
+                               sizeof escaped);
+            append_piece(out, capacity, &used, "\"", 1);
+            append_piece(out, capacity, &used, escaped, strlen(escaped));
+            append_piece(out, capacity, &used, "\"", 1);
+        }
+        append_piece(out, capacity, &used, "]\n", 2);
+    }
+
+    if (settings->cwd[0]) {
+        char escaped[1024];
+
+        escape_toml_string(settings->cwd, escaped, sizeof escaped);
+        append_piece(out, capacity, &used, "cwd = \"", 7);
+        append_piece(out, capacity, &used, escaped, strlen(escaped));
+        append_piece(out, capacity, &used, "\"\n", 2);
+    }
+
+    if (settings->env_count > 0) {
+        append_piece(out, capacity, &used, "\n[terminal.env]\n", 16);
+        for (index = 0; index < settings->env_count; index++) {
+            char escaped_key[SETTINGS_ENV_KEY_MAX * 2];
+            char escaped_val[SETTINGS_ENV_VAL_MAX * 2];
+
+            escape_toml_string(settings->env[index].key, escaped_key,
+                               sizeof escaped_key);
+            escape_toml_string(settings->env[index].value, escaped_val,
+                               sizeof escaped_val);
+            append_piece(out, capacity, &used, "\"", 1);
+            append_piece(out, capacity, &used, escaped_key,
+                         strlen(escaped_key));
+            append_piece(out, capacity, &used, "\" = \"", 5);
+            append_piece(out, capacity, &used, escaped_val,
+                         strlen(escaped_val));
+            append_piece(out, capacity, &used, "\"\n", 2);
+        }
+    }
+
+    if (settings->key_override_count > 0) {
+        append_piece(out, capacity, &used, "\n[keys]\n", 8);
+        for (index = 0; index < settings->key_override_count; index++) {
+            char escaped_chord[128];
+            char escaped_action[64];
+
+            escape_toml_string(settings->key_overrides[index].chord,
+                               escaped_chord, sizeof escaped_chord);
+            escape_toml_string(settings->key_overrides[index].action,
+                               escaped_action, sizeof escaped_action);
+            append_piece(out, capacity, &used, "\"", 1);
+            append_piece(out, capacity, &used, escaped_chord,
+                         strlen(escaped_chord));
+            append_piece(out, capacity, &used, "\" = \"", 5);
+            append_piece(out, capacity, &used, escaped_action,
+                         strlen(escaped_action));
+            append_piece(out, capacity, &used, "\"\n", 2);
+        }
+    }
 }
 
 bool config_path(const char *name, char *out, size_t capacity)

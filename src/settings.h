@@ -17,6 +17,25 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "keys.h"
+
+#define SETTINGS_MAX_ARGS          16
+#define SETTINGS_ARG_MAX           256
+#define SETTINGS_MAX_ENV           32
+#define SETTINGS_ENV_KEY_MAX       64
+#define SETTINGS_ENV_VAL_MAX       512
+#define SETTINGS_MAX_KEY_OVERRIDES 32
+
+typedef struct SettingsEnv {
+    char key[SETTINGS_ENV_KEY_MAX];
+    char value[SETTINGS_ENV_VAL_MAX];
+} SettingsEnv;
+
+typedef struct SettingsKeyOverride {
+    char chord[64];
+    char action[32];
+} SettingsKeyOverride;
+
 /* Which program to start. */
 typedef enum {
     SETTINGS_SHELL_AUTO = 0,   /* pwsh, else powershell, else cmd      */
@@ -50,6 +69,21 @@ typedef struct Settings {
     bool copy_on_select;   /* default false                          */
     SettingsShell shell;   /* default auto                           */
     SettingsOsc52 osc52;   /* default ask                            */
+
+    /* Custom shell profile (PLAN 1.1). When command_argc > 0 it wins over
+     * `shell`. `cwd` overrides the inherited working directory when non-empty.
+     * `env` entries overlay the child's environment. */
+    char command[SETTINGS_MAX_ARGS][SETTINGS_ARG_MAX];
+    int  command_argc;
+    char cwd[512];
+    SettingsEnv env[SETTINGS_MAX_ENV];
+    int  env_count;
+
+    /* Key bindings (PLAN 1.2). `keys` holds defaults plus any `[keys]`
+     * overrides; `key_overrides` preserves the user's overrides for save. */
+    KeyMap keys;
+    SettingsKeyOverride key_overrides[SETTINGS_MAX_KEY_OVERRIDES];
+    int  key_override_count;
 } Settings;
 
 void settings_default(Settings *settings);

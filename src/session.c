@@ -49,27 +49,59 @@ void session_show_message(Session *s, const char *text)
     term_write(&s->term, text, strlen(text));
 }
 
-void session_spawn_shell(Session *s, int shell_setting, uint16_t columns,
+void session_spawn_shell(Session *s, const Settings *settings, uint16_t columns,
                          uint16_t rows, PtyNotifyFn on_output,
                          void *output_userdata)
 {
-    wchar_t *command = pty_shell_for(shell_setting);
+    wchar_t *command = NULL;
+    PtyEnvEntry env_entries[SETTINGS_MAX_ENV];
+    const char *cwd_opt = NULL;
     char error[256];
-    char *cwd;
+    int i;
 
-    if (!command) {
-        if (shell_setting == SETTINGS_SHELL_AUTO)
+    if (settings && settings->command_argc > 0) {
+        const char *argv[SETTINGS_MAX_ARGS];
+
+        for (i = 0; i < settings->command_argc; i++)
+            argv[i] = settings->command[i];
+        command = pty_build_command_line(argv, settings->command_argc);
+        if (!command) {
             session_show_message(s,
-                                 "\x1b[31mno shell found: pwsh.exe, "
-                                 "powershell.exe and cmd.exe are all missing"
-                                 "\x1b[0m\r\n");
-        else
-            session_show_message(s,
-                                 "\x1b[31mthe shell named in the settings is "
-                                 "not installed\x1b[0m\r\n");
+                                 "\x1b[31minvalid [terminal] command in "
+                                 "settings\x1b[0m\r\n");
+        }
     } else {
-        s->pty = pty_spawn(command, columns, rows, on_output, output_userdata,
-                           error, sizeof error);
+        int shell_setting = settings ? (int)settings->shell
+                                     : (int)SETTINGS_SHELL_AUTO;
+
+        command = pty_shell_for(shell_setting);
+        if (!command) {
+            if (shell_setting == SETTINGS_SHELL_AUTO)
+                session_show_message(s,
+                                     "\x1b[31mno shell found: pwsh.exe, "
+                                     "powershell.exe and cmd.exe are all "
+                                     "missing\x1b[0m\r\n");
+            else
+                session_show_message(s,
+                                     "\x1b[31mthe shell named in the settings "
+                                     "is not installed\x1b[0m\r\n");
+        }
+    }
+
+    if (settings && settings->cwd[0])
+        cwd_opt = settings->cwd;
+
+    if (command) {
+        int env_count = settings ? settings->env_count : 0;
+
+        for (i = 0; i < env_count; i++) {
+            env_entries[i].key = settings->env[i].key;
+            env_entries[i].value = settings->env[i].value;
+        }
+        s->pty = pty_spawn_ex(command, cwd_opt,
+                              env_count > 0 ? env_entries : NULL, env_count,
+                              columns, rows, on_output, output_userdata,
+                              error, sizeof error);
         free(command);
         if (!s->pty) {
             char message[400];
@@ -82,11 +114,16 @@ void session_spawn_shell(Session *s, int shell_setting, uint16_t columns,
     }
 
     /* Until the shell reports a directory over OSC 7, the directory module
-     * shows the directory termica (and therefore the shell) started in. */
-    cwd = SDL_GetCurrentDirectory();
-    if (cwd) {
-        snprintf(s->term.pwd, sizeof s->term.pwd, "%s", cwd);
-        SDL_free(cwd);
+     * shows the configured cwd or the directory termica started in. */
+    if (cwd_opt) {
+        snprintf(s->term.pwd, sizeof s->term.pwd, "%s", cwd_opt);
+    } else {
+        char *cwd = SDL_GetCurrentDirectory();
+
+        if (cwd) {
+            snprintf(s->term.pwd, sizeof s->term.pwd, "%s", cwd);
+            SDL_free(cwd);
+        }
     }
 }
 
