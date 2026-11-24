@@ -1,0 +1,59 @@
+name: Bug report
+description: Report a reproducible problem or crash
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues first and see the [troubleshooting guide](https://github.com/peniel-r/termica/blob/main/docs/troubleshooting.md).
+        Do not post passwords, tokens, private paths, terminal output, or minidumps publicly.
+        Review and redact configuration and logs before sharing; coordinate private dump transfer with a maintainer.
+  - type: input
+    id: version
+    attributes:
+      label: termica version
+      description: Paste the full output of `termica.exe --version`, or give the commit and build details if it cannot start.
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version and build
+      placeholder: "Windows 11 23H2, build 22631"
+    validations:
+      required: true
+  - type: input
+    id: shell
+    attributes:
+      label: Shell and environment
+      description: Shell/version, WSL distribution or remote host type if relevant; omit private hostnames.
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include a minimal command, sanitized config, and starting conditions.
+      placeholder: |
+        1. Start termica with ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the exact error, frequency, and a screenshot if useful and safe to share.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: For a crash, say whether a log or minidump exists under %LOCALAPPDATA%\termica\logs. Include only reviewed and redacted log excerpts; never attach a dump publicly.
+      render: text

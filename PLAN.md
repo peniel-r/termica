@@ -120,11 +120,11 @@ codebase that can grow.
 | # | Item | Acceptance criteria |
 |---|---|---|
 | 3.1 | **CI** | A GitHub Actions workflow builds with llvm-mingw and runs `--selftest` and the ASan self test on every push and PR. |
-| 3.2 | **Performance pass** | A glyph atlas replaces one texture per glyph. Only damaged rows are redrawn. Benchmarks: `cat` of a 100 MB file, `yes` throughput, and frame time while scrolling, compared against Windows Terminal and WezTerm and recorded in `docs/perf.md`. |
+| 3.2 | **Performance pass** (renderer done; frame timing unverified) | A glyph atlas replaces one texture per glyph. Only damaged rows are redrawn. Benchmarks: `cat` of a 100 MB file, `yes` throughput, and frame time while scrolling, compared against Windows Terminal and WezTerm and recorded in `docs/perf.md`. The scrolling frame-time comparison needs ETW privileges. |
 | 3.3 | **Packaging** | Versioned release zips. A Scoop manifest and a winget manifest. An app icon and version resource. An Explorer "Open termica here" entry, opt-in. |
-| 3.4 | **Code signing** | Release binaries are signed, so SmartScreen does not block first launch. |
-| 3.5 | **Crash diagnostics** | A log file in `%LOCALAPPDATA%\termica\logs`, a minidump on unhandled exceptions, and a `--version` output to paste into bug reports. |
-| 3.6 | **User docs** | A configuration reference generated from the settings tables, a key binding reference, troubleshooting, and issue templates. |
+| 3.4 | **Code signing** (workflow added; release signing blocked) | `scripts/sign-release.ps1` signs and verifies both binaries, but a CA-issued code-signing certificate and timestamp service must be provisioned. Signing cannot guarantee SmartScreen reputation. |
+| 3.5 | **Crash diagnostics** (done) | A log file in `%LOCALAPPDATA%\termica\logs`, a minidump on unhandled exceptions, and a `--version` output to paste into bug reports. |
+| 3.6 | **User docs** (done) | A configuration reference generated from the settings tables, a key binding reference, troubleshooting, and issue templates. |
 
 ### Exit criteria
 

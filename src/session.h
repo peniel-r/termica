@@ -93,10 +93,10 @@ void session_update_geometry(Session *s, uint32_t pixel_width,
                              uint32_t grid_top, uint32_t grid_right,
                              uint32_t grid_bottom);
 
-/* Drain pending ConPTY output into the terminal on the main thread. Returns
- * true if any bytes were parsed. Sets *exited_now to true the first time the
- * direct child reports an exit code. */
-bool session_pump(Session *s, bool *exited_now);
+/* Drain a bounded chunk of ConPTY output on the main thread. Returns true
+ * if any bytes were parsed. *more may be set when another drain is needed;
+ * *exited_now is set the first time the direct child reports an exit code. */
+bool session_pump(Session *s, bool *exited_now, bool *more);
 
 /* Snap the viewport back to the active area if scrolled into history. */
 void session_jump_to_bottom(Session *s);

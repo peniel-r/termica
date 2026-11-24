@@ -161,7 +161,7 @@ void session_update_geometry(Session *s, uint32_t pixel_width,
 
 /* Move a bounded amount of pending output on the main thread. The reader
  * may refill the ring while it drains, so the ring size is not a work bound. */
-bool session_pump(Session *s, bool *exited_now)
+bool session_pump(Session *s, bool *exited_now, bool *more)
 {
     uint8_t buffer[16384];
     bool parsed = false;
@@ -170,6 +170,8 @@ bool session_pump(Session *s, bool *exited_now)
 
     if (exited_now)
         *exited_now = false;
+    if (more)
+        *more = false;
     if (!s->pty)
         return false;
 
@@ -184,6 +186,8 @@ bool session_pump(Session *s, bool *exited_now)
         bytes += got;
         parsed = true;
     }
+    if (more && !drained)
+        *more = pty_pending(s->pty) > 0;
     if (parsed)
         search_output_changed(&s->search, &s->term);
 

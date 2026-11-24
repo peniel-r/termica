@@ -43,6 +43,7 @@
 | **Links** | OSC 8 and detected URLs, underlined on hover and opened with Ctrl+click for allowed schemes |
 | **Desktop** | Policy-gated OSC notifications and taskbar progress |
 | **Status bar** | Starship-style `statusbar.toml`: directory, git branch and status, last command's exit code and duration, a busy spinner, a clock |
+| **Diagnostics** | Version information, a local log and an unhandled-exception minidump on Windows |
 | **Config** | Validated TOML, live reload, and targeted UI saves that preserve comments |
 
 ## Requirements
@@ -104,6 +105,7 @@ termica.exe                          # use termica.toml
 termica.exe 18                       # point-size override for this run
 termica.exe C:\path\to\Font.ttf 16   # face and size override for this run
 termica.exe --selftest               # headless test suite; exit code = failures
+termica.exe --version                # build revision and loaded libghostty version
 ```
 
 `run.ps1` accepts `-Font`, `-Size`, `-Preset` and `-SelfTest`.
@@ -198,6 +200,9 @@ bell = "visual"        # visual | taskbar | none
 - **UI edits** save only the changed key in place, preserving other settings
   and comments. Closing the window does not rewrite either configuration file.
 
+See the generated [configuration and key binding reference](docs/configuration.md)
+for every setting, module and action.
+
 ### Status bar (`statusbar.toml`)
 
 The status bar is configured in the same folder, using the
@@ -249,6 +254,9 @@ duration is hidden rather than reused from a previous command.
 - Native splits, session restoration and graphics protocols are not implemented.
 - Windows may suppress notifications according to its notification settings
   or Focus Assist.
+- Windows minidumps can contain private terminal text, process memory and paths.
+  See [troubleshooting](docs/troubleshooting.md#crash-reports-and-privacy)
+  before sharing logs or dumps. Set `TERMICA_DIAGNOSTICS=0` to disable them.
 
 ## Development
 
@@ -272,6 +280,9 @@ build\asan\termica.exe --selftest
 - [DESIGN.md](DESIGN.md) explains the architecture, the threading rules and
   why things are the way they are. Read it before changing `pty.c`, `term.c`
   or the input path.
+- For release signing prerequisites and the fail-closed signing command, see
+  [signing](docs/signing.md). A trusted certificate does not guarantee
+  SmartScreen reputation.
 - If the window comes up opaque, force a renderer:
   `$env:SDL_RENDER_DRIVER = 'direct3d11'`.
 
@@ -279,6 +290,10 @@ build\asan\termica.exe --selftest
 |---|---|
 | [PLAN.md](PLAN.md) | Roadmap: v0.1 → v1.0 stages, scope and exit criteria |
 | [DESIGN.md](DESIGN.md) | Architecture, data flow, threading, and the decision records |
+| [docs/configuration.md](docs/configuration.md) | Generated configuration and key binding reference |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Troubleshooting and diagnostics privacy |
+| [docs/signing.md](docs/signing.md) | Authenticode signing prerequisites and verification |
+| [docs/perf.md](docs/perf.md) | Throughput measurements and benchmark limitations |
 | [docs/archive/](docs/archive/) | The original per-milestone development diary |
 
 ## Acknowledgements

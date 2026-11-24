@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(termica LANGUAGES C)
+project(termica VERSION 0.3.0 LANGUAGES C)
 
 # The font is embedded as Windows RCDATA resources.
 if(WIN32)
@@ -151,6 +151,8 @@ add_executable(termica
     src/config_test.c
     src/desktop_signal.c
     src/desktop_signal_test.c
+    src/diagnostics.c
+    src/diagnostics_test.c
     src/hyperlink.c
     src/hyperlink_test.c
     src/search.c
@@ -158,6 +160,7 @@ add_executable(termica
     src/toast.c
     src/ui_settings.c
     src/glyph.c
+    src/glyph_atlas_test.c
     src/git.c
     src/style.c
     src/panel.c
@@ -180,6 +183,7 @@ add_executable(termica
     src/clipboard.h
     src/config_watch.h
     src/desktop_signal.h
+    src/diagnostics.h
     src/hyperlink.h
     src/search.h
     src/toast.h
@@ -211,6 +215,17 @@ target_link_libraries(termica PRIVATE SDL3_ttf::SDL3_ttf SDL3::SDL3)
 target_link_libraries(termica PRIVATE ghostty-vt::ghostty-vt)
 target_link_libraries(termica PRIVATE tomlc17)
 target_link_libraries(termica PRIVATE pcre2-8-static)
+target_compile_definitions(termica PRIVATE
+    TERMICA_VERSION="${PROJECT_VERSION}-dev" TERMICA_GENERATED_REVISION=1)
+target_include_directories(termica PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+add_custom_target(termica_build_revision
+    COMMAND ${CMAKE_COMMAND}
+        "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+        "-DOUTPUT_FILE=${CMAKE_CURRENT_BINARY_DIR}/termica_build_revision.h"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/BuildRevision.cmake"
+    BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/termica_build_revision.h"
+    VERBATIM)
+add_dependencies(termica termica_build_revision)
 
 if(WIN32)
     # ghostty-vt.dll must sit next to the exe (or on PATH).
@@ -244,5 +259,5 @@ if(TERMICA_SANITIZE)
 endif()
 
 if(WIN32)
-    target_link_libraries(termica PRIVATE dwmapi shell32 ole32 runtimeobject)
+    target_link_libraries(termica PRIVATE dwmapi shell32 ole32 runtimeobject dbghelp)
 endif()

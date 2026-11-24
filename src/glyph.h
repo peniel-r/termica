@@ -1,10 +1,9 @@
 /*
  * termica - fonts, the glyph cache and drawing text.
  *
- * One white texture per codepoint and style (regular, bold, italic,
- * bold-italic), tinted at draw time. The cache covers the Basic
- * Multilingual Plane, which is enough for ASCII, box drawing and Nerd Font
- * icons.
+ * Rasterised text is packed into a bounded set of shared atlas textures,
+ * tinted at draw time unless the selected face supplies colour glyphs.
+ * BMP and supplementary codepoints and common grapheme clusters are cached.
  *
  * The default font is Maple Mono NF, compiled into the executable. A path
  * passed on the command line still wins; if it cannot be opened, the
@@ -43,10 +42,15 @@
 #define GLYPH_MAX_USER_FALLBACKS 8
 #define GLYPH_MAX_SYS_FALLBACKS  6
 
+#define GLYPH_ATLAS_SIZE         1024
+#define GLYPH_ATLAS_PAGES        8
+#define GLYPH_CLUSTER_BUCKETS    256
+#define GLYPH_CLUSTER_BYTES      128
+
 typedef struct Glyph {
-    SDL_Texture *texture;
-    float width;
-    float height;
+    SDL_FRect source;
+    uint64_t generation;
+    uint8_t page;           /* one-based; 0 means no atlas entry */
     bool tried;
     bool is_color;          /* colour emoji: draw untinted (white mod) */
 } Glyph;
@@ -56,6 +60,20 @@ typedef struct GlyphExtraEntry {
     uint8_t  slot;
     Glyph    glyph;
 } GlyphExtraEntry;
+
+typedef struct GlyphAtlasPage {
+    SDL_Texture *texture;
+    int x, y, row_height;
+    uint64_t generation;
+    uint64_t last_used;
+} GlyphAtlasPage;
+
+typedef struct GlyphClusterEntry {
+    char text[GLYPH_CLUSTER_BYTES];
+    size_t length;
+    uint8_t slot;
+    Glyph glyph;
+} GlyphClusterEntry;
 
 typedef struct Glyphs {
     SDL_Renderer *renderer;
@@ -93,6 +111,11 @@ typedef struct Glyphs {
     /* Open-addressed cache for codepoints >= GLYPH_MAX_CODEPOINT. */
     GlyphExtraEntry *extra_cache;
 
+    GlyphAtlasPage atlas[GLYPH_ATLAS_PAGES];
+    int atlas_size;
+    uint64_t atlas_clock;
+    GlyphClusterEntry *clusters;
+
     /* One cell of the grid, from the font metrics. */
     int cell_width;
     int cell_height;
@@ -116,6 +139,9 @@ bool glyphs_open(Glyphs *glyphs, SDL_Renderer *renderer, const char *font_path,
 
 /* Free every texture and font. Safe on a zeroed struct. */
 void glyphs_close(Glyphs *glyphs);
+
+/* Invalidate textures after SDL_EVENT_RENDER_DEVICE_RESET; fonts stay open. */
+void glyphs_reset(Glyphs *glyphs);
 
 /* Draw one cell's text at (x, y). `text` is UTF-8 and may be a whole
  * grapheme cluster; `length` is in bytes. */

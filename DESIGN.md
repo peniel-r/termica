@@ -73,11 +73,11 @@ It never reimplements an escape sequence.
 | `app.h` | Shared `App` struct, layout/timer constants and `SDL_EVENT_USER` codes | `session`, `git`, `glyph`, `panel`, `settings`, `statusbar`, `window` |
 | `session.{h,c}` | Per-tab terminal, ConPTY, search, selection, IME and bounded output pump | `term`, `pty`, `search`, SDL |
 | `input.{h,c}` | Keyboard, text/IME, mouse, search and hyperlink interaction | `app`, `chrome`, `hyperlink` |
-| `render.{h,c}` | Frame rendering, search highlights and hovered links | `app`, `chrome`, `style` |
+| `render.{h,c}` | Damage-tracked grid row cache, search highlights and hovered links | `app`, `chrome`, `style` |
 | `chrome.{h,c}` | Frame geometry, tab strip, search overlay and status bar | `app` |
 | `term.{h,c}` | Terminal state, encoders, selection and OSC callbacks | libghostty-vt |
 | `pty.{h,c}` | Pipes, `CreatePseudoConsole`, child process, job object, reader thread, ring buffer, resize, ordered close | Win32 only, **no SDL** |
-| `glyph.{h,c}` | Opening fonts (disk, family, embedded), bold and italic faces, glyph cache, fallback, drawing cell text | SDL3_ttf, `embed`, `font_lookup` |
+| `glyph.{h,c}` | Fonts, bounded glyph atlases, fallback and drawing | SDL3_ttf, `embed`, `font_lookup` |
 | `style.{h,c}` | Turns a cell style into colours and decorations | pure |
 | `geometry.{h,c}` | Squircle math shared by the panel and the window region | pure |
 | `panel.{h,c}` | Translucent panel fill and border, antialiased corner masks | SDL renderer |
@@ -87,6 +87,7 @@ It never reimplements an escape sequence.
 | `search.{h,c}` | Incremental scrollback search and match navigation | libghostty-vt, PCRE2 |
 | `hyperlink.{h,c}` | OSC 8 and detected URLs, scheme validation and opening | libghostty-vt, Win32 |
 | `clipboard.{h,c}`, `desktop_signal.{h,c}` | Clipboard read policy, notifications and taskbar progress | SDL, Win32 |
+| `diagnostics.{h,c}` | Local log, version and unhandled-exception minidump | Win32, DbgHelp |
 | `toast.{h,c}` | In-window reload and save error feedback | SDL |
 | `git.{h,c}` | Background `git status --porcelain=v2 --branch` and its parser | Win32 |
 | `font_lookup.{h,c}` | Installed family name → `.ttf` path through the registry | Win32 |
@@ -222,9 +223,12 @@ retained across terminal mutations.
 1. Panel: either the translucent fill with squircle masks, or a light tint
    over the DWM backdrop.
 2. Title bar, when enabled for a custom frame.
-3. Cell backgrounds, with the selection drawn by swapping fg and bg.
-4. Glyphs, through the glyph cache: one texture per (codepoint, face), for
-   the BMP only.
+3. Cell backgrounds and glyphs are cached as premultiplied transparent row
+   layers. Only damaged rows are repainted; all row layers are composited
+   onto each fresh window frame. Unsupported render targets fall back to
+   direct rendering.
+4. Glyphs share bounded texture atlas pages, with separate style and colour
+   entries and whole-page eviction. Oversized glyphs use a temporary texture.
 5. Decorations: the five underline kinds, strikethrough, overline.
 6. Cursor (block, hollow, bar or underline, with a blink phase) and the IME
    preedit.
@@ -619,3 +623,27 @@ otherwise.
 - **Consequences:** Search can advance incrementally over large histories;
   Windows controls whether a submitted toast is displayed. A simultaneous
   external edit can still race the final compare-and-rename of a UI save.
+
+### ADR-018: Retained rows and bounded glyph atlases
+
+- **Decision:** SDL target textures retain each grid row independently; the
+  renderer repaints damaged rows, then composites all layers over the fresh
+  panel. Premultiplied alpha preserves translucent backgrounds and a direct
+  drawing fallback is used if render targets or blending are unavailable.
+  Glyphs and text clusters share bounded atlas pages; eviction invalidates
+  entries through generation counters. Device reset discards both caches.
+- **Consequences:** Chrome and overlays remain fresh without rerasterizing
+  unchanged grid rows. Render-target memory scales with the viewport, and
+  unsupported graphics backends still draw complete frames correctly.
+
+### ADR-019: Local crash diagnostics and release identity
+
+- **Decision:** On Windows, write a local log and a normal minidump for an
+  unhandled exception. The exception filter delegates dump writing to a
+  prestarted worker so stack overflows have a separate stack. Set
+  `TERMICA_DIAGNOSTICS=0` to disable diagnostics; `--version` reports the
+  build and loaded libghostty version without starting the UI.
+- **Consequences:** Minidumps may contain private memory, paths and secrets;
+  reports must not be published without review. Authenticode signing is a
+  separate fail-closed step requiring a provisioned trusted certificate and
+  timestamp service, and does not guarantee SmartScreen reputation.

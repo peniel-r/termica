@@ -51,30 +51,114 @@ static TTF_Font *font_for_slot(const Glyphs *glyphs, int slot)
     }
 }
 
-/* Bake a texture from one rendered line of text. White is used so the draw
- * call can tint it. */
-static SDL_Texture *bake_texture(SDL_Renderer *renderer, TTF_Font *font,
-                                 const char *text, size_t length,
-                                 float *out_width, float *out_height)
+/* A one-pixel extruded gutter preserves texture-edge sampling when scaled
+ * and prevents linear filtering from sampling a neighbouring glyph. Eviction
+ * reuses a whole page; stale entries are rasterised again. */
+static bool atlas_store(Glyphs *glyphs, SDL_Surface *surface, Glyph *glyph)
 {
-    SDL_Color white = { 255, 255, 255, 255 };
-    SDL_Surface *surface;
-    SDL_Texture *texture;
+    SDL_Surface *padded;
+    SDL_Rect destination, upload;
+    GlyphAtlasPage *page = NULL;
+    int width, height, x = 0, y = 0, row_height = 0;
+    int i, chosen = -1;
 
-    /* TTF_RenderText_* returns a surface of exactly the font's line height
-     * with the baseline at a fixed spot, so every glyph lines up when drawn
-     * at the same y. That is what a monospace grid needs. */
-    surface = TTF_RenderText_Blended(font, text, length, white);
-    if (!surface)
-        return NULL;
-    texture = SDL_CreateTextureFromSurface(renderer, surface);
-    if (texture) {
-        *out_width = (float)surface->w;
-        *out_height = (float)surface->h;
-        SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+    if (surface->w <= 0 || surface->h <= 0 || glyphs->atlas_size <= 2 ||
+        surface->w > glyphs->atlas_size - 2 ||
+        surface->h > glyphs->atlas_size - 2)
+        return false;
+    width = surface->w + 2;
+    height = surface->h + 2;
+    padded = SDL_CreateSurface(width, height, SDL_PIXELFORMAT_RGBA32);
+    if (!padded)
+        return false;
+    /* The blit writes the interior; the gutter is filled from its edges. */
+    SDL_SetSurfaceBlendMode(surface, SDL_BLENDMODE_NONE);
+    destination.x = 1;
+    destination.y = 1;
+    destination.w = surface->w;
+    destination.h = surface->h;
+    if (!SDL_BlitSurface(surface, NULL, padded, &destination)) {
+        SDL_DestroySurface(padded);
+        return false;
     }
-    SDL_DestroySurface(surface);
-    return texture;
+    for (i = 1; i <= surface->h; i++) {
+        Uint8 *row = (Uint8 *)padded->pixels + (size_t)i * padded->pitch;
+        memcpy(row, row + 4, 4);
+        memcpy(row + (size_t)(width - 1) * 4,
+               row + (size_t)(width - 2) * 4, 4);
+    }
+    memcpy(padded->pixels, (Uint8 *)padded->pixels + padded->pitch,
+           (size_t)width * 4);
+    memcpy((Uint8 *)padded->pixels + (size_t)(height - 1) * padded->pitch,
+           (Uint8 *)padded->pixels + (size_t)(height - 2) * padded->pitch,
+           (size_t)width * 4);
+
+    for (i = 0; i < GLYPH_ATLAS_PAGES; i++) {
+        page = &glyphs->atlas[i];
+        if (!page->texture) {
+            chosen = i;
+            x = y = row_height = 0;
+            break;
+        }
+        x = page->x;
+        y = page->y;
+        row_height = page->row_height;
+        if (x + width > glyphs->atlas_size) {
+            x = 0;
+            y += row_height;
+            row_height = 0;
+        }
+        if (y + height <= glyphs->atlas_size) {
+            chosen = i;
+            break;
+        }
+    }
+    if (chosen < 0) {
+        chosen = 0;
+        for (i = 1; i < GLYPH_ATLAS_PAGES; i++)
+            if (glyphs->atlas[i].last_used < glyphs->atlas[chosen].last_used)
+                chosen = i;
+        page = &glyphs->atlas[chosen];
+        ++page->generation;
+        page->x = page->y = page->row_height = 0;
+        x = y = row_height = 0;
+    }
+    page = &glyphs->atlas[chosen];
+    if (!page->texture) {
+        page->texture = SDL_CreateTexture(glyphs->renderer,
+                                          SDL_PIXELFORMAT_RGBA32,
+                                          SDL_TEXTUREACCESS_STATIC,
+                                          glyphs->atlas_size,
+                                          glyphs->atlas_size);
+        if (!page->texture) {
+            SDL_DestroySurface(padded);
+            return false;
+        }
+        page->generation = 1;
+        SDL_SetTextureBlendMode(page->texture, SDL_BLENDMODE_BLEND);
+    }
+    upload.x = x;
+    upload.y = y;
+    upload.w = width;
+    upload.h = height;
+    if (!SDL_UpdateTexture(page->texture, &upload, padded->pixels,
+                           padded->pitch)) {
+        SDL_DestroySurface(padded);
+        return false;
+    }
+    SDL_DestroySurface(padded);
+    page->x = x + width;
+    page->y = y;
+    page->row_height = row_height > height ? row_height : height;
+    page->last_used = ++glyphs->atlas_clock;
+    glyph->source.x = (float)(x + 1);
+    glyph->source.y = (float)(y + 1);
+    glyph->source.w = (float)surface->w;
+    glyph->source.h = (float)surface->h;
+    glyph->page = (uint8_t)(chosen + 1);
+    glyph->generation = page->generation;
+    glyph->tried = true;
+    return true;
 }
 
 /* Standard OS fallback families for colour emoji, symbols and CJK. */
@@ -174,74 +258,81 @@ static TTF_Font *font_with_glyph(const Glyphs *glyphs, int slot,
     return NULL;
 }
 
-static Glyph *glyph_lookup_extra(Glyphs *glyphs, int slot, Uint32 codepoint)
+/* A color face is not necessarily named "emoji", and a single face can
+ * contain both monochrome and color glyphs. Query the actual glyph image on
+ * cache misses, including each member of a combining/emoji cluster. */
+static bool text_has_color_glyph(TTF_Font *font, const char *text, size_t length)
 {
-    uint32_t hash = (codepoint * 2654435761u) ^ ((uint32_t)slot * 40503u);
-    uint32_t mask = GLYPH_EXTRA_BUCKETS - 1;
-    uint32_t probe;
+    const char *cursor = text;
 
-    if (!glyphs->extra_cache)
-        return NULL;
+    while (length) {
+        Uint32 codepoint = SDL_StepUTF8(&cursor, &length);
+        TTF_ImageType type = TTF_IMAGE_INVALID;
+        SDL_Surface *image;
 
-    for (probe = 0; probe < GLYPH_EXTRA_BUCKETS; probe++) {
-        GlyphExtraEntry *entry = &glyphs->extra_cache[(hash + probe) & mask];
-
-        if (entry->codepoint == codepoint && entry->slot == (uint8_t)slot)
-            return entry->glyph.texture ? &entry->glyph : NULL;
-        if (entry->codepoint == 0) {
-            bool is_color = false;
-            TTF_Font *font = font_with_glyph(glyphs, slot, codepoint,
-                                             &is_color);
-            char utf8[8];
-            char *end;
-
-            entry->codepoint = codepoint;
-            entry->slot = (uint8_t)slot;
-            entry->glyph.tried = true;
-            entry->glyph.is_color = is_color;
-            if (!font)
-                return NULL;
-            end = SDL_UCS4ToUTF8(codepoint, utf8);
-            *end = '\0';
-            entry->glyph.texture = bake_texture(glyphs->renderer, font, utf8, 0,
-                                                &entry->glyph.width,
-                                                &entry->glyph.height);
-            return entry->glyph.texture ? &entry->glyph : NULL;
-        }
+        if (!codepoint)
+            break;
+        image = TTF_GetGlyphImage(font, codepoint, &type);
+        if (image)
+            SDL_DestroySurface(image);
+        if (type == TTF_IMAGE_COLOR)
+            return true;
     }
-    return NULL;
+    return false;
 }
 
-/* The cached texture for one codepoint (BMP or out-of-BMP), or NULL when no
- * face has it. */
 static Glyph *glyph_lookup(Glyphs *glyphs, int slot, Uint32 codepoint)
 {
-    TTF_Font *font;
-    Glyph *glyph;
-    bool is_color = false;
-    char utf8[8];
-    char *end;
+    uint32_t hash, mask, probe;
+    GlyphExtraEntry *entry;
 
-    if (codepoint >= GLYPH_MAX_CODEPOINT)
-        return glyph_lookup_extra(glyphs, slot, codepoint);
-    glyph = &glyphs->cache[(size_t)slot * GLYPH_MAX_CODEPOINT + codepoint];
-    if (glyph->tried)
-        return glyph->texture ? glyph : NULL;
-    glyph->tried = true;
+    if (codepoint < GLYPH_MAX_CODEPOINT)
+        return &glyphs->cache[(size_t)slot * GLYPH_MAX_CODEPOINT + codepoint];
 
-    font = font_with_glyph(glyphs, slot, codepoint, &is_color);
-    if (!font)
-        return NULL;
-    glyph->is_color = is_color;
-
-    end = SDL_UCS4ToUTF8(codepoint, utf8);
-    *end = '\0';
-    glyph->texture = bake_texture(glyphs->renderer, font, utf8, 0,
-                                  &glyph->width, &glyph->height);
-    return glyph->texture ? glyph : NULL;
+    hash = (codepoint * 2654435761u) ^ ((uint32_t)slot * 40503u);
+    mask = GLYPH_EXTRA_BUCKETS - 1;
+    for (probe = 0; probe < GLYPH_EXTRA_BUCKETS; probe++) {
+        entry = &glyphs->extra_cache[(hash + probe) & mask];
+        if (entry->codepoint == codepoint && entry->slot == (uint8_t)slot)
+            return &entry->glyph;
+        if (entry->codepoint == 0) {
+            entry->codepoint = codepoint;
+            entry->slot = (uint8_t)slot;
+            return &entry->glyph;
+        }
+    }
+    /* A full supplementary cache must not make new codepoints disappear. */
+    entry = &glyphs->extra_cache[hash & mask];
+    memset(entry, 0, sizeof *entry);
+    entry->codepoint = codepoint;
+    entry->slot = (uint8_t)slot;
+    return &entry->glyph;
 }
 
-static void draw_texture(Glyphs *glyphs, SDL_Texture *texture, float x, float y,
+static Glyph *cluster_lookup(Glyphs *glyphs, int slot, const char *text,
+                             size_t length, Glyph *temporary)
+{
+    uint32_t hash = 2166136261u ^ (uint32_t)slot;
+    size_t i;
+    GlyphClusterEntry *entry;
+
+    if (length > GLYPH_CLUSTER_BYTES)
+        return temporary;
+    for (i = 0; i < length; i++)
+        hash = (hash ^ (uint8_t)text[i]) * 16777619u;
+    entry = &glyphs->clusters[hash % GLYPH_CLUSTER_BUCKETS];
+    if (entry->length != length || entry->slot != (uint8_t)slot ||
+        memcmp(entry->text, text, length) != 0) {
+        memset(entry, 0, sizeof *entry);
+        memcpy(entry->text, text, length);
+        entry->length = length;
+        entry->slot = (uint8_t)slot;
+    }
+    return &entry->glyph;
+}
+
+static void draw_texture(Glyphs *glyphs, SDL_Texture *texture,
+                         const SDL_FRect *source, float x, float y,
                          float width, float height, SDL_Color color,
                          float scale, bool is_color)
 {
@@ -276,7 +367,7 @@ static void draw_texture(Glyphs *glyphs, SDL_Texture *texture, float x, float y,
         SDL_SetTextureColorMod(texture, color.r, color.g, color.b);
         SDL_SetTextureAlphaMod(texture, color.a);
     }
-    SDL_RenderTexture(glyphs->renderer, texture, NULL, &destination);
+    SDL_RenderTexture(glyphs->renderer, texture, source, &destination);
 }
 
 static TTF_Font *try_variant_suffixes(const char *base_path, float point_size,
@@ -374,12 +465,22 @@ bool glyphs_open_ex(Glyphs *glyphs, SDL_Renderer *renderer,
 
     memset(glyphs, 0, sizeof *glyphs);
     glyphs->renderer = renderer;
+    glyphs->atlas_size = GLYPH_ATLAS_SIZE;
+    {
+        Sint64 max_size = SDL_GetNumberProperty(
+            SDL_GetRendererProperties(renderer),
+            SDL_PROP_RENDERER_MAX_TEXTURE_SIZE_NUMBER, GLYPH_ATLAS_SIZE);
+        if (max_size > 0 && max_size < glyphs->atlas_size)
+            glyphs->atlas_size = (int)max_size;
+    }
 
     glyphs->cache = (Glyph *)calloc((size_t)GLYPH_STYLE_COUNT *
                                     GLYPH_MAX_CODEPOINT, sizeof(Glyph));
     glyphs->extra_cache = (GlyphExtraEntry *)calloc(GLYPH_EXTRA_BUCKETS,
                                                     sizeof(GlyphExtraEntry));
-    if (!glyphs->cache || !glyphs->extra_cache) {
+    glyphs->clusters = (GlyphClusterEntry *)calloc(GLYPH_CLUSTER_BUCKETS,
+                                                   sizeof(GlyphClusterEntry));
+    if (!glyphs->cache || !glyphs->extra_cache || !glyphs->clusters) {
         glyphs_close(glyphs);
         return false;
     }
@@ -471,30 +572,40 @@ bool glyphs_open(Glyphs *glyphs, SDL_Renderer *renderer, const char *font_path,
                           display_scale);
 }
 
+static void atlas_destroy(Glyphs *glyphs)
+{
+    int i;
+
+    for (i = 0; i < GLYPH_ATLAS_PAGES; i++) {
+        if (glyphs->atlas[i].texture)
+            SDL_DestroyTexture(glyphs->atlas[i].texture);
+    }
+    memset(glyphs->atlas, 0, sizeof glyphs->atlas);
+    glyphs->atlas_clock = 0;
+}
+
+void glyphs_reset(Glyphs *glyphs)
+{
+    atlas_destroy(glyphs);
+    if (glyphs->cache)
+        memset(glyphs->cache, 0, (size_t)GLYPH_STYLE_COUNT *
+               GLYPH_MAX_CODEPOINT * sizeof *glyphs->cache);
+    if (glyphs->extra_cache)
+        memset(glyphs->extra_cache, 0,
+               GLYPH_EXTRA_BUCKETS * sizeof *glyphs->extra_cache);
+    if (glyphs->clusters)
+        memset(glyphs->clusters, 0,
+               GLYPH_CLUSTER_BUCKETS * sizeof *glyphs->clusters);
+}
+
 void glyphs_close(Glyphs *glyphs)
 {
-    int slot;
     int i;
-    Uint32 codepoint;
 
-    if (glyphs->cache) {
-        for (slot = 0; slot < GLYPH_STYLE_COUNT; slot++) {
-            for (codepoint = 0; codepoint < GLYPH_MAX_CODEPOINT; codepoint++) {
-                Glyph *glyph = &glyphs->cache[(size_t)slot *
-                                              GLYPH_MAX_CODEPOINT + codepoint];
-                if (glyph->texture)
-                    SDL_DestroyTexture(glyph->texture);
-            }
-        }
-        free(glyphs->cache);
-    }
-    if (glyphs->extra_cache) {
-        for (i = 0; i < GLYPH_EXTRA_BUCKETS; i++) {
-            if (glyphs->extra_cache[i].glyph.texture)
-                SDL_DestroyTexture(glyphs->extra_cache[i].glyph.texture);
-        }
-        free(glyphs->extra_cache);
-    }
+    atlas_destroy(glyphs);
+    free(glyphs->cache);
+    free(glyphs->extra_cache);
+    free(glyphs->clusters);
     for (i = 0; i < glyphs->user_fallback_count; i++) {
         if (glyphs->user_fallbacks[i])
             TTF_CloseFont(glyphs->user_fallbacks[i]);
@@ -522,58 +633,82 @@ void glyphs_draw_text_scaled(Glyphs *glyphs, const char *text, size_t length,
                              float x, float y, bool bold, bool italic,
                              SDL_Color color, float scale)
 {
-    const char *cursor;
+    const char *cursor = text;
+    size_t remaining = length;
     Uint32 first_codepoint;
     int slot;
+    bool single, is_color = false;
+    Glyph temporary = {0};
     Glyph *glyph;
+    GlyphAtlasPage *page;
+    TTF_Font *font;
+    SDL_Surface *surface;
+    SDL_Texture *texture;
+    SDL_Color white = {255, 255, 255, 255};
 
+    if (!text || length == 0)
+        return;
     if (scale <= 0.0f)
         scale = 1.0f;
-    if (length == 0)
-        return;
-    cursor = text;
-    first_codepoint = SDL_StepUTF8(&cursor, NULL);
+    first_codepoint = SDL_StepUTF8(&cursor, &remaining);
     if (first_codepoint == 0)
         return;
-
+    single = remaining == 0;
     slot = style_slot(glyphs, bold, italic);
+    glyph = single ? glyph_lookup(glyphs, slot, first_codepoint) :
+                     cluster_lookup(glyphs, slot, text, length, &temporary);
 
-    if ((size_t)(cursor - text) == length) {
-        /* Single codepoint (BMP or out-of-BMP): served from the cache. */
-        glyph = glyph_lookup(glyphs, slot, first_codepoint);
-        if (!glyph)
-            return;
-        draw_texture(glyphs, glyph->texture, x, y, glyph->width, glyph->height,
-                     color, scale, glyph->is_color);
-        if (bold && !glyphs->bold && !glyph->is_color) {
-            /* No bold face: fake it with a second copy one pixel over. */
-            draw_texture(glyphs, glyph->texture, x + 1.0f, y, glyph->width,
-                         glyph->height, color, scale, false);
-        }
+    if (glyph->tried && glyph->page == 0)
+        return; /* No face has the base codepoint. */
+    if (glyph->page) {
+        page = &glyphs->atlas[glyph->page - 1];
+        if (page->texture && page->generation == glyph->generation)
+            goto draw_atlas;
+    }
+    glyph->page = 0;
+    glyph->tried = false;
+    font = font_with_glyph(glyphs, slot, first_codepoint, &is_color);
+    if (!font) {
+        glyph->tried = true;
         return;
     }
+    surface = TTF_RenderText_Blended(font, text, length, white);
+    if (!surface)
+        return;
+    if (!is_color)
+        is_color = text_has_color_glyph(font, text, length);
+    glyph->is_color = is_color;
+    if (atlas_store(glyphs, surface, glyph)) {
+        SDL_DestroySurface(surface);
+        page = &glyphs->atlas[glyph->page - 1];
+        goto draw_atlas;
+    }
 
-    /* A multi-codepoint grapheme cluster (base character plus combining
-     * marks, an emoji with a ZWJ, ...): render it, uncached, from whichever
-     * face has the base codepoint. */
-    {
-        bool is_color = false;
-        TTF_Font *font = font_with_glyph(glyphs, slot, first_codepoint,
-                                         &is_color);
-        SDL_Texture *texture;
-        float width = 0.0f;
-        float height = 0.0f;
-
-        if (!font)
-            return;
-        texture = bake_texture(glyphs->renderer, font, text, length,
-                               &width, &height);
-        if (!texture)
-            return;
-        draw_texture(glyphs, texture, x, y, width, height, color, scale,
-                     is_color);
+    /* A glyph can be larger than an atlas page, or an upload may fail.
+     * Draw it transiently and retry the atlas next time rather than dropping
+     * it or retaining an unbounded dedicated texture. */
+    texture = SDL_CreateTextureFromSurface(glyphs->renderer, surface);
+    if (texture) {
+        SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+        draw_texture(glyphs, texture, NULL, x, y, (float)surface->w,
+                     (float)surface->h, color, scale, is_color);
+        if (single && bold && !glyphs->bold && !is_color)
+            draw_texture(glyphs, texture, NULL, x + 1.0f, y,
+                         (float)surface->w, (float)surface->h, color, scale,
+                         false);
         SDL_DestroyTexture(texture);
     }
+    SDL_DestroySurface(surface);
+    return;
+
+draw_atlas:
+    page->last_used = ++glyphs->atlas_clock;
+    draw_texture(glyphs, page->texture, &glyph->source, x, y,
+                 glyph->source.w, glyph->source.h, color, scale,
+                 glyph->is_color);
+    if (single && bold && !glyphs->bold && !glyph->is_color)
+        draw_texture(glyphs, page->texture, &glyph->source, x + 1.0f, y,
+                     glyph->source.w, glyph->source.h, color, scale, false);
 }
 
 void glyphs_draw_text(Glyphs *glyphs, const char *text, size_t length,

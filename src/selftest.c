@@ -17,6 +17,7 @@
 #include "font_lookup.h"
 #include "git.h"
 #include "desktop_signal.h"
+#include "diagnostics.h"
 #include "hyperlink.h"
 #include "glyph.h"
 #include "input.h"
@@ -32,6 +33,7 @@
 
 int config_test(void);
 int search_selftest(void);
+int glyph_atlas_selftest(void);
 
 static int failure_count;
 
@@ -2036,6 +2038,48 @@ static void test_pty_writer_queue(void)
     check(code == 0, "async writer child exits with code 0");
     pty_close(pty);
 }
+
+/* A full ring must request another bounded drain; the last OSC title must
+ * arrive without waiting for the status-bar timer to wake the event loop. */
+static void test_session_pump_continuation(void)
+{
+    Session session;
+    char error[256] = "";
+    Uint64 deadline;
+    bool more = false, exited = false, resumed = false;
+
+    if (!session_init(&session, 80, 24, NULL, NULL)) {
+        check(false, "initialize session for output continuation");
+        return;
+    }
+    session.pty = pty_spawn(
+        L"powershell.exe -NoProfile -Command \""
+        L"[Console]::Write(('x' * 262144) + [char]27 + ']2;pump-suffix' + [char]7); "
+        L"Start-Sleep -Seconds 2\"", 80, 24, NULL, NULL, error, sizeof error);
+    if (!session.pty) {
+        check(false, "start output continuation child");
+        session_free(&session);
+        return;
+    }
+    deadline = SDL_GetTicks() + 10000;
+    while (pty_pending(session.pty) < 131072 && SDL_GetTicks() < deadline)
+        SDL_Delay(10);
+    (void)session_pump(&session, &exited, &more);
+    resumed = more;
+    while (SDL_GetTicks() < deadline &&
+           strcmp(session.term.title, "pump-suffix") != 0 && !exited) {
+        if (!more)
+            pty_wait(session.pty, 50);
+        (void)session_pump(&session, &exited, &more);
+    }
+    check(resumed && session.term.title_changed &&
+              strcmp(session.term.title, "pump-suffix") == 0,
+          "bounded PTY drains continue to the final output marker");
+    if (!resumed || strcmp(session.term.title, "pump-suffix") != 0)
+        printf("      continuation=%d title=[%s] exited=%d pending=%zu\n",
+               resumed, session.term.title, exited, pty_pending(session.pty));
+    session_free(&session);
+}
 #endif
 
 /* 2.2: tab keybindings, tab labels and multi-session lifecycle. */
@@ -2122,9 +2166,12 @@ int term_selftest(void)
     failure_count += desktop_signal_selftest();
     failure_count += hyperlink_selftest();
     failure_count += search_selftest();
+    failure_count += diagnostics_selftest();
+    failure_count += glyph_atlas_selftest();
 #ifdef _WIN32
     test_pty();
     test_pty_writer_queue();
+    test_session_pump_continuation();
     test_clipboard_write_conpty();
 #endif
 

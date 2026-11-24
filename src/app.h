@@ -56,6 +56,7 @@ typedef struct App {
     SDL_Renderer    *renderer;
     Glyphs           glyphs;
     Panel            panel;
+    struct RenderCache *render_cache; /* private to render.c               */
 
     Session         *sessions[APP_MAX_TABS];
     int              session_count;

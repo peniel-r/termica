@@ -1,0 +1,31 @@
+name: Feature request
+description: Propose an improvement to termica
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: Please search existing issues and the roadmap before proposing a feature.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What are you trying to accomplish, and what makes it difficult today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the user-visible result, including a concrete example if possible.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and workarounds
+      description: What have you tried, and why is it insufficient?
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Include relevant platform, screenshots or references; remove sensitive data.

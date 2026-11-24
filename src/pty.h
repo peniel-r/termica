@@ -79,6 +79,9 @@ bool pty_resize(Pty *pty, uint16_t columns, uint16_t rows);
  * 0 when nothing is buffered. Never blocks. */
 size_t pty_read(Pty *pty, void *buffer, size_t capacity);
 
+/* Number of bytes buffered for the owner thread; never blocks. */
+size_t pty_pending(Pty *pty);
+
 /* Send bytes (keys, pastes, encoded replies) to the program. Blocks while
  * the input pipe is full, which only happens if the program stopped
  * reading. False once the pipe is gone. */

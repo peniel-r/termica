@@ -17,7 +17,7 @@
  *   geometry.c  the squircle corner curve
  *   window.c    the SDL window and the Windows 11 chrome
  *
- * Usage:  termica [--selftest] [font path or family name] [point-size]
+ * Usage:  termica [--version|--selftest] [font path or family name] [point-size]
  *
  * Strict C99. Windows-only bits are behind #ifdef _WIN32.
  */
@@ -30,6 +30,7 @@
 #include "chrome.h"
 #include "clipboard.h"
 #include "desktop_signal.h"
+#include "diagnostics.h"
 #include "config_watch.h"
 #include "toast.h"
 #include "console.h"
@@ -132,6 +133,7 @@ void app_set_font_size(App *app, float point_size)
         return;
     glyphs_close(&app->glyphs);
     app->glyphs = next;
+    render_invalidate(app);
     app->current_point_size = point_size;
     fit_grid(app);
 }
@@ -150,6 +152,7 @@ static void handle_display_scale_changed(App *app)
     if (open_grid_font(app, &next_glyphs, app->current_point_size, new_scale)) {
         glyphs_close(&app->glyphs);
         app->glyphs = next_glyphs;
+        render_invalidate(app);
     }
     if (panel_init(&next_panel, app->renderer, new_scale)) {
         panel_free(&app->panel);
@@ -201,6 +204,7 @@ bool app_new_tab(App *app)
     app->sessions[app->session_count] = s;
     app->active_session = app->session_count;
     app->session_count++;
+    render_invalidate(app);
 
     /* Refit first if the tab strip just appeared, so the new shell spawns at
      * the exact post-strip grid dimensions. */
@@ -218,6 +222,7 @@ void app_close_tab(App *app, int index)
 
     if (index < 0 || index >= app->session_count)
         return;
+    render_invalidate(app);
     input_autoscroll_start(app, 0);
     session_free(app->sessions[index]);
     free(app->sessions[index]);
@@ -256,6 +261,7 @@ void app_switch_tab(App *app, int index)
         return;
     input_autoscroll_start(app, 0);
     app->active_session = index;
+    render_invalidate(app);
     app->sessions[index]->term.progress_changed = true;
     app->command_was_running = app->sessions[index]->term.command_running;
     refresh_git_for_active(app);
@@ -447,6 +453,7 @@ static void reload_files(App *app, unsigned changes, const char *font_override,
                 if (diff & SETTINGS_DIFF_FONT) {
                     glyphs_close(&app->glyphs);
                     app->glyphs = next_glyphs;
+                    render_invalidate(app);
                     app->base_point_size = next_size;
                     app->current_point_size = next_size;
                     reload_bar_font = true;
@@ -565,6 +572,19 @@ static void dispatch_event(App *app, const SDL_Event *event)
     case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
         handle_display_scale_changed(app);
         break;
+    case SDL_EVENT_RENDER_TARGETS_RESET:
+        render_invalidate(app);
+        app->needs_redraw = true;
+        break;
+    case SDL_EVENT_RENDER_DEVICE_RESET:
+        render_free(app);
+        glyphs_reset(&app->glyphs);
+        glyphs_reset(&app->statusbar_glyphs);
+        panel_free(&app->panel);
+        if (!panel_init(&app->panel, app->renderer, app->display_scale))
+            fprintf(stderr, "panel reset: %s\n", SDL_GetError());
+        app->needs_redraw = true;
+        break;
     default:
         break;
     }
@@ -599,6 +619,7 @@ static void sync_session_and_git(App *app)
 {
     Session *active;
     GitStatus result;
+    bool more_output = false;
     int i;
 
     /* Drain every session's output so background tabs never stall their pty
@@ -606,9 +627,11 @@ static void sync_session_and_git(App *app)
     for (i = 0; i < app->session_count; ) {
         Session *s = app->sessions[i];
         bool exited_now = false;
+        bool more = false;
 
-        if (session_pump(s, &exited_now) && i == app->active_session)
+        if (session_pump(s, &exited_now, &more) && i == app->active_session)
             app->needs_redraw = true;
+        more_output = more_output || more;
         {
             TermNotification notification;
             while (term_take_notification(&s->term, &notification)) {
@@ -633,6 +656,16 @@ static void sync_session_and_git(App *app)
             continue;
         }
         i++;
+    }
+    /* A budget-limited drain leaves the PTY wake coalesced until its ring
+     * empties. Queue one further turn instead of waiting for a timer; input
+     * and rendering still run between bounded batches. */
+    if (more_output) {
+        SDL_Event event;
+        SDL_zero(event);
+        event.type = SDL_EVENT_USER;
+        event.user.code = APP_EVENT_PTY;
+        SDL_PushEvent(&event);
     }
 
     active = app_active_session(app);
@@ -701,13 +734,26 @@ int main(int argc, char **argv)
     float point_size = 0.0f;   /* 0 means "whatever the settings say" */
     int exit_code = 1;
     int index;
+    int diagnostic_test;
+    const char *diagnostics_option;
 
     /* The executable is a GUI one, so a console only exists when something
      * launched us from one. Claim it before anything is printed. */
     console_reclaim();
+    diagnostic_test = diagnostics_test_dispatch(argc, argv);
+    if (diagnostic_test >= 0)
+        return diagnostic_test;
+    if (argc > 1 && strcmp(argv[1], "--version") == 0) {
+        printf("%s\n", diagnostics_version());
+        return 0;
+    }
 
     if (argc > 1 && strcmp(argv[1], "--selftest") == 0)
         return term_selftest() == 0 ? 0 : 1;
+
+    diagnostics_option = getenv("TERMICA_DIAGNOSTICS");
+    if (!diagnostics_init(!diagnostics_option || strcmp(diagnostics_option, "0") != 0))
+        fprintf(stderr, "Could not initialize crash diagnostics\n");
 
     memset(&app, 0, sizeof app);
     app.running = true;
@@ -748,16 +794,19 @@ int main(int argc, char **argv)
     if (!font_path && !embedded_font_available()) {
         fprintf(stderr, "usage: %s [--selftest] "
                 "[font-face-or-path] [point-size]\n", argv[0]);
-        return 1;
+        diagnostics_log("startup.font_missing", 0);
+        goto cleanup;
     }
     font_label = font_path ? font_path : BUILT_IN_FONT;
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
+        diagnostics_log("startup.sdl_failed", 0);
         goto cleanup;
     }
     if (!TTF_Init()) {
         fprintf(stderr, "TTF_Init: %s\n", SDL_GetError());
+        diagnostics_log("startup.ttf_failed", 0);
         goto cleanup;
     }
     desktop_signal_init();
@@ -766,6 +815,7 @@ int main(int argc, char **argv)
                                app.title_bar);
     if (!app.window) {
         fprintf(stderr, "window_create: %s\n", SDL_GetError());
+        diagnostics_log("startup.window_failed", 0);
         goto cleanup;
     }
     SDL_StartTextInput(app.window);  /* deliver SDL_EVENT_TEXT_INPUT */
@@ -773,6 +823,7 @@ int main(int argc, char **argv)
     app.renderer = SDL_CreateRenderer(app.window, NULL);
     if (!app.renderer) {
         fprintf(stderr, "SDL_CreateRenderer: %s\n", SDL_GetError());
+        diagnostics_log("startup.renderer_failed", 0);
         goto cleanup;
     }
     printf("renderer: %s\n", SDL_GetRendererName(app.renderer));
@@ -788,6 +839,7 @@ int main(int argc, char **argv)
 
     if (!open_grid_font(&app, &app.glyphs, point_size, app.display_scale)) {
         fprintf(stderr, "font: %s: %s\n", font_label, SDL_GetError());
+        diagnostics_log("startup.font_failed", 0);
         goto cleanup;
     }
     if (app.glyphs.built_in)
@@ -800,6 +852,7 @@ int main(int argc, char **argv)
 
     if (!panel_init(&app.panel, app.renderer, app.display_scale)) {
         fprintf(stderr, "panel_init: %s\n", SDL_GetError());
+        diagnostics_log("startup.panel_failed", 0);
         goto cleanup;
     }
 
@@ -873,6 +926,7 @@ cleanup:
         app.sessions[index] = NULL;
     }
     app.session_count = 0;
+    render_free(&app);
     panel_free(&app.panel);
     glyphs_close(&app.glyphs);
     glyphs_close(&app.statusbar_glyphs);
@@ -882,5 +936,7 @@ cleanup:
         SDL_DestroyWindow(app.window);
     TTF_Quit();
     SDL_Quit();
+    diagnostics_log("exit", (unsigned long)exit_code);
+    diagnostics_shutdown();
     return exit_code;
 }

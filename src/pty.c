@@ -1047,6 +1047,17 @@ size_t pty_read(Pty *pty, void *buffer, size_t capacity)
     return taken;
 }
 
+size_t pty_pending(Pty *pty)
+{
+    size_t pending;
+    if (!pty)
+        return 0;
+    EnterCriticalSection(&pty->lock);
+    pending = pty->ring_length;
+    LeaveCriticalSection(&pty->lock);
+    return pending;
+}
+
 bool pty_write(Pty *pty, const void *data, size_t length)
 {
     bool ok;
@@ -1262,6 +1273,12 @@ size_t pty_read(Pty *pty, void *buffer, size_t capacity)
     (void)pty;
     (void)buffer;
     (void)capacity;
+    return 0;
+}
+
+size_t pty_pending(Pty *pty)
+{
+    (void)pty;
     return 0;
 }
 
