@@ -9,6 +9,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* The program rang the bell (BEL, 0x07). Callbacks must not mutate the
+ * terminal or touch UI; record the flag for the main loop. */
+static void on_bell(GhosttyTerminal terminal, void *userdata)
+{
+    Term *term = (Term *)userdata;
+
+    (void)terminal;
+    if (term)
+        term->bell_rang = true;
+}
+
 /* The program asked for a new window title (OSC 0 or OSC 2). The title
  * itself is read back from the terminal; the callback only says it
  * changed. */
@@ -329,6 +340,8 @@ bool term_init(Term *term, uint16_t columns, uint16_t rows)
     /* The only effect we act on so far is the window title; replies go
      * through the writer, which the app points at the pty. */
     ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_USERDATA, term);
+    ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_BELL,
+                         (const void *)on_bell);
     ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_TITLE_CHANGED,
                          (const void *)on_title_changed);
     ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_PWD_CHANGED,
@@ -365,6 +378,47 @@ void term_free(Term *term)
     ghostty_render_state_free(term->render_state);
     ghostty_terminal_free(term->handle);
     memset(term, 0, sizeof *term);
+}
+
+void term_set_colors(Term *term, const ColorScheme *scheme)
+{
+    GhosttyColorRgb palette[256];
+    GhosttyColorRgb fg;
+    GhosttyColorRgb bg;
+    GhosttyColorRgb cursor;
+    int i;
+
+    if (!term || !term->handle || !scheme)
+        return;
+
+    fg.r = scheme->foreground.r;
+    fg.g = scheme->foreground.g;
+    fg.b = scheme->foreground.b;
+    bg.r = scheme->background.r;
+    bg.g = scheme->background.g;
+    bg.b = scheme->background.b;
+    cursor.r = scheme->cursor.r;
+    cursor.g = scheme->cursor.g;
+    cursor.b = scheme->cursor.b;
+
+    ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND,
+                         &fg);
+    ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND,
+                         &bg);
+    ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_COLOR_CURSOR,
+                         &cursor);
+
+    if (ghostty_terminal_get(term->handle,
+                             GHOSTTY_TERMINAL_DATA_COLOR_PALETTE_DEFAULT,
+                             palette) == GHOSTTY_SUCCESS) {
+        for (i = 0; i < 16; i++) {
+            palette[i].r = scheme->palette[i].r;
+            palette[i].g = scheme->palette[i].g;
+            palette[i].b = scheme->palette[i].b;
+        }
+        ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_COLOR_PALETTE,
+                             &palette);
+    }
 }
 
 void term_write(Term *term, const void *data, size_t length)

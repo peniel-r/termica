@@ -35,15 +35,27 @@
 #define GLYPH_STYLE_BOLD_ITALIC  3
 #define GLYPH_STYLE_COUNT        4
 
-/* The cache covers the Basic Multilingual Plane. */
+/* The direct-indexed cache covers the Basic Multilingual Plane; codepoints
+ * above U+FFFF (emoji, Material Design Nerd icons, CJK Ext B) live in a
+ * secondary hash table so they are cached too. */
 #define GLYPH_MAX_CODEPOINT      0x10000
+#define GLYPH_EXTRA_BUCKETS      2048
+#define GLYPH_MAX_USER_FALLBACKS 8
+#define GLYPH_MAX_SYS_FALLBACKS  6
 
 typedef struct Glyph {
     SDL_Texture *texture;
     float width;
     float height;
     bool tried;
+    bool is_color;          /* colour emoji: draw untinted (white mod) */
 } Glyph;
+
+typedef struct GlyphExtraEntry {
+    uint32_t codepoint;     /* 0 = empty bucket */
+    uint8_t  slot;
+    Glyph    glyph;
+} GlyphExtraEntry;
 
 typedef struct Glyphs {
     SDL_Renderer *renderer;
@@ -57,8 +69,17 @@ typedef struct Glyphs {
      * built-in family is the main font. */
     TTF_Font *fallback;
 
-    /* Symbols Nerd Font Mono, compiled in, as the last resort for symbols -
-     * especially codepoints above U+FFFF, which the cache does not cover. */
+    /* User-configured fallback chain from [font] fallback = [...]. */
+    TTF_Font *user_fallbacks[GLYPH_MAX_USER_FALLBACKS];
+    bool      user_fallback_color[GLYPH_MAX_USER_FALLBACKS];
+    int       user_fallback_count;
+
+    /* System CJK and colour-emoji fallback fonts discovered on the OS. */
+    TTF_Font *sys_fallbacks[GLYPH_MAX_SYS_FALLBACKS];
+    bool      sys_fallback_color[GLYPH_MAX_SYS_FALLBACKS];
+    int       sys_fallback_count;
+
+    /* Symbols Nerd Font Mono, compiled in, as the last resort for symbols. */
     TTF_Font *symbol_fallback;
 
     /* True when the main family is the font compiled into the executable
@@ -69,15 +90,27 @@ typedef struct Glyphs {
      * is several megabytes. */
     Glyph *cache;
 
+    /* Open-addressed cache for codepoints >= GLYPH_MAX_CODEPOINT. */
+    GlyphExtraEntry *extra_cache;
+
     /* One cell of the grid, from the font metrics. */
     int cell_width;
     int cell_height;
 } Glyphs;
 
-/* Load the font and its optional faces. `font_path` may be NULL to use the
- * built-in family; a path that cannot be opened falls back to it too.
- * `point_size` is in points and is scaled by `display_scale`. False on
- * failure (with SDL's error set). */
+/* Resolve user fallback names + OS CJK/emoji fallbacks into file paths.
+ * Exposed for the self test. Returns the number of resolved paths written. */
+int glyphs_resolve_fallback_paths(const char *const *user_fallbacks,
+                                  int user_count, char out[][256],
+                                  int max_out);
+
+/* Load the font, its optional faces, and the fallback chain. */
+bool glyphs_open_ex(Glyphs *glyphs, SDL_Renderer *renderer,
+                    const char *font_path,
+                    const char *const *user_fallbacks, int user_fallback_count,
+                    float point_size, float display_scale);
+
+/* Load the font and its optional faces (with OS/built-in fallbacks only). */
 bool glyphs_open(Glyphs *glyphs, SDL_Renderer *renderer, const char *font_path,
                  float point_size, float display_scale);
 

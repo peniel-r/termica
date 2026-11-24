@@ -17,8 +17,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "colors.h"
 #include "keys.h"
 
+#define SETTINGS_MAX_FALLBACKS     8
 #define SETTINGS_MAX_ARGS          16
 #define SETTINGS_ARG_MAX           256
 #define SETTINGS_MAX_ENV           32
@@ -51,6 +53,13 @@ typedef enum {
     SETTINGS_OSC52_DENY
 } SettingsOsc52;
 
+/* What to do when the terminal receives BEL (0x07). */
+typedef enum {
+    SETTINGS_BELL_VISUAL = 0,
+    SETTINGS_BELL_TASKBAR,
+    SETTINGS_BELL_NONE
+} SettingsBell;
+
 /* How much frame the window draws around the terminal. */
 typedef enum {
     SETTINGS_DECORATION_ROUNDED = 0,  /* the custom rounded panel  */
@@ -62,6 +71,8 @@ typedef enum {
 typedef struct Settings {
     char font[512];        /* empty = the built-in Maple Mono NF     */
     float point_size;      /* default 11                             */
+    char font_fallback[SETTINGS_MAX_FALLBACKS][256];
+    int  font_fallback_count;
     float panel_opacity;   /* default 1.0, 0..1                      */
     int backdrop;          /* WindowBackdrop value, default mica     */
     int decoration;        /* SettingsDecoration, default native     */
@@ -69,6 +80,10 @@ typedef struct Settings {
     bool copy_on_select;   /* default false                          */
     SettingsShell shell;   /* default auto                           */
     SettingsOsc52 osc52;   /* default ask                            */
+    SettingsBell bell;     /* default visual                         */
+
+    /* Colour scheme (PLAN 1.6). */
+    ColorScheme colors;
 
     /* Custom shell profile (PLAN 1.1). When command_argc > 0 it wins over
      * `shell`. `cwd` overrides the inherited working directory when non-empty.

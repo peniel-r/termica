@@ -260,6 +260,22 @@ static void apply_region(SDL_Window *window, int corner_radius)
     region_width = width;
     region_height = height;
 }
+
+void window_flash_taskbar(SDL_Window *window)
+{
+    HWND hwnd = window_handle(window);
+    FLASHWINFO info;
+
+    if (!hwnd)
+        return;
+    ZeroMemory(&info, sizeof info);
+    info.cbSize = sizeof info;
+    info.hwnd = hwnd;
+    info.dwFlags = FLASHW_TRAY | FLASHW_TIMERNOFG;
+    info.uCount = 3;
+    info.dwTimeout = 0;
+    FlashWindowEx(&info);
+}
 #else
 static void apply_dark_frame(SDL_Window *window) { (void)window; }
 static bool apply_backdrop(SDL_Window *window, WindowBackdrop backdrop,
@@ -273,6 +289,10 @@ static void apply_region(SDL_Window *window, int corner_radius)
 {
     (void)window;
     (void)corner_radius;
+}
+void window_flash_taskbar(SDL_Window *window)
+{
+    (void)window;
 }
 #endif
 

@@ -19,6 +19,8 @@
 
 #include <ghostty/vt.h>
 
+#include "colors.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -97,7 +99,14 @@ struct Term {
     int32_t  last_exit_code;
     uint64_t last_command_ms;
     uint64_t command_started_at;
+
+    /* Set by the BEL (0x07) callback; cleared by the main loop. */
+    bool     bell_rang;
 };
+
+/* Apply a colour scheme (foreground, background, cursor and 16-colour
+ * palette) to the terminal through libghostty's palette API. */
+void term_set_colors(Term *term, const ColorScheme *scheme);
 
 /* Install the sink for term_write replies (usually pty_write). */
 void term_set_writer(Term *term, TermWriteFn writer, void *userdata);

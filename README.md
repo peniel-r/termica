@@ -149,6 +149,7 @@ startup. Command-line arguments override it for that run.
 [font]
 face = ""              # "" = built-in Maple Mono NF, a .ttf path, or an installed family name
 size = 11.0            # > 0, <= 200
+# fallback = ["Segoe UI Emoji", "Yu Gothic"]
 
 [window]
 opacity = 1.0          # 0..1
@@ -159,7 +160,21 @@ title_bar = true       # drawn title bar (ignored with "native")
 [terminal]
 copy_on_select = false
 shell = "auto"         # auto | pwsh | powershell | cmd
+# command = ["wsl.exe", "-d", "Ubuntu"]
+# cwd = 'C:\work'
 osc52 = "ask"          # ask | allow | deny
+bell = "visual"        # visual | taskbar | none
+
+# [terminal.env]
+# EDITOR = "nvim"
+
+# [colors]
+# scheme = "dark"      # dark | light (individual keys override the preset)
+# foreground = "#d8dee9"
+# background = "#0e1216"
+
+# [keys]
+# "Ctrl+V" = "paste"
 ```
 
 - **Types are strict.** `size = "16"` is rejected, not converted. An invalid

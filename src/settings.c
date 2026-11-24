@@ -76,6 +76,8 @@ void settings_default(Settings *settings)
     settings->copy_on_select = false;
     settings->shell = SETTINGS_SHELL_AUTO;
     settings->osc52 = SETTINGS_OSC52_ASK;
+    settings->bell = SETTINGS_BELL_VISUAL;
+    colors_preset(&settings->colors, "dark");
     keys_default(&settings->keys);
 }
 
@@ -150,6 +152,36 @@ static bool apply_font(Settings *settings, toml_datum_t table)
             if (number_value(value, &number) && isfinite(number) &&
                 number > 0.0 && number <= 200.0) {
                 settings->point_size = (float)number;
+                changed = true;
+            }
+        } else if (key_is(key, "fallback") && value.type == TOML_ARRAY) {
+            char parsed[SETTINGS_MAX_FALLBACKS][256];
+            int count = value.u.arr.size;
+            bool ok = count >= 0 && count <= SETTINGS_MAX_FALLBACKS;
+            int i;
+
+            for (i = 0; ok && i < count; i++) {
+                toml_datum_t elem = value.u.arr.elem[i];
+                int length;
+
+                if (elem.type != TOML_STRING) {
+                    ok = false;
+                    break;
+                }
+                length = elem.u.str.len;
+                if (length <= 0 || (size_t)length >= sizeof parsed[0] ||
+                    memchr(elem.u.str.ptr, '\0', (size_t)length)) {
+                    ok = false;
+                    break;
+                }
+                memcpy(parsed[i], elem.u.str.ptr, (size_t)length);
+                parsed[i][length] = '\0';
+            }
+            if (ok) {
+                for (i = 0; i < count; i++)
+                    memcpy(settings->font_fallback[i], parsed[i],
+                           sizeof parsed[0]);
+                settings->font_fallback_count = count;
                 changed = true;
             }
         }
@@ -323,6 +355,17 @@ static bool apply_terminal(Settings *settings, toml_datum_t table)
                 settings->osc52 = SETTINGS_OSC52_DENY;
                 changed = true;
             }
+        } else if (key_is(key, "bell") && value.type == TOML_STRING) {
+            if (strcmp(value.u.s, "visual") == 0) {
+                settings->bell = SETTINGS_BELL_VISUAL;
+                changed = true;
+            } else if (strcmp(value.u.s, "taskbar") == 0) {
+                settings->bell = SETTINGS_BELL_TASKBAR;
+                changed = true;
+            } else if (strcmp(value.u.s, "none") == 0) {
+                settings->bell = SETTINGS_BELL_NONE;
+                changed = true;
+            }
         } else if (key_is(key, "command")) {
             if (apply_terminal_command(settings, value))
                 changed = true;
@@ -398,6 +441,102 @@ static bool apply_keys(Settings *settings, toml_datum_t table)
     return changed;
 }
 
+static const char *const PALETTE_KEY_NAMES[16] = {
+    "black", "red", "green", "yellow",
+    "blue", "magenta", "cyan", "white",
+    "bright_black", "bright_red", "bright_green", "bright_yellow",
+    "bright_blue", "bright_magenta", "bright_cyan", "bright_white"
+};
+
+static bool apply_colors(Settings *settings, toml_datum_t table)
+{
+    bool changed = false;
+    int index;
+
+    if (table.type != TOML_TABLE)
+        return false;
+
+    /* Pass 1: apply `scheme` preset first so individual keys can override it. */
+    for (index = 0; index < table.u.tab.size; index++) {
+        const char *key = table.u.tab.key[index];
+        toml_datum_t value = table.u.tab.value[index];
+
+        if (key_is(key, "scheme") && value.type == TOML_STRING) {
+            if (colors_preset(&settings->colors, value.u.s)) {
+                settings->colors.custom = true;
+                changed = true;
+            }
+        }
+    }
+
+    /* Pass 2: individual colours and palette array. */
+    for (index = 0; index < table.u.tab.size; index++) {
+        const char *key = table.u.tab.key[index];
+        toml_datum_t value = table.u.tab.value[index];
+        ColorRgb rgb;
+
+        if (key_is(key, "scheme"))
+            continue;
+        if (key_is(key, "palette") && value.type == TOML_ARRAY) {
+            int count = value.u.arr.size;
+            int i;
+
+            if (count > 16)
+                count = 16;
+            for (i = 0; i < count; i++) {
+                toml_datum_t elem = value.u.arr.elem[i];
+
+                if (elem.type == TOML_STRING &&
+                    colors_parse_hex(elem.u.s, &rgb)) {
+                    settings->colors.palette[i] = rgb;
+                    settings->colors.custom = true;
+                    changed = true;
+                }
+            }
+            continue;
+        }
+        if (value.type != TOML_STRING || !colors_parse_hex(value.u.s, &rgb))
+            continue;
+        if (key_is(key, "foreground")) {
+            settings->colors.foreground = rgb;
+            settings->colors.custom = true;
+            changed = true;
+        } else if (key_is(key, "background")) {
+            settings->colors.background = rgb;
+            settings->colors.custom = true;
+            changed = true;
+        } else if (key_is(key, "cursor")) {
+            settings->colors.cursor = rgb;
+            settings->colors.custom = true;
+            changed = true;
+        } else if (key_is(key, "selection_foreground") ||
+                   key_is(key, "selection_fg")) {
+            settings->colors.selection_fg = rgb;
+            settings->colors.has_selection_fg = true;
+            settings->colors.custom = true;
+            changed = true;
+        } else if (key_is(key, "selection_background") ||
+                   key_is(key, "selection_bg")) {
+            settings->colors.selection_bg = rgb;
+            settings->colors.has_selection_bg = true;
+            settings->colors.custom = true;
+            changed = true;
+        } else {
+            int p;
+
+            for (p = 0; p < 16; p++) {
+                if (key_is(key, PALETTE_KEY_NAMES[p])) {
+                    settings->colors.palette[p] = rgb;
+                    settings->colors.custom = true;
+                    changed = true;
+                    break;
+                }
+            }
+        }
+    }
+    return changed;
+}
+
 static bool apply_table(Settings *settings, const char *name,
                         toml_datum_t table)
 {
@@ -409,6 +548,8 @@ static bool apply_table(Settings *settings, const char *name,
         return apply_window(settings, table);
     if (key_is(name, "terminal"))
         return apply_terminal(settings, table);
+    if (key_is(name, "colors"))
+        return apply_colors(settings, table);
     if (key_is(name, "keys"))
         return apply_keys(settings, table);
     return false;
@@ -519,6 +660,7 @@ void settings_format(const Settings *settings, char *out, size_t capacity)
 {
     const char *shell = "auto";
     const char *osc52 = "ask";
+    const char *bell = "visual";
     const char *backdrop = "panel";
     const char *decoration = "rounded";
     char font[3072];
@@ -540,6 +682,11 @@ void settings_format(const Settings *settings, char *out, size_t capacity)
     switch (settings->osc52) {
     case SETTINGS_OSC52_ALLOW: osc52 = "allow"; break;
     case SETTINGS_OSC52_DENY: osc52 = "deny"; break;
+    default: break;
+    }
+    switch (settings->bell) {
+    case SETTINGS_BELL_TASKBAR: bell = "taskbar"; break;
+    case SETTINGS_BELL_NONE: bell = "none"; break;
     default: break;
     }
     switch (settings->backdrop) {
@@ -567,22 +714,48 @@ void settings_format(const Settings *settings, char *out, size_t capacity)
              "\n"
              "[font]\n"
              "face = \"%s\"\n"
-             "size = %s\n"
-             "\n"
-             "[window]\n"
-             "opacity = %s\n"
-             "backdrop = \"%s\"\n"
-             "decoration = \"%s\"\n"
-             "title_bar = %s\n"
-             "\n"
-             "[terminal]\n"
-             "copy_on_select = %s\n"
-             "shell = \"%s\"\n"
-             "osc52 = \"%s\"\n",
-             font, size, opacity, backdrop, decoration,
-             settings->title_bar ? "true" : "false",
-             settings->copy_on_select ? "true" : "false", shell, osc52);
+             "size = %s\n",
+             font, size);
     used = strlen(out);
+
+    if (settings->font_fallback_count > 0) {
+        append_piece(out, capacity, &used, "fallback = [", 12);
+        for (index = 0; index < settings->font_fallback_count; index++) {
+            char escaped[512];
+
+            if (index > 0)
+                append_piece(out, capacity, &used, ", ", 2);
+            escape_toml_string(settings->font_fallback[index], escaped,
+                               sizeof escaped);
+            append_piece(out, capacity, &used, "\"", 1);
+            append_piece(out, capacity, &used, escaped, strlen(escaped));
+            append_piece(out, capacity, &used, "\"", 1);
+        }
+        append_piece(out, capacity, &used, "]\n", 2);
+    }
+
+    {
+        char middle[1024];
+
+        snprintf(middle, sizeof middle,
+                 "\n"
+                 "[window]\n"
+                 "opacity = %s\n"
+                 "backdrop = \"%s\"\n"
+                 "decoration = \"%s\"\n"
+                 "title_bar = %s\n"
+                 "\n"
+                 "[terminal]\n"
+                 "copy_on_select = %s\n"
+                 "shell = \"%s\"\n"
+                 "osc52 = \"%s\"\n"
+                 "bell = \"%s\"\n",
+                 opacity, backdrop, decoration,
+                 settings->title_bar ? "true" : "false",
+                 settings->copy_on_select ? "true" : "false",
+                 shell, osc52, bell);
+        append_piece(out, capacity, &used, middle, strlen(middle));
+    }
 
     if (settings->command_argc > 0) {
         append_piece(out, capacity, &used, "command = [", 11);
@@ -627,6 +800,47 @@ void settings_format(const Settings *settings, char *out, size_t capacity)
                          strlen(escaped_val));
             append_piece(out, capacity, &used, "\"\n", 2);
         }
+    }
+
+    if (settings->colors.custom) {
+        char hex[16];
+        char line[128];
+
+        append_piece(out, capacity, &used, "\n[colors]\n", 10);
+        if (settings->colors.scheme_name[0]) {
+            snprintf(line, sizeof line, "scheme = \"%s\"\n",
+                     settings->colors.scheme_name);
+            append_piece(out, capacity, &used, line, strlen(line));
+        }
+        colors_format_hex(settings->colors.foreground, hex, sizeof hex);
+        snprintf(line, sizeof line, "foreground = \"%s\"\n", hex);
+        append_piece(out, capacity, &used, line, strlen(line));
+        colors_format_hex(settings->colors.background, hex, sizeof hex);
+        snprintf(line, sizeof line, "background = \"%s\"\n", hex);
+        append_piece(out, capacity, &used, line, strlen(line));
+        colors_format_hex(settings->colors.cursor, hex, sizeof hex);
+        snprintf(line, sizeof line, "cursor = \"%s\"\n", hex);
+        append_piece(out, capacity, &used, line, strlen(line));
+        if (settings->colors.has_selection_fg) {
+            colors_format_hex(settings->colors.selection_fg, hex, sizeof hex);
+            snprintf(line, sizeof line, "selection_foreground = \"%s\"\n", hex);
+            append_piece(out, capacity, &used, line, strlen(line));
+        }
+        if (settings->colors.has_selection_bg) {
+            colors_format_hex(settings->colors.selection_bg, hex, sizeof hex);
+            snprintf(line, sizeof line, "selection_background = \"%s\"\n", hex);
+            append_piece(out, capacity, &used, line, strlen(line));
+        }
+        append_piece(out, capacity, &used, "palette = [", 11);
+        for (index = 0; index < 16; index++) {
+            if (index > 0)
+                append_piece(out, capacity, &used, ", ", 2);
+            colors_format_hex(settings->colors.palette[index], hex, sizeof hex);
+            append_piece(out, capacity, &used, "\"", 1);
+            append_piece(out, capacity, &used, hex, strlen(hex));
+            append_piece(out, capacity, &used, "\"", 1);
+        }
+        append_piece(out, capacity, &used, "]\n", 2);
     }
 
     if (settings->key_override_count > 0) {

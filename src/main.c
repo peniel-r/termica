@@ -91,9 +91,23 @@ static void fit_grid(App *app)
 
 static void open_statusbar_font(App *app, const char *grid_font_path);
 
-void app_set_font_size(App *app, float point_size)
+static bool open_grid_font(App *app, Glyphs *out, float point_size,
+                           float scale)
 {
     const char *path = app->font_path[0] ? app->font_path : NULL;
+    const char *fallbacks[SETTINGS_MAX_FALLBACKS];
+    int i;
+
+    for (i = 0; i < app->settings.font_fallback_count; i++)
+        fallbacks[i] = app->settings.font_fallback[i];
+    return glyphs_open_ex(out, app->renderer, path,
+                          app->settings.font_fallback_count > 0 ? fallbacks
+                                                                : NULL,
+                          app->settings.font_fallback_count, point_size, scale);
+}
+
+void app_set_font_size(App *app, float point_size)
+{
     Glyphs next;
 
     if (point_size < 4.0f)
@@ -103,8 +117,7 @@ void app_set_font_size(App *app, float point_size)
     if (fabsf(point_size - app->current_point_size) < 0.01f)
         return;
 
-    if (!glyphs_open(&next, app->renderer, path, point_size,
-                     app->display_scale))
+    if (!open_grid_font(app, &next, point_size, app->display_scale))
         return;
     glyphs_close(&app->glyphs);
     app->glyphs = next;
@@ -123,8 +136,7 @@ static void handle_display_scale_changed(App *app)
         return;
 
     app->display_scale = new_scale;
-    if (glyphs_open(&next_glyphs, app->renderer, path,
-                    app->current_point_size, new_scale)) {
+    if (open_grid_font(app, &next_glyphs, app->current_point_size, new_scale)) {
         glyphs_close(&app->glyphs);
         app->glyphs = next_glyphs;
     }
@@ -345,6 +357,19 @@ static void sync_session_and_git(App *app)
     if (exited_now)
         app->running = false;
 
+    /* Handle BEL (0x07) according to [terminal] bell. */
+    if (s->term.bell_rang) {
+        s->term.bell_rang = false;
+        if (app->settings.bell == SETTINGS_BELL_VISUAL) {
+            app->bell_flash_until_ms = SDL_GetTicks() + 120;
+            app->needs_redraw = true;
+        } else if (app->settings.bell == SETTINGS_BELL_TASKBAR &&
+                   (SDL_GetWindowFlags(app->window) &
+                    SDL_WINDOW_INPUT_FOCUS) == 0) {
+            window_flash_taskbar(app->window);
+        }
+    }
+
     /* Consume the program's OSC title change, but keep the title bar
      * showing the app name rather than the shell-provided title. */
     if (s->term.title_changed) {
@@ -471,8 +496,7 @@ int main(int argc, char **argv)
     if (font_path)
         snprintf(app.font_path, sizeof app.font_path, "%s", font_path);
 
-    if (!glyphs_open(&app.glyphs, app.renderer, font_path, point_size,
-                     app.display_scale)) {
+    if (!open_grid_font(&app, &app.glyphs, point_size, app.display_scale)) {
         fprintf(stderr, "font: %s: %s\n", font_label, SDL_GetError());
         goto cleanup;
     }
@@ -497,6 +521,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "libghostty-vt setup failed\n");
         goto cleanup;
     }
+    term_set_colors(&app.session.term, &app.settings.colors);
 
     /* Keep the material that is really in effect: Mica may be unavailable
      * on an older Windows, and the window falls back to the panel. */

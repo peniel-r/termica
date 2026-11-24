@@ -52,6 +52,7 @@ struct Pty {
     HANDLE process;
     HANDLE job;
     HANDLE reader;
+    HANDLE writer;
 
     CRITICAL_SECTION   lock;
     CONDITION_VARIABLE has_space;   /* reader waits for room              */
@@ -62,6 +63,16 @@ struct Pty {
     size_t   ring_capacity;
     size_t   ring_head;
     size_t   ring_length;
+
+    CRITICAL_SECTION   wlock;
+    CONDITION_VARIABLE wcond;       /* writer waits for queued bytes      */
+    bool               wlock_ready;
+    uint8_t           *wbuf;
+    size_t             wcap;
+    size_t             whead;
+    size_t             wlen;
+    bool               wclosing;
+    bool               wbroken;
 
     bool eof;
     bool closing;
@@ -228,6 +239,112 @@ static DWORD WINAPI reader_main(LPVOID parameter)
     pty->eof = true;
     LeaveCriticalSection(&pty->lock);
     wake_main(pty);
+    return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Asynchronous writer thread (PLAN 1.7)                                      */
+/* ------------------------------------------------------------------------- */
+
+/* Both keystrokes and multi-megabyte pastes go through this single FIFO
+ * queue, so byte ordering is strictly preserved and the UI thread never
+ * blocks waiting on conhost to drain the input pipe. */
+static bool wqueue_push(Pty *pty, const uint8_t *data, size_t length)
+{
+    size_t tail;
+    size_t first;
+
+    if (pty->wclosing || pty->wbroken)
+        return false;
+    if (pty->wlen + length > pty->wcap) {
+        size_t next_cap = pty->wcap ? pty->wcap : 16384u;
+        uint8_t *next_buf;
+
+        while (next_cap < pty->wlen + length) {
+            if (next_cap > ((size_t)-1) / 2u)
+                return false;
+            next_cap *= 2u;
+        }
+        next_buf = (uint8_t *)malloc(next_cap);
+        if (!next_buf)
+            return false;
+        if (pty->wlen > 0) {
+            size_t head_part = pty->wcap - pty->whead;
+
+            if (head_part > pty->wlen)
+                head_part = pty->wlen;
+            memcpy(next_buf, pty->wbuf + pty->whead, head_part);
+            if (head_part < pty->wlen)
+                memcpy(next_buf + head_part, pty->wbuf, pty->wlen - head_part);
+        }
+        free(pty->wbuf);
+        pty->wbuf = next_buf;
+        pty->wcap = next_cap;
+        pty->whead = 0;
+    }
+
+    tail = (pty->whead + pty->wlen) % pty->wcap;
+    first = pty->wcap - tail;
+    if (first > length)
+        first = length;
+    memcpy(pty->wbuf + tail, data, first);
+    if (first < length)
+        memcpy(pty->wbuf, data + first, length - first);
+    pty->wlen += length;
+    return true;
+}
+
+static size_t wqueue_pop(Pty *pty, uint8_t *out, size_t capacity)
+{
+    size_t take = pty->wlen < capacity ? pty->wlen : capacity;
+    size_t first;
+
+    if (take == 0)
+        return 0;
+    first = pty->wcap - pty->whead;
+    if (first > take)
+        first = take;
+    memcpy(out, pty->wbuf + pty->whead, first);
+    if (first < take)
+        memcpy(out + first, pty->wbuf, take - first);
+    pty->whead = (pty->whead + take) % pty->wcap;
+    pty->wlen -= take;
+    return take;
+}
+
+static DWORD WINAPI writer_main(LPVOID parameter)
+{
+    Pty *pty = (Pty *)parameter;
+    uint8_t chunk[16384];
+
+    for (;;) {
+        size_t take;
+        size_t offset = 0;
+
+        EnterCriticalSection(&pty->wlock);
+        while (pty->wlen == 0 && !pty->wclosing)
+            SleepConditionVariableCS(&pty->wcond, &pty->wlock, 100);
+        if (pty->wclosing) {
+            LeaveCriticalSection(&pty->wlock);
+            break;
+        }
+        take = wqueue_pop(pty, chunk, sizeof chunk);
+        LeaveCriticalSection(&pty->wlock);
+
+        while (offset < take) {
+            DWORD written = 0;
+
+            if (!WriteFile(pty->input, chunk + offset,
+                           (DWORD)(take - offset), &written, NULL) ||
+                written == 0) {
+                EnterCriticalSection(&pty->wlock);
+                pty->wbroken = true;
+                LeaveCriticalSection(&pty->wlock);
+                return 0;
+            }
+            offset += written;
+        }
+    }
     return 0;
 }
 
@@ -667,6 +784,9 @@ Pty *pty_spawn_ex(const wchar_t *command_line, const char *cwd_utf8,
     InitializeConditionVariable(&pty->has_space);
     InitializeConditionVariable(&pty->has_data);
     pty->lock_ready = true;
+    InitializeCriticalSection(&pty->wlock);
+    InitializeConditionVariable(&pty->wcond);
+    pty->wlock_ready = true;
     pty->notify = notify;
     pty->notify_userdata = notify_userdata;
 
@@ -794,7 +914,12 @@ Pty *pty_spawn_ex(const wchar_t *command_line, const char *cwd_utf8,
 
     pty->reader = CreateThread(NULL, 0, reader_main, pty, 0, NULL);
     if (!pty->reader) {
-        describe_win32_error(error, error_size, "CreateThread");
+        describe_win32_error(error, error_size, "CreateThread (reader)");
+        goto done;
+    }
+    pty->writer = CreateThread(NULL, 0, writer_main, pty, 0, NULL);
+    if (!pty->writer) {
+        describe_win32_error(error, error_size, "CreateThread (writer)");
         goto done;
     }
     ok = true;
@@ -924,21 +1049,19 @@ size_t pty_read(Pty *pty, void *buffer, size_t capacity)
 
 bool pty_write(Pty *pty, const void *data, size_t length)
 {
-    const uint8_t *bytes = (const uint8_t *)data;
+    bool ok;
 
-    if (!pty || !bytes || pty->input == INVALID_HANDLE_VALUE)
+    if (!pty || !data || pty->input == INVALID_HANDLE_VALUE)
         return false;
-    while (length > 0) {
-        DWORD chunk = length > 16384 ? 16384 : (DWORD)length;
-        DWORD written = 0;
+    if (length == 0)
+        return true;
 
-        if (!WriteFile(pty->input, bytes, chunk, &written, NULL) ||
-            written == 0)
-            return false;
-        bytes += written;
-        length -= written;
-    }
-    return true;
+    EnterCriticalSection(&pty->wlock);
+    ok = wqueue_push(pty, (const uint8_t *)data, length);
+    if (ok)
+        WakeConditionVariable(&pty->wcond);
+    LeaveCriticalSection(&pty->wlock);
+    return ok;
 }
 
 bool pty_resize(Pty *pty, uint16_t columns, uint16_t rows)
@@ -1003,6 +1126,12 @@ static void pty_free(Pty *pty)
         WakeAllConditionVariable(&pty->has_space);
         LeaveCriticalSection(&pty->lock);
     }
+    if (pty->wlock_ready) {
+        EnterCriticalSection(&pty->wlock);
+        pty->wclosing = true;
+        WakeAllConditionVariable(&pty->wcond);
+        LeaveCriticalSection(&pty->wlock);
+    }
 
     /* Closing the pseudoconsole ends conhost's session; that closes the
      * output pipe, which unblocks ReadFile, which ends the reader thread. */
@@ -1017,6 +1146,11 @@ static void pty_free(Pty *pty)
     if (pty->output != INVALID_HANDLE_VALUE) {
         CloseHandle(pty->output);
         pty->output = INVALID_HANDLE_VALUE;
+    }
+    if (pty->writer) {
+        WaitForSingleObject(pty->writer, PTY_READER_TIMEOUT_MS);
+        CloseHandle(pty->writer);
+        pty->writer = NULL;
     }
     if (pty->reader) {
         WaitForSingleObject(pty->reader, PTY_READER_TIMEOUT_MS);
@@ -1038,8 +1172,11 @@ static void pty_free(Pty *pty)
         pty->process = NULL;
     }
 
+    if (pty->wlock_ready)
+        DeleteCriticalSection(&pty->wlock);
     if (pty->lock_ready)
         DeleteCriticalSection(&pty->lock);
+    free(pty->wbuf);
     free(pty->ring);
     free(pty);
 }

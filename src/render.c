@@ -14,6 +14,7 @@ typedef struct FrameContext {
     App                      *app;
     GhosttyRenderStateColors  colors;
     SDL_Color                 default_foreground;
+    SDL_Color                 default_background;
     SDL_Color                 cursor_color;
     GhosttyCursorStyle        cursor_style;
 } FrameContext;
@@ -54,7 +55,7 @@ static void draw_cell_glyph(const FrameContext *frame, const CellPaint *cell,
     glyphs_draw_text(&app->glyphs, (const char *)cell->text, cell->text_length,
                      cell_x(app, cell->column), cell_y(app, cell->row),
                      style->bold, style->italic,
-                     covered ? CHROME_PANEL_BG : style->foreground);
+                     covered ? frame->default_background : style->foreground);
 }
 
 static void draw_cell_cursor(const FrameContext *frame, const CellPaint *cell,
@@ -155,11 +156,31 @@ static void draw_cell(const FrameContext *frame, const CellPaint *cell)
     float width = (float)app->glyphs.cell_width;
     float height = (float)app->glyphs.cell_height;
 
+    const ColorScheme *scheme = &app->settings.colors;
+    bool custom_sel = cell->selected &&
+                      (scheme->has_selection_bg || scheme->has_selection_fg);
+
     style_resolve(&style, &cell->style,
                   cell->has_foreground, cell->foreground,
                   cell->has_background, cell->background,
-                  &frame->colors, frame->default_foreground, CHROME_PANEL_BG,
-                  app->panel_opacity, cell->selected);
+                  &frame->colors, frame->default_foreground,
+                  frame->default_background, app->panel_opacity,
+                  cell->selected && !custom_sel);
+    if (custom_sel) {
+        if (scheme->has_selection_bg) {
+            style.background.r = scheme->selection_bg.r;
+            style.background.g = scheme->selection_bg.g;
+            style.background.b = scheme->selection_bg.b;
+            style.background.a = 255;
+            style.has_background = true;
+        }
+        if (scheme->has_selection_fg) {
+            style.foreground.r = scheme->selection_fg.r;
+            style.foreground.g = scheme->selection_fg.g;
+            style.foreground.b = scheme->selection_fg.b;
+            style.foreground.a = 255;
+        }
+    }
 
     if (style.has_background)
         chrome_fill_rect(app->renderer, x, y, width, height, style.background);
@@ -273,6 +294,10 @@ void render_frame(App *app)
     frame.app = app;
     frame.colors = state_colors;
     frame.default_foreground = style_color(state_colors.foreground, 1.0f);
+    frame.default_background.r = app->settings.colors.background.r;
+    frame.default_background.g = app->settings.colors.background.g;
+    frame.default_background.b = app->settings.colors.background.b;
+    frame.default_background.a = 255;
     frame.cursor_color = state_colors.cursor_has_value
                          ? style_color(state_colors.cursor, 1.0f)
                          : frame.default_foreground;
@@ -391,6 +416,20 @@ void render_frame(App *app)
     /* 9. Status bar, in the band below the grid. */
     chrome_draw_statusbar(app, pixel_width, pixel_height,
                           frame.default_foreground);
+
+    /* 10. Visual bell flash overlay, when active. */
+    if (app->bell_flash_until_ms > 0 &&
+        SDL_GetTicks() < app->bell_flash_until_ms) {
+        SDL_Color no_border = { 0, 0, 0, 0 };
+        bool light_bg = ((int)app->settings.colors.background.r +
+                         (int)app->settings.colors.background.g +
+                         (int)app->settings.colors.background.b) > 384;
+        SDL_Color flash = light_bg ? (SDL_Color){ 0, 0, 0, 32 }
+                                   : (SDL_Color){ 255, 255, 255, 40 };
+
+        panel_draw(&app->panel, renderer, pixel_width, pixel_height,
+                   chrome_corner_radius(app), flash, no_border);
+    }
 
     SDL_RenderPresent(renderer);
 }

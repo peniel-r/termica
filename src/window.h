@@ -64,4 +64,8 @@ WindowBackdrop window_sync_chrome(SDL_Window *window, WindowBackdrop backdrop,
                                   WindowDecoration decoration,
                                   int corner_radius);
 
+/* Flash the window's taskbar button until it gains focus (Windows
+ * FlashWindowEx with FLASHW_TRAY | FLASHW_TIMERNOFG; no-op elsewhere). */
+void window_flash_taskbar(SDL_Window *window);
+
 #endif /* TERMICA_WINDOW_H */

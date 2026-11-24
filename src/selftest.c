@@ -15,6 +15,7 @@
 #include "embed.h"
 #include "font_lookup.h"
 #include "git.h"
+#include "glyph.h"
 #include "keys.h"
 #include "settings.h"
 #include "statusbar.h"
@@ -1697,6 +1698,187 @@ static void test_key_bindings(void)
           "[keys] overrides survive format round trip");
 }
 
+/* 1.5: font fallback chain configuration and OS fallback resolution. */
+static void test_font_fallback(void)
+{
+    Settings s;
+    Settings roundtrip;
+    char formatted[16384];
+    const char *doc =
+        "[font]\n"
+        "fallback = [\"Consolas\", \"Segoe UI Emoji\"]\n";
+
+    settings_default(&s);
+    check(settings_parse_toml(&s, doc, strlen(doc)),
+          "font.fallback TOML parses");
+    check(s.font_fallback_count == 2 &&
+              strcmp(s.font_fallback[0], "Consolas") == 0 &&
+              strcmp(s.font_fallback[1], "Segoe UI Emoji") == 0,
+          "font.fallback entries are stored");
+
+    settings_format(&s, formatted, sizeof formatted);
+    settings_default(&roundtrip);
+    check(settings_parse_toml(&roundtrip, formatted, strlen(formatted)),
+          "formatted font.fallback reparses");
+    check(roundtrip.font_fallback_count == 2 &&
+              strcmp(roundtrip.font_fallback[1], "Segoe UI Emoji") == 0,
+          "font.fallback survives format round trip");
+
+#ifdef _WIN32
+    {
+        const char *user[1] = { "Consolas" };
+        char paths[16][256];
+        int count = glyphs_resolve_fallback_paths(user, 1, paths, 16);
+
+        check(count >= 2, "fallback resolver finds user and OS fallback fonts");
+        check(count >= 1 && SDL_strcasestr(paths[0], "consola") != NULL,
+              "user fallback precedes OS fallbacks in chain");
+    }
+#endif
+}
+
+/* 1.6: colour schemes ([colors] parsing, presets, and libghostty render
+ * state propagation). */
+static void test_color_schemes(void)
+{
+    Settings s;
+    Settings roundtrip;
+    char formatted[16384];
+    Term term;
+    GhosttyRenderStateColors rc = GHOSTTY_INIT_SIZED(GhosttyRenderStateColors);
+    const char *doc =
+        "[colors]\n"
+        "scheme = \"light\"\n"
+        "foreground = \"#112233\"\n"
+        "background = \"#ddeeff\"\n"
+        "cursor = \"#ff0088\"\n"
+        "selection_background = \"#334455\"\n"
+        "red = \"#cc1122\"\n";
+
+    settings_default(&s);
+    check(settings_parse_toml(&s, doc, strlen(doc)), "[colors] TOML parses");
+    check(s.colors.custom, "custom flag is set");
+    check(strcmp(s.colors.scheme_name, "light") == 0, "light preset loaded");
+    check(s.colors.foreground.r == 0x11 && s.colors.foreground.g == 0x22 &&
+              s.colors.foreground.b == 0x33,
+          "foreground override applied over preset");
+    check(s.colors.palette[1].r == 0xcc && s.colors.palette[1].g == 0x11 &&
+              s.colors.palette[1].b == 0x22,
+          "named palette entry overrides red (index 1)");
+    check(s.colors.has_selection_bg && s.colors.selection_bg.r == 0x33,
+          "selection_background is stored");
+
+    settings_format(&s, formatted, sizeof formatted);
+    settings_default(&roundtrip);
+    check(settings_parse_toml(&roundtrip, formatted, strlen(formatted)),
+          "formatted [colors] reparses");
+    check(roundtrip.colors.foreground.r == 0x11 &&
+              roundtrip.colors.palette[1].r == 0xcc &&
+              roundtrip.colors.has_selection_bg,
+          "[colors] survives format round trip");
+
+    check(term_init(&term, 40, 10), "term_init for colour scheme");
+    term_set_colors(&term, &s.colors);
+    ghostty_render_state_update(term.render_state, term.handle);
+    ghostty_render_state_get(term.render_state,
+                             GHOSTTY_RENDER_STATE_DATA_COLORS, &rc);
+    check(rc.foreground.r == 0x11 && rc.foreground.g == 0x22 &&
+              rc.foreground.b == 0x33,
+          "foreground colour reaches render state");
+    check(rc.background.r == 0xdd && rc.background.g == 0xee &&
+              rc.background.b == 0xff,
+          "background colour reaches render state");
+    check(rc.cursor_has_value && rc.cursor.r == 0xff && rc.cursor.g == 0x00 &&
+              rc.cursor.b == 0x88,
+          "cursor colour reaches render state");
+    check(rc.palette[1].r == 0xcc && rc.palette[1].g == 0x11 &&
+              rc.palette[1].b == 0x22,
+          "ANSI palette index 1 reaches render state");
+    term_free(&term);
+}
+
+/* 1.8: bell setting and BEL (0x07) callback. */
+static void test_bell(void)
+{
+    Settings s;
+    Settings roundtrip;
+    char formatted[16384];
+    Term term;
+    const char *doc = "[terminal]\nbell = \"taskbar\"\n";
+
+    settings_default(&s);
+    check(s.bell == SETTINGS_BELL_VISUAL, "default bell is visual");
+    check(settings_parse_toml(&s, doc, strlen(doc)), "bell setting parses");
+    check(s.bell == SETTINGS_BELL_TASKBAR, "bell = taskbar is stored");
+
+    settings_format(&s, formatted, sizeof formatted);
+    settings_default(&roundtrip);
+    check(settings_parse_toml(&roundtrip, formatted, strlen(formatted)),
+          "formatted bell setting reparses");
+    check(roundtrip.bell == SETTINGS_BELL_TASKBAR,
+          "bell setting survives format round trip");
+
+    check(term_init(&term, 40, 10), "term_init for bell");
+    check(!term.bell_rang, "bell flag starts clear");
+    write_string(term.handle, "\x07");
+    check(term.bell_rang, "BEL (0x07) sets term.bell_rang");
+    term_free(&term);
+}
+
+#ifdef _WIN32
+/* 1.7: asynchronous pty writer queue preserves FIFO byte ordering across
+ * rapid writes into a real ConPTY child. */
+static void test_pty_writer_queue(void)
+{
+    char error[128];
+    Pty *pty = pty_spawn(L"cmd.exe /Q /K", 80, 24, NULL, NULL,
+                         error, sizeof error);
+    char collected[8192];
+    size_t used = 0;
+    uint32_t code = 99;
+    int ticks;
+    const char *p1;
+    const char *p2;
+
+    check(pty != NULL, "pty_spawn for async writer queue test");
+    if (!pty)
+        return;
+
+    check(pty_write(pty, "echo QUEUE_FIRST\r\n", 18),
+          "async pty_write first chunk");
+    check(pty_write(pty, "echo QUEUE_SECOND\r\n", 19),
+          "async pty_write second chunk");
+    check(pty_write(pty, "exit 0\r\n", 8),
+          "async pty_write exit command");
+
+    for (ticks = 0; ticks < 100; ticks++) {
+        uint8_t buf[512];
+        size_t got;
+
+        pty_wait(pty, 100);
+        while ((got = pty_read(pty, buf, sizeof buf)) > 0) {
+            size_t copy = got;
+
+            if (used + copy >= sizeof collected)
+                copy = sizeof collected - 1 - used;
+            if (copy > 0) {
+                memcpy(collected + used, buf, copy);
+                used += copy;
+            }
+        }
+        if (pty_exit_code(pty, &code))
+            break;
+    }
+    collected[used] = '\0';
+    p1 = strstr(collected, "QUEUE_FIRST");
+    p2 = strstr(collected, "QUEUE_SECOND");
+    check(p1 != NULL && p2 != NULL && p1 < p2,
+          "async writer queue delivers writes in strict FIFO order");
+    check(code == 0, "async writer child exits with code 0");
+    pty_close(pty);
+}
+#endif
+
 int term_selftest(void)
 {
     printf("termica self test (libghostty-vt)\n\n");
@@ -1715,6 +1897,9 @@ int term_selftest(void)
     test_settings();
     test_shell_profiles();
     test_key_bindings();
+    test_font_fallback();
+    test_color_schemes();
+    test_bell();
     test_statusbar_settings();
     test_statusbar_render();
     test_statusbar_helpers();
@@ -1725,6 +1910,7 @@ int term_selftest(void)
     test_clipboard_write();
 #ifdef _WIN32
     test_pty();
+    test_pty_writer_queue();
     test_clipboard_write_conpty();
 #endif
 

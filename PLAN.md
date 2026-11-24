@@ -67,10 +67,10 @@ week, in a single window.
 | 1.2 | **Configurable key bindings** (done) | A `[keys]` table maps chords to actions (`copy`, `paste`, `scroll_page_up`, `scroll_page_down`, `font_size_up`, `quit`, ...). The default `paste` is `Ctrl+Shift+V` only, so `Ctrl+V` reaches the program. `Ctrl+V` can be bound back with one line. Bindings match scancodes. |
 | 1.3 | **Font zoom** (done) | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` (bindable) change the size live: re-open the glyphs, refit the grid, resize the pty. The selection and scrollback survive. The zoom is not persisted unless the user saves it. |
 | 1.4 | **Per-monitor DPI** (done) | `SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED` rebuilds the glyph cache, the panel corner masks and the chrome metrics. Text stays sharp when the window is dragged between 100% and 150% monitors. |
-| 1.5 | **Font fallback chain** | A configured `font.fallback = [...]` list, then a system fallback (DirectWrite `IDWriteFontFallback`), then Symbols NF. CJK text and colour emoji render, and double-width cells stay aligned. The glyph cache covers codepoints above U+FFFF. |
-| 1.6 | **Colour schemes** | `[colors]` sets foreground, background, cursor, selection and the 16-colour palette, through libghostty's palette API. One bundled default and one light scheme. A self test checks that the palette reaches the render state. |
-| 1.7 | **Asynchronous paste writer** | Pastes and large writes go through a pty writer queue (a thread or overlapped I/O). A 10 MB paste does not freeze the UI, and the order of bytes against key input is preserved. |
-| 1.8 | **Bell** | `[terminal] bell = "visual" \| "taskbar" \| "none"`. The visual bell flashes the panel. The taskbar option calls `FlashWindowEx` when the window is unfocused. |
+| 1.5 | **Font fallback chain** (done) | A configured `font.fallback = [...]` list, then OS CJK/colour-emoji fallback fonts, then Symbols NF. CJK text and colour emoji render without tinting, and tall glyphs scale to fit. An out-of-BMP hash cache covers codepoints above U+FFFF. |
+| 1.6 | **Colour schemes** (done) | `[colors]` sets foreground, background, cursor, selection and the 16-colour palette, through libghostty's palette API. One bundled default (`dark`) and one `light` scheme. A self test checks that the palette reaches the render state. |
+| 1.7 | **Asynchronous paste writer** (done) | Pastes and keystrokes go through a single FIFO writer thread in `pty.c`. Large pastes do not freeze the UI, and byte order against key input is preserved. |
+| 1.8 | **Bell** (done) | `[terminal] bell = "visual" \| "taskbar" \| "none"`. The visual bell flashes the panel. The taskbar option calls `FlashWindowEx` when the window is unfocused. |
 
 ### Out of scope
 

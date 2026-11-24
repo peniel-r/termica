@@ -38,9 +38,12 @@ void chrome_fill_rect(SDL_Renderer *renderer, float x, float y, float width,
  * over a DWM backdrop. */
 SDL_Color chrome_panel_fill_color(const App *app)
 {
-    SDL_Color color = CHROME_PANEL_BG;
+    SDL_Color color;
     float opacity = app->panel_opacity;
 
+    color.r = app->settings.colors.background.r;
+    color.g = app->settings.colors.background.g;
+    color.b = app->settings.colors.background.b;
     if (app->backdrop != WINDOW_BACKDROP_PANEL)
         opacity *= BACKDROP_TINT;
     color.a = (Uint8)(opacity * 255.0f + 0.5f);
@@ -676,6 +679,12 @@ void chrome_statusbar_tick(App *app)
     }
     if (second != app->last_time_second) {
         app->last_time_second = second;
+        redraw = true;
+    }
+
+    if (app->bell_flash_until_ms > 0 &&
+        SDL_GetTicks() >= app->bell_flash_until_ms) {
+        app->bell_flash_until_ms = 0;
         redraw = true;
     }
 

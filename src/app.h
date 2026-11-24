@@ -103,6 +103,7 @@ typedef struct App {
     bool             needs_redraw;
     bool             cursor_lit;      /* blink phase                       */
     bool             cursor_blinks;   /* the terminal asked for a blink    */
+    uint64_t         bell_flash_until_ms; /* visual bell end tick, or 0    */
 } App;
 
 /* Live font zoom (PLAN 1.3): re-open grid glyphs at `point_size`, refit the
