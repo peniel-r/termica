@@ -69,7 +69,12 @@ It never reimplements an escape sequence.
 
 | Module | Responsibility | Depends on |
 |---|---|---|
-| `main.c` | `App` state, the SDL event loop, key and mouse routing, drawing a frame, chrome geometry | everything |
+| `main.c` | Entry point, CLI parsing, startup/teardown, timers, `fit_grid`, event loop | `app`, `session`, `input`, `render`, `chrome`, `console`, `embed`, `font_lookup` |
+| `app.h` | Shared `App` struct, layout/timer constants and `SDL_EVENT_USER` codes | `session`, `git`, `glyph`, `panel`, `settings`, `statusbar`, `window` |
+| `session.{h,c}` | Per-session `Session` state: terminal, ConPTY, selection gestures, IME preedit, paste, pump | `term`, `pty`, `settings`, SDL |
+| `input.{h,c}` | Keyboard/scancode bindings, text/IME, mouse routing, OSC 22 cursor shape, autoscroll, focus, OSC 52 policy | `app`, `chrome` |
+| `render.{h,c}` | Frame rendering from libghostty's render state (cells, underlines, cursor, IME preedit) | `app`, `chrome`, `style` |
+| `chrome.{h,c}` | Frame preset geometry, custom title bar, scrollbar control, status bar tick and rendering | `app` |
 | `term.{h,c}` | Terminal, render state, key, mouse and focus encoders, selection, paste, OSC callbacks (title, pwd, OSC 133, OSC 52) | libghostty-vt |
 | `pty.{h,c}` | Pipes, `CreatePseudoConsole`, child process, job object, reader thread, ring buffer, resize, ordered close | Win32 only, **no SDL** |
 | `glyph.{h,c}` | Opening fonts (disk, family, embedded), bold and italic faces, glyph cache, fallback, drawing cell text | SDL3_ttf, `embed`, `font_lookup` |

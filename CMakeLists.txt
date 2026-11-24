@@ -119,6 +119,10 @@ endif()
 # ---- The demo program --------------------------------------------------------
 add_executable(termica
     src/main.c
+    src/session.c
+    src/input.c
+    src/render.c
+    src/chrome.c
     src/term.c
     src/pty.c
     src/embed.c
@@ -133,6 +137,11 @@ add_executable(termica
     src/panel.c
     src/geometry.c
     src/window.c
+    src/app.h
+    src/session.h
+    src/input.h
+    src/render.h
+    src/chrome.h
     src/term.h
     src/pty.h
     src/embed.h
