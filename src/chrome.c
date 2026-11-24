@@ -942,6 +942,9 @@ void chrome_statusbar_tick(App *app)
     struct tm local;
     int second;
 
+    if (s && search_pending(&s->search))
+        redraw = true;
+
     if (s && s->term.command_running && app->busy_frame_count > 0) {
         app->busy_frame_index =
             (app->busy_frame_index + 1) % app->busy_frame_count;
@@ -971,4 +974,140 @@ void chrome_statusbar_tick(App *app)
 
     if (redraw)
         app->needs_redraw = true;
+}
+
+/* The find bar overlays the grid instead of changing its dimensions. */
+static SDL_FRect search_rect(const App *app)
+{
+    SDL_FRect r;
+    float width = (float)(app->columns * app->glyphs.cell_width);
+    float max_width = (float)(74 * app->glyphs.cell_width);
+    r.w = width < max_width ? width : max_width;
+    r.x = (float)app->grid_left + width - r.w;
+    r.y = (float)app->grid_top;
+    r.h = (float)(2 * app->glyphs.cell_height) + 8.0f * app->display_scale;
+    return r;
+}
+
+int chrome_search_hit(const App *app, float x, float y)
+{
+    const Session *s = app_active_session_const(app);
+    SDL_FRect r;
+    float pad, button_width, button_y;
+    int button;
+    if (!s || !s->search.open)
+        return CHROME_SEARCH_NONE;
+    r = search_rect(app);
+    if (x < r.x || x >= r.x + r.w || y < r.y || y >= r.y + r.h)
+        return CHROME_SEARCH_NONE;
+    pad = 4.0f * app->display_scale;
+    button_y = r.y + pad + app->glyphs.cell_height;
+    if (y < button_y)
+        return CHROME_SEARCH_TEXT;
+    button_width = (float)(4 * app->glyphs.cell_width);
+    button = (int)((x - r.x - pad) / button_width);
+    if (x < r.x + pad || button < 0 || button > 4)
+        return CHROME_SEARCH_TEXT;
+    return CHROME_SEARCH_CASE + button;
+}
+
+static float search_draw_text(App *app, const char *text, size_t length,
+                              float x, float y, SDL_Color color)
+{
+    const char *p = text;
+    const char *end = text + length;
+    while (p < end && *p) {
+        char utf8[8];
+        char *finish;
+        Uint32 cp = SDL_StepUTF8(&p, NULL);
+        if (!cp)
+            break;
+        finish = SDL_UCS4ToUTF8(cp, utf8);
+        glyphs_draw_text(&app->glyphs, utf8, (size_t)(finish - utf8),
+                         x, y, false, false, color);
+        x += (float)app->glyphs.cell_width;
+    }
+    return x;
+}
+
+void chrome_draw_search(App *app)
+{
+    Session *s = app_active_session(app);
+    Search *search;
+    SDL_FRect r;
+    SDL_Rect clip, area;
+    float pad, x, y, caret_x, shift = 0.0f, button_width;
+    SDL_Color bg = { 32, 36, 44, 255 };
+    SDL_Color button_bg = { 66, 75, 90, 255 };
+    SDL_Color active_bg = { 66, 115, 145, 255 };
+    SDL_Color fg = { 235, 239, 244, 255 };
+    SDL_Color accent = { 136, 192, 208, 255 };
+    static const char *labels[] = { "Aa", ".*", "<", ">", "x" };
+    char status[160];
+    int before, i;
+    if (!s || !s->search.open)
+        return;
+    search = &s->search;
+    r = search_rect(app);
+    pad = 4.0f * app->display_scale;
+    button_width = (float)(4 * app->glyphs.cell_width);
+    chrome_fill_rect(app->renderer, r.x, r.y, r.w, r.h, bg);
+    chrome_fill_rect(app->renderer, r.x, r.y + r.h - 1.0f, r.w, 1.0f, accent);
+    clip.x = (int)(r.x + pad);
+    clip.y = (int)(r.y + pad);
+    clip.w = (int)(r.w - 2.0f * pad);
+    clip.h = app->glyphs.cell_height;
+    if (clip.w <= 0)
+        return;
+    SDL_SetRenderClipRect(app->renderer, &clip);
+    x = (float)clip.x;
+    y = (float)clip.y;
+    before = utf8_codepoint_count(search->query, search->cursor);
+    caret_x = x + (float)((before + 1) * app->glyphs.cell_width);
+    if (caret_x > x + clip.w - app->glyphs.cell_width)
+        shift = caret_x - (x + clip.w - app->glyphs.cell_width);
+    x -= shift;
+    x = search_draw_text(app, "/", 1, x, y, accent);
+    x = search_draw_text(app, search->query, search->cursor, x, y, fg);
+    caret_x = x;
+    if (s->composing_length)
+        x = search_draw_text(app, s->composing, (size_t)s->composing_length,
+                             x, y, accent);
+    search_draw_text(app, search->query + search->cursor,
+                     search->length - search->cursor, x, y, fg);
+    chrome_fill_rect(app->renderer, caret_x, y, 1.0f,
+                     (float)app->glyphs.cell_height, accent);
+    SDL_SetRenderClipRect(app->renderer, NULL);
+
+    area.x = (int)(caret_x / app->display_scale);
+    area.y = (int)(y / app->display_scale);
+    area.w = (int)(app->glyphs.cell_width / app->display_scale);
+    area.h = (int)(app->glyphs.cell_height / app->display_scale);
+    SDL_SetTextInputArea(app->window, &area, 0);
+
+    clip.y = (int)(r.y + pad + app->glyphs.cell_height);
+    clip.h = app->glyphs.cell_height;
+    SDL_SetRenderClipRect(app->renderer, &clip);
+    for (i = 0; i < 5; i++) {
+        bool active = (i == 0 && search->case_sensitive) ||
+                      (i == 1 && search->regex);
+        x = r.x + pad + (float)i * button_width;
+        chrome_fill_rect(app->renderer, x, (float)clip.y,
+                         button_width - 2.0f, (float)clip.h,
+                         active ? active_bg : button_bg);
+        search_draw_text(app, labels[i], strlen(labels[i]),
+                         x + (float)app->glyphs.cell_width, (float)clip.y, fg);
+    }
+    if (search->error[0])
+        snprintf(status, sizeof status, "%s", search->error);
+    else if (search->count && search->selected < search->count)
+        snprintf(status, sizeof status, "%zu/%zu%s  Alt+C Alt+R F3 Shift+F3",
+                 search->selected + 1, search->count,
+                 search_pending(search) ? "..." : "");
+    else
+        snprintf(status, sizeof status, "%s  Alt+C Alt+R F3 Shift+F3",
+                 search_pending(search) ? "Searching..." : "0/0");
+    search_draw_text(app, status, strlen(status), r.x + pad + 5.0f * button_width,
+                     (float)clip.y, fg);
+    SDL_SetRenderClipRect(app->renderer, NULL);
 }

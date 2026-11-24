@@ -27,6 +27,16 @@
 #define SETTINGS_ENV_KEY_MAX       64
 #define SETTINGS_ENV_VAL_MAX       512
 #define SETTINGS_MAX_KEY_OVERRIDES 32
+#define SETTINGS_SCROLLBACK_DEFAULT 10000
+#define SETTINGS_SCROLLBACK_MAX     1000000
+
+enum {
+    SETTINGS_DIFF_FONT     = 1u << 0,
+    SETTINGS_DIFF_COLORS   = 1u << 1,
+    SETTINGS_DIFF_KEYS     = 1u << 2,
+    SETTINGS_DIFF_WINDOW   = 1u << 3,
+    SETTINGS_DIFF_TERMINAL = 1u << 4
+};
 
 typedef struct SettingsEnv {
     char key[SETTINGS_ENV_KEY_MAX];
@@ -46,7 +56,7 @@ typedef enum {
     SETTINGS_SHELL_CMD
 } SettingsShell;
 
-/* What to do with an OSC 52 clipboard write request. */
+/* Policy for OSC 52 clipboard reads and writes. */
 typedef enum {
     SETTINGS_OSC52_ASK = 0,
     SETTINGS_OSC52_ALLOW,
@@ -79,8 +89,10 @@ typedef struct Settings {
     bool title_bar;        /* draw a custom title bar, default true  */
     bool copy_on_select;   /* default false                          */
     SettingsShell shell;   /* default auto                           */
-    SettingsOsc52 osc52;   /* default ask                            */
+    SettingsOsc52 osc52;   /* default deny                           */
+    SettingsOsc52 notifications; /* OSC 9/777 policy, default deny */
     SettingsBell bell;     /* default visual                         */
+    int scrollback_lines;  /* 0..SETTINGS_SCROLLBACK_MAX             */
 
     /* Colour scheme (PLAN 1.6). */
     ColorScheme colors;
@@ -95,7 +107,7 @@ typedef struct Settings {
     int  env_count;
 
     /* Key bindings (PLAN 1.2). `keys` holds defaults plus any `[keys]`
-     * overrides; `key_overrides` preserves the user's overrides for save. */
+     * overrides; `key_overrides` records the user's overrides. */
     KeyMap keys;
     SettingsKeyOverride key_overrides[SETTINGS_MAX_KEY_OVERRIDES];
     int  key_override_count;
@@ -108,7 +120,7 @@ void settings_default(Settings *settings);
  * the settings untouched. Exposed for the self test. */
 bool settings_parse_toml(Settings *settings, const char *text, size_t length);
 
-/* Render the settings as TOML, for saving. */
+/* Render settings as TOML for export and round-trip tests. */
 void settings_format(const Settings *settings, char *out, size_t capacity);
 
 /* Where the file lives. False when no config directory could be worked
@@ -123,14 +135,16 @@ bool config_path(const char *name, char *out, size_t capacity);
 /* Create the directory part of a config file path, when needed. */
 void config_create_directory(const char *path);
 
-/* FNV-1a fingerprint used by the safe-save logic. */
-uint64_t config_hash_bytes(const char *data, size_t length);
-
 /* A missing file is not an error: the defaults stay in place and false is
  * returned so the app knows nothing was read. */
 bool settings_load(Settings *settings);
 
-/* Write the file, creating the directory when needed. */
-bool settings_save(const Settings *settings);
+/* Reload from defaults transactionally. Unknown keys remain forward-compatible;
+ * invalid recognised values or unreadable files leave settings unchanged.
+ * The diff describes effective changes, not merely keys present in the file. */
+bool settings_reload_text(Settings *settings, const char *text, size_t length,
+                          unsigned *diff, char *error, size_t error_capacity);
+bool settings_reload(Settings *settings, unsigned *diff,
+                     char *error, size_t error_capacity);
 
 #endif /* TERMICA_SETTINGS_H */

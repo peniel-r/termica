@@ -16,6 +16,7 @@
 #include "pty.h"
 #include "settings.h"
 #include "term.h"
+#include "search.h"
 
 /* Room for uncommitted IME text. SDL3 hands the string over for the
  * duration of the event, so the session keeps its own copy; 128 bytes is
@@ -47,6 +48,7 @@ typedef struct Session {
     Pty          *pty;              /* the shell behind the grid            */
 
     SelectionDrag select;
+    Search        search;          /* independent find bar and results     */
     bool          mouse_held;       /* a button is down over the grid       */
     bool          bar_drag;         /* the scrollbar thumb is being dragged */
     int           autoscroll;       /* -1 up, 0 off, +1 down while dragging */

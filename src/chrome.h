@@ -60,6 +60,15 @@ void chrome_title_button_action(App *app, int index);
 void chrome_update_title_hover(App *app, float x, float y);
 void chrome_draw_title_bar(App *app, int pixel_width, int pixel_height);
 
+/* Search bar hit codes are also used by keyboard routing. */
+enum {
+    CHROME_SEARCH_NONE = 0, CHROME_SEARCH_TEXT, CHROME_SEARCH_CASE,
+    CHROME_SEARCH_REGEX, CHROME_SEARCH_PREV, CHROME_SEARCH_NEXT,
+    CHROME_SEARCH_CLOSE
+};
+int chrome_search_hit(const App *app, float x, float y);
+void chrome_draw_search(App *app);
+
 /* Status bar timer tick and rendering. */
 void chrome_statusbar_tick(App *app);
 void chrome_draw_statusbar(App *app, int pixel_width, int pixel_height,

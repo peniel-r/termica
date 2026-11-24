@@ -35,6 +35,7 @@ void session_free(Session *s)
 {
     pty_close(s->pty);
     s->pty = NULL;
+    search_free(&s->search);
     term_free(&s->term);
 }
 
@@ -47,6 +48,7 @@ void session_send(Session *s, const void *data, size_t length)
 void session_show_message(Session *s, const char *text)
 {
     term_write(&s->term, text, strlen(text));
+    search_output_changed(&s->search, &s->term);
 }
 
 void session_spawn_shell(Session *s, const Settings *settings, uint16_t columns,
@@ -131,6 +133,7 @@ void session_resize(Session *s, uint16_t columns, uint16_t rows,
                     uint32_t cell_width, uint32_t cell_height)
 {
     term_resize(&s->term, columns, rows, cell_width, cell_height);
+    search_invalidate(&s->search);
     /* The console follows the grid, so full-screen programs see the new
      * size and reflow. */
     if (s->pty)
@@ -156,29 +159,35 @@ void session_update_geometry(Session *s, uint32_t pixel_width,
     term_set_mouse_button(&s->term, false);
 }
 
-/* Move pending program output into the terminal. Main thread only: the
- * parser is not thread-safe. The pty's ring is bounded (256 KiB), so this
- * cannot run away even if the program floods output. */
+/* Move a bounded amount of pending output on the main thread. The reader
+ * may refill the ring while it drains, so the ring size is not a work bound. */
 bool session_pump(Session *s, bool *exited_now)
 {
     uint8_t buffer[16384];
     bool parsed = false;
+    size_t bytes = 0;
+    bool drained = false;
 
     if (exited_now)
         *exited_now = false;
     if (!s->pty)
         return false;
 
-    for (;;) {
+    while (bytes < 65536) {
         size_t got = pty_read(s->pty, buffer, sizeof buffer);
 
-        if (got == 0)
+        if (got == 0) {
+            drained = true;
             break;
+        }
         term_write(&s->term, buffer, got);
+        bytes += got;
         parsed = true;
     }
+    if (parsed)
+        search_output_changed(&s->search, &s->term);
 
-    if (!s->shell_exited) {
+    if (drained && !s->shell_exited) {
         uint32_t code = 0;
 
         if (pty_exit_code(s->pty, &code)) {

@@ -56,6 +56,10 @@ typedef enum {
 SDL_Window *window_create(const char *title, int width, int height,
                           WindowDecoration decoration, bool title_bar);
 
+/* Apply a new frame and hit-test policy to an existing window. */
+bool window_set_decoration(SDL_Window *window, WindowDecoration decoration,
+                           bool title_bar);
+
 /* Apply the backdrop material and the matching rounded window region.
  * Call when the mode changes and after every resize, because the region
  * follows the window size. Returns the mode that is actually in effect: if

@@ -120,7 +120,7 @@ void statusbar_default(Statusbar *statusbar);
 bool statusbar_parse_toml(Statusbar *statusbar, const char *text,
                           size_t length);
 
-/* Render the settings as TOML, for saving. */
+/* Render settings as TOML for export and round-trip tests. */
 void statusbar_format(const Statusbar *statusbar, char *out, size_t capacity);
 
 /* Where the file lives. False when no config directory could be worked
@@ -131,8 +131,12 @@ bool statusbar_path(char *out, size_t capacity);
  * returned so the app knows nothing was read. */
 bool statusbar_load(Statusbar *statusbar);
 
-/* Write the file, creating the directory when needed. */
-bool statusbar_save(const Statusbar *statusbar);
+/* Strict, transactional reload from defaults; unknown keys remain compatible.
+ * On failure the live bar is untouched and error is suitable for a toast. */
+bool statusbar_reload_text(Statusbar *statusbar, const char *text, size_t length,
+                           bool *changed, char *error, size_t error_capacity);
+bool statusbar_reload(Statusbar *statusbar, bool *changed,
+                      char *error, size_t error_capacity);
 
 /* Parse a style string: `fg:#RRGGBB`, `bg:#RRGGBB`, `bold`, `italic`,
  * `underline`, `dim`. Returns false when nothing was recognised. */

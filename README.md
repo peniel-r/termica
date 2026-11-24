@@ -6,16 +6,14 @@
 
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%201809%2B-0078D4)
 ![Language](https://img.shields.io/badge/language-C99-555)
-![Status](https://img.shields.io/badge/status-pre--alpha%20(v0.0)-orange)
+![Status](https://img.shields.io/badge/status-pre--alpha-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 </div>
 
 > [!WARNING]
-> termica is **pre-alpha**. The emulation core is solid, but some features that
-> people use every day (tabs, custom shell commands, WSL, colour schemes, font
-> zoom) are not implemented yet. See [PLAN.md](PLAN.md) for the roadmap to a
-> daily-driver release.
+> termica is **pre-alpha**. See [PLAN.md](PLAN.md) for the roadmap and the
+> remaining hardware verification and packaging work.
 
 ## Why termica
 
@@ -25,26 +23,27 @@
 - **A real Windows citizen.** It runs your shell in a ConPTY, uses Mica,
   Mica Alt and Acrylic backdrops, has rounded squircle corners or the native
   frame, and ships as a GUI-subsystem executable with no console flash.
-- **Works out of the box.** One standalone `.exe` with the Maple Mono NF and
-  Symbols Nerd Font faces built in, so prompt glyphs and icons render without
-  installing anything.
-- **Small and readable.** About 10k lines of strict C99, and a headless
-  self-test suite of 204 checks.
+- **Works out of the box.** Maple Mono NF and Symbols Nerd Font faces are
+  built in, so prompt glyphs and icons render without installing fonts.
+- **Small and readable.** Strict C99 with a headless self-test suite.
 
 ## Features
 
 | Area | What works today |
 |---|---|
-| **Shell** | `pwsh` → `powershell` → `cmd` auto-detection, UTF-8 end to end, resize, the process tree is killed when the window closes, and the window closes when the shell exits |
+| **Shell** | `pwsh` → `powershell` → `cmd` auto-detection, UTF-8 end to end, resize and per-tab process-tree cleanup; closing the last tab closes the window |
 | **Rendering** | 24-bit colour, bold, italic, dim, inverse, strikethrough and overline, five underline kinds (single, double, curly, dotted, dashed), all cursor styles plus blinking, wide characters |
-| **Scrollback** | Mouse wheel, keyboard scrolling, and a draggable scrollbar that also pages when you click the track |
+| **Scrollback** | Mouse wheel, keyboard scrolling, a draggable scrollbar, configurable history, and search with case and regex toggles |
 | **Selection** | Cell, word, line and block (Alt) selection. The selection follows its text through output and reflow, autoscrolls at the edges, and can copy on select |
 | **Mouse** | Mouse reporting (modes 9/1000/1002/1003, SGR/UTF-8/urxvt/pixel formats), Shift to take the pointer back, OSC 22 pointer shape |
-| **Clipboard** | Bracketed paste, a confirmation for unsafe pastes, and OSC 52 writes with an `ask`/`allow`/`deny` policy |
-| **Input** | Every `Alt+*` goes to the shell, focus reporting (mode 1004), IME preedit drawn at the cursor |
+| **Clipboard** | Bracketed paste, unsafe-paste confirmation, and OSC 52 reads and writes with an `ask`/`allow`/`deny` policy (default `deny`) |
+| **Input** | Alt keys reach the shell outside search, focus reporting (mode 1004), IME preedit drawn at the cursor |
 | **Window** | `rounded`, `square`, `compact` and `native` frames, an optional drawn title bar, Mica/Mica Alt/Acrylic backdrops, adjustable opacity |
+| **Tabs** | Multiple independent sessions, a tab strip and keyboard and mouse controls |
+| **Links** | OSC 8 and detected URLs, underlined on hover and opened with Ctrl+click for allowed schemes |
+| **Desktop** | Policy-gated OSC notifications and taskbar progress |
 | **Status bar** | Starship-style `statusbar.toml`: directory, git branch and status, last command's exit code and duration, a busy spinner, a clock |
-| **Config** | `termica.toml` with typed, validated values. Your hand edits are never overwritten |
+| **Config** | Validated TOML, live reload, and targeted UI saves that preserve comments |
 
 ## Requirements
 
@@ -61,8 +60,8 @@
 # 1. Toolchain (Scoop)
 scoop install cmake ninja git mingw-mstorsjo-llvm-ucrt
 
-# 2. Build: the first configure downloads SDL3, SDL3_ttf, tomlc17 and the
-#    prebuilt libghostty-vt, so allow a few minutes
+# 2. Build: the first configure downloads SDL3, SDL3_ttf, tomlc17, PCRE2 and
+#    the prebuilt libghostty-vt, so allow a few minutes
 pwsh -File ./build.ps1
 
 # 3. Run
@@ -83,8 +82,7 @@ build\llvm-mingw\termica.exe
 > `x86_64-w64-mingw32-*` drivers that the presets expect. SDL3 compiles some
 > C++, so the presets also set a C++ compiler.
 
-The output is a single standalone executable that links only against Windows
-system DLLs.
+The build produces `termica.exe` and the adjacent `ghostty-vt.dll`.
 
 ### Build presets
 
@@ -112,8 +110,8 @@ termica.exe --selftest               # headless test suite; exit code = failures
 
 ## Key bindings
 
-App bindings live under **Ctrl+Shift** so that they never collide with shell
-or readline bindings.
+Most application bindings use **Ctrl+Shift**; search navigation and font
+zoom also have the shortcuts below.
 
 | Keys | Action |
 |---|---|
@@ -121,6 +119,10 @@ or readline bindings.
 | `Ctrl+Shift+V` | Paste (bracketed when the program enables it; `Ctrl+V` reaches the shell) |
 | `Ctrl+Shift+T` / `Ctrl+Shift+W` | Open a new tab / close the active tab |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
+| `Ctrl+Shift+F` | Open scrollback search |
+| `Enter` / `F3`, `Shift+Enter` / `Shift+F3` | Next / previous search match |
+| `Alt+C` / `Alt+R` | Toggle case sensitivity / regular expressions in search |
+| `Escape` | Close search |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Font zoom in / out / reset |
 | `Shift+PgUp` / `Shift+PgDn` | Scroll one page |
 | `Ctrl+Shift+Up` / `Down` | Scroll one row |
@@ -138,14 +140,16 @@ to disable a binding).
 | Drag / double-click / triple-click | Select cells / a word / a line |
 | `Alt` + drag | Block selection |
 | `Shift` + drag or wheel | Take the pointer back from a program that is tracking the mouse |
+| `Ctrl` + click | Open an OSC 8 or detected HTTP, HTTPS or mailto link |
 | Wheel | Scroll the scrollback by 3 rows (or report the wheel to the program) |
 | Scrollbar | Drag the thumb, or click the track to page |
 
 ## Configuration
 
 Settings live in `%APPDATA%\termica\termica.toml`. On other platforms they are
-in `$XDG_CONFIG_HOME/termica/` or `~/.config/termica/`. The file is read at
-startup. Command-line arguments override it for that run.
+in `$XDG_CONFIG_HOME/termica/` or `~/.config/termica/`. Both configuration
+files reload while termica runs. Command-line font and size arguments take
+precedence for that run.
 
 ```toml
 [font]
@@ -164,7 +168,9 @@ copy_on_select = false
 shell = "auto"         # auto | pwsh | powershell | cmd
 # command = ["wsl.exe", "-d", "Ubuntu"]
 # cwd = 'C:\work'
-osc52 = "ask"          # ask | allow | deny
+osc52 = "deny"         # ask | allow | deny, for clipboard reads and writes
+notifications = "deny" # ask | allow | deny, for OSC 9/777 notifications
+scrollback_lines = 10000 # 0..1000000, retained in page-sized increments
 bell = "visual"        # visual | taskbar | none
 
 # [terminal.env]
@@ -179,10 +185,9 @@ bell = "visual"        # visual | taskbar | none
 # "Ctrl+V" = "paste"
 ```
 
-- **Types are strict.** `size = "16"` is rejected, not converted. An invalid
-  value keeps the default, and unknown keys are ignored.
-- **A syntax error rejects the whole file.** The parser's message and line
-  number go to stderr.
+- **Types are strict.** `size = "16"` is rejected, not converted. Invalid live
+  edits keep the previous configuration and show an in-window message.
+- **A syntax error rejects the whole file.** Unknown keys remain compatible.
 - **Key names fold case and separators.** `CopyOnSelect`, `copy-on-select` and
   `copy_on_select` are the same key.
 - **Windows paths** need escaped backslashes (`"C:\\Fonts\\x.ttf"`) or a
@@ -190,8 +195,8 @@ bell = "visual"        # visual | taskbar | none
 - **Font family names** such as `"Cascadia Code"` are resolved through the
   Windows font registry, per-user fonts first. termica finds matching
   bold and italic faces automatically.
-- **On exit** termica rewrites the file in canonical form, unless you edited it
-  while the app was running. In that case your edit is kept untouched.
+- **UI edits** save only the changed key in place, preserving other settings
+  and comments. Closing the window does not rewrite either configuration file.
 
 ### Status bar (`statusbar.toml`)
 
@@ -241,22 +246,14 @@ duration is hidden rather than reused from a previous command.
 
 ## Known limitations
 
-These are tracked in [PLAN.md](PLAN.md):
-
-- One window with one session. There are no tabs or splits yet.
-- `shell` accepts only the four built-in names. Custom commands, WSL and ssh
-  profiles are not supported yet.
-- There's no CJK or colour-emoji fallback beyond the built-in fonts.
-- Font size and DPI are fixed at startup. Moving the window to a monitor with
-  a different DPI doesn't rescale the text.
-- No colour scheme configuration, no scrollback search, no clickable URLs or
-  OSC 8 hyperlinks, and the bell is ignored.
-- A very large paste blocks the UI while it is written.
+- Native splits, session restoration and graphics protocols are not implemented.
+- Windows may suppress notifications according to its notification settings
+  or Focus Assist.
 
 ## Development
 
 ```powershell
-build\llvm-mingw\termica.exe --selftest   # 204 headless checks, no window, no input
+build\llvm-mingw\termica.exe --selftest   # headless checks, no window or input
 ```
 
 There is also an AddressSanitizer + UBSan build:

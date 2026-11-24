@@ -96,20 +96,20 @@ codebase that can grow.
 |---|---|---|
 | 2.1 | **Split up `main.c`** (done) | Extract `Session` (terminal + pty + selection + scroll state) from `App`, and separate `input.c`, `render.c`, `chrome.c` and `session.c`. No behaviour change, and the self test is unchanged. `main.c` shrunk from 2,741 to 513 lines. See [DESIGN.md › Modules](DESIGN.md#modules). |
 | 2.2 | **Tabs** (done) | `Ctrl+Shift+T` opens a tab, `Ctrl+Shift+W` closes one, `Ctrl+Tab` / `Ctrl+Shift+Tab` switches (plus mouse click, middle-click/× close, `+` button). The tab strip is drawn in the title-bar area for custom frames, and as a top strip under `native` when >1 tab is open. Closing the last tab closes the window. |
-| 2.3 | **Scrollback search** | `Ctrl+Shift+F` opens an overlay. Matches are highlighted across scrollback, with next/previous navigation and case/regex toggles. |
-| 2.4 | **Hyperlinks** | OSC 8 links and auto-detected URLs are underlined on hover and open on `Ctrl+click` through `ShellExecuteW`, after scheme allow-listing. |
-| 2.5 | **Hot reload** | `termica.toml` and `statusbar.toml` are watched with `ReadDirectoryChangesW`. Changes apply live: font, colours, keys, status bar. Invalid edits keep the old config and show a toast. |
-| 2.6 | **Notifications and progress** | OSC 9 / 777 notifications become Windows toasts, policy-gated like OSC 52. OSC 9;4 progress drives the taskbar progress bar (`ITaskbarList3`). |
-| 2.7 | **OSC 52 read** | Clipboard reads are answered under the same `ask`/`allow`/`deny` policy, with `deny` as the default. |
-| 2.8 | **Configurable scrollback** | `[terminal] scrollback_lines`, with a default and an upper bound. |
-| 2.9 | **Comment-preserving config** | The canonical rewrite on exit is dropped. termica writes only when a value actually changed through the UI, and edits that key in place. |
+| 2.3 | **Scrollback search** (done) | `Ctrl+Shift+F` opens an overlay. Matches are highlighted across scrollback, with next/previous navigation and case/regex toggles. |
+| 2.4 | **Hyperlinks** (done) | OSC 8 links and auto-detected URLs are underlined on hover and open on `Ctrl+click` through `ShellExecuteW`, after scheme allow-listing. |
+| 2.5 | **Hot reload** (done) | `termica.toml` and `statusbar.toml` are watched with `ReadDirectoryChangesW`. Changes apply live: font, colours, keys, status bar. Invalid edits keep the old config and show a toast. |
+| 2.6 | **Notifications and progress** (done) | OSC 9 / 777 notifications become Windows toasts, policy-gated like OSC 52. OSC 9;4 progress drives the taskbar progress bar (`ITaskbarList3`). |
+| 2.7 | **OSC 52 read** (done) | Clipboard reads are answered under the same `ask`/`allow`/`deny` policy, with `deny` as the default. |
+| 2.8 | **Configurable scrollback** (done) | `[terminal] scrollback_lines`, with a default and an upper bound. |
+| 2.9 | **Comment-preserving config** (done) | The canonical rewrite on exit is dropped. termica writes only when a value actually changed through the UI, and edits that key in place. |
 
 ### Exit criteria
 
-- 2.1 is merged first, as its own reviewable change.
-- Search, the URL detector, the reload diff and the OSC 9;4 parser have self tests.
-- Ten tabs running `yes` concurrently stay responsive. Closing a tab leaves no
-  orphaned processes.
+- [x] 2.1 is merged first, as its own reviewable change (`87236ab`).
+- [x] Search, the URL detector, the reload diff and the OSC 9;4 parser have self tests.
+- [x] Ten tabs running `yes` concurrently stay responsive. Closing a tab leaves no
+  orphaned processes (verified on Windows with ten ConPTY children).
 
 ---
 

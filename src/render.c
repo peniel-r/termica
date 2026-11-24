@@ -5,7 +5,9 @@
 #include "render.h"
 
 #include "chrome.h"
+#include "hyperlink.h"
 #include "style.h"
+#include "toast.h"
 
 #include <string.h>
 
@@ -17,6 +19,7 @@ typedef struct FrameContext {
     SDL_Color                 default_background;
     SDL_Color                 cursor_color;
     GhosttyCursorStyle        cursor_style;
+    const Hyperlink          *hovered_link;
 } FrameContext;
 
 typedef struct CellPaint {
@@ -31,6 +34,9 @@ typedef struct CellPaint {
     size_t          text_length;
     bool            at_cursor;
     bool            selected;
+    int             search_match;
+    bool            wide;
+    bool            hyperlink;
 } CellPaint;
 
 static float cell_x(const App *app, int column)
@@ -153,7 +159,7 @@ static void draw_cell(const FrameContext *frame, const CellPaint *cell)
     CellStyle style;
     float x = cell_x(app, cell->column);
     float y = cell_y(app, cell->row);
-    float width = (float)app->glyphs.cell_width;
+    float width = (float)app->glyphs.cell_width * (cell->wide ? 2.0f : 1.0f);
     float height = (float)app->glyphs.cell_height;
 
     const ColorScheme *scheme = &app->settings.colors;
@@ -181,6 +187,13 @@ static void draw_cell(const FrameContext *frame, const CellPaint *cell)
             style.foreground.a = 255;
         }
     }
+    if (cell->search_match && !cell->selected) {
+        style.background = cell->search_match == 2
+            ? (SDL_Color){ 255, 164, 64, 255 }
+            : (SDL_Color){ 235, 213, 94, 255 };
+        style.foreground = (SDL_Color){ 24, 24, 24, 255 };
+        style.has_background = true;
+    }
 
     if (style.has_background)
         chrome_fill_rect(app->renderer, x, y, width, height, style.background);
@@ -190,6 +203,9 @@ static void draw_cell(const FrameContext *frame, const CellPaint *cell)
     if (style.underline)
         draw_underline(app, x, y + height - 2.0f, width, style.decoration,
                        style.underline_style);
+    else if (cell->hyperlink)
+        chrome_fill_rect(app->renderer, x, y + height - 2.0f, width, 1.0f,
+                         style.foreground);
     if (style.strikethrough)
         chrome_fill_rect(app->renderer, x, y + height / 2.0f, width, 1.0f,
                          style.decoration);
@@ -267,6 +283,9 @@ void render_frame(App *app)
         GHOSTTY_INIT_SIZED(GhosttyRenderStateColors);
     GhosttyRenderStateCursor cursor_state =
         GHOSTTY_INIT_SIZED(GhosttyRenderStateCursor);
+    GhosttyTerminalScrollbar search_bar = {0};
+    Hyperlink hovered_link;
+    bool have_hovered_link = false;
     FrameContext frame;
     int pixel_width;
     int pixel_height;
@@ -278,10 +297,29 @@ void render_frame(App *app)
     if (!term)
         return;
 
+    if (session->search.open) {
+        search_refresh(&session->search, term);
+        term_scrollbar(term, &search_bar);
+    }
+    if (app->link_pointer_valid && app->glyphs.cell_width > 0 &&
+        app->glyphs.cell_height > 0 &&
+        app->link_pointer_x >= app->grid_left &&
+        app->link_pointer_y >= app->grid_top &&
+        chrome_search_hit(app, app->link_pointer_x, app->link_pointer_y) ==
+            CHROME_SEARCH_NONE) {
+        int x = (int)((app->link_pointer_x - app->grid_left) /
+                      app->glyphs.cell_width);
+        int y = (int)((app->link_pointer_y - app->grid_top) /
+                      app->glyphs.cell_height);
+        if (x < app->columns && y < app->rows)
+            have_hovered_link = hyperlink_at(term, x, y, &hovered_link);
+    }
+
     SDL_GetWindowSizeInPixels(app->window, &pixel_width, &pixel_height);
 
     /* 1. Clear to fully transparent; everything below blends over this. */
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    frame.hovered_link = have_hovered_link ? &hovered_link : NULL;
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
     SDL_RenderClear(renderer);
 
@@ -291,7 +329,7 @@ void render_frame(App *app)
                CHROME_PANEL_BORDER);
     chrome_draw_title_bar(app, pixel_width, pixel_height);
 
-    /* 3. Capture the frame. The only step that reads the terminal. */
+    /* 3. Capture the frame after search and hover have read the grid. */
     ghostty_render_state_update(term->render_state, term->handle);
 
     /* 4. Defaults and cursor, before walking the rows. */
@@ -377,6 +415,7 @@ void render_frame(App *app)
             memset(&cell, 0, sizeof cell);
             cell.column = column;
             cell.row = row_position;
+            cell.wide = wide == GHOSTTY_CELL_WIDE_WIDE;
             ghostty_render_state_row_cells_get(
                 term->cell_iterator,
                 GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE, &cell.style);
@@ -397,6 +436,11 @@ void render_frame(App *app)
                              row_position == cursor_row;
             cell.selected = selection_start >= 0 && column >= selection_start &&
                             column <= selection_end;
+            if (row_position >= 0)
+                cell.search_match = search_cell(&session->search,
+                    search_bar.offset + (uint64_t)row_position, (unsigned)column);
+            cell.hyperlink = frame.hovered_link &&
+                hyperlink_contains(frame.hovered_link, column, row_position);
 
             draw_cell(&frame, &cell);
             column++;
@@ -408,7 +452,7 @@ void render_frame(App *app)
      * place a user can see what they are mid-way through typing. It is
      * gated on the cursor being on screen, not on the blink phase - the
      * preedit must not strobe with the cursor. */
-    if (cursor_valid) {
+    if (cursor_valid && !session->search.open) {
         draw_composition(app, cursor_column, cursor_row);
         update_text_input_area(app);
     }
@@ -436,6 +480,15 @@ void render_frame(App *app)
         panel_draw(&app->panel, renderer, pixel_width, pixel_height,
                    chrome_corner_radius(app), flash, no_border);
     }
+    chrome_draw_search(app);
+    toast_render(app);
 
     SDL_RenderPresent(renderer);
+    if (search_pending(&session->search)) {
+        SDL_Event event;
+        SDL_zero(event);
+        event.type = SDL_EVENT_USER;
+        event.user.code = APP_EVENT_SEARCH;
+        SDL_PushEvent(&event);
+    }
 }

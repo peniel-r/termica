@@ -65,6 +65,19 @@ if(NOT WIN32)
     target_link_libraries(tomlc17 PUBLIC m)
 endif()
 
+# ---- PCRE2: Unicode-aware regular expressions for scrollback search ----------
+set(PCRE2_BUILD_PCRE2_8 ON CACHE BOOL "" FORCE)
+set(PCRE2_BUILD_PCRE2_16 OFF CACHE BOOL "" FORCE)
+set(PCRE2_BUILD_PCRE2_32 OFF CACHE BOOL "" FORCE)
+set(PCRE2_BUILD_PCRE2GREP OFF CACHE BOOL "" FORCE)
+set(PCRE2_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(PCRE2_SUPPORT_UNICODE ON CACHE BOOL "" FORCE)
+FetchContent_Declare(pcre2
+    GIT_REPOSITORY https://github.com/PCRE2Project/pcre2.git
+    GIT_TAG pcre2-10.46
+    GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(pcre2)
+
 # ---- libghostty-vt -----------------------------------------------------------
 # Docs: https://lib.ghostty.org/vt/installing.html
 #
@@ -133,6 +146,17 @@ add_executable(termica
     src/statusbar.c
     src/font_lookup.c
     src/selftest.c
+    src/clipboard.c
+    src/config_watch.c
+    src/config_test.c
+    src/desktop_signal.c
+    src/desktop_signal_test.c
+    src/hyperlink.c
+    src/hyperlink_test.c
+    src/search.c
+    src/search_test.c
+    src/toast.c
+    src/ui_settings.c
     src/glyph.c
     src/git.c
     src/style.c
@@ -153,6 +177,13 @@ add_executable(termica
     src/settings.h
     src/statusbar.h
     src/font_lookup.h
+    src/clipboard.h
+    src/config_watch.h
+    src/desktop_signal.h
+    src/hyperlink.h
+    src/search.h
+    src/toast.h
+    src/ui_settings.h
     src/glyph.h
     src/git.h
     src/style.h
@@ -179,6 +210,7 @@ endif()
 target_link_libraries(termica PRIVATE SDL3_ttf::SDL3_ttf SDL3::SDL3)
 target_link_libraries(termica PRIVATE ghostty-vt::ghostty-vt)
 target_link_libraries(termica PRIVATE tomlc17)
+target_link_libraries(termica PRIVATE pcre2-8-static)
 
 if(WIN32)
     # ghostty-vt.dll must sit next to the exe (or on PATH).
@@ -212,5 +244,5 @@ if(TERMICA_SANITIZE)
 endif()
 
 if(WIN32)
-    target_link_libraries(termica PRIVATE dwmapi)
+    target_link_libraries(termica PRIVATE dwmapi shell32 ole32 runtimeobject)
 endif()

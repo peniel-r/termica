@@ -136,6 +136,7 @@ static const NamedAction ACTION_NAMES[] = {
     { "close_tab",        KEY_ACTION_CLOSE_TAB },
     { "next_tab",         KEY_ACTION_NEXT_TAB },
     { "prev_tab",         KEY_ACTION_PREV_TAB },
+    { "search",           KEY_ACTION_SEARCH },
     { "quit",             KEY_ACTION_QUIT },
 };
 
@@ -376,4 +377,5 @@ void keys_default(KeyMap *map)
     keys_set(map, SDL_SCANCODE_W,        cs,            KEY_ACTION_CLOSE_TAB);
     keys_set(map, SDL_SCANCODE_TAB,      KEY_MOD_CTRL,  KEY_ACTION_NEXT_TAB);
     keys_set(map, SDL_SCANCODE_TAB,      cs,            KEY_ACTION_PREV_TAB);
+    keys_set(map, SDL_SCANCODE_F,        cs,            KEY_ACTION_SEARCH);
 }

@@ -16,12 +16,12 @@
  *   [terminal]
  *   copy_on_select = false
  *   shell = "auto"
- *   osc52 = "ask"
+ *   osc52 = "deny"
+ *   notifications = "deny"
+ *   scrollback_lines = 10000
  *
- * Unknown keys, wrong types and out-of-range values are ignored one at a
- * time. A syntax error rejects the whole document, which is what TOML
- * parsers do; the app then keeps its defaults and says why on stderr. The
- * file is rewritten in a canonical form on exit, so comments are not kept.
+ * The legacy overlay parser ignores individual unknown or invalid values.
+ * Live reload validates recognized values before committing the new state.
  */
 
 #include "settings.h"
@@ -44,26 +44,6 @@
 /* Longest file we are willing to read; the real one is a dozen lines. */
 #define SETTINGS_MAX_BYTES 65536
 
-/* Room for the formatted file, including command, env and key overrides. */
-#define SETTINGS_FORMAT_BYTES 16384
-
-/* Fingerprint of the file as it was read. The save on exit is skipped when
- * the file changed while the app ran, so a hand edit is not overwritten by
- * the values the app still has in memory. */
-static bool loaded_file_seen;
-static uint64_t loaded_file_hash;
-
-uint64_t config_hash_bytes(const char *data, size_t length)
-{
-    uint64_t hash = 14695981039346656037ULL;
-    size_t index;
-
-    for (index = 0; index < length; index++) {
-        hash ^= (unsigned char)data[index];
-        hash *= 1099511628211ULL;
-    }
-    return hash;
-}
 
 void settings_default(Settings *settings)
 {
@@ -75,7 +55,9 @@ void settings_default(Settings *settings)
     settings->title_bar = true;
     settings->copy_on_select = false;
     settings->shell = SETTINGS_SHELL_AUTO;
-    settings->osc52 = SETTINGS_OSC52_ASK;
+    settings->osc52 = SETTINGS_OSC52_DENY;
+    settings->notifications = SETTINGS_OSC52_DENY;
+    settings->scrollback_lines = SETTINGS_SCROLLBACK_DEFAULT;
     settings->bell = SETTINGS_BELL_VISUAL;
     colors_preset(&settings->colors, "dark");
     keys_default(&settings->keys);
@@ -180,7 +162,7 @@ static bool apply_font(Settings *settings, toml_datum_t table)
             if (ok) {
                 for (i = 0; i < count; i++)
                     memcpy(settings->font_fallback[i], parsed[i],
-                           sizeof parsed[0]);
+                           strlen(parsed[i]) + 1);
                 settings->font_fallback_count = count;
                 changed = true;
             }
@@ -271,7 +253,7 @@ static bool apply_terminal_command(Settings *settings, toml_datum_t array)
         parsed[index][length] = '\0';
     }
     for (index = 0; index < count; index++)
-        memcpy(settings->command[index], parsed[index], SETTINGS_ARG_MAX);
+        memcpy(settings->command[index], parsed[index], strlen(parsed[index]) + 1);
     settings->command_argc = count;
     return true;
 }
@@ -355,6 +337,17 @@ static bool apply_terminal(Settings *settings, toml_datum_t table)
                 settings->osc52 = SETTINGS_OSC52_DENY;
                 changed = true;
             }
+        } else if (key_is(key, "notifications") && value.type == TOML_STRING) {
+            if (strcmp(value.u.s, "ask") == 0) {
+                settings->notifications = SETTINGS_OSC52_ASK;
+                changed = true;
+            } else if (strcmp(value.u.s, "allow") == 0) {
+                settings->notifications = SETTINGS_OSC52_ALLOW;
+                changed = true;
+            } else if (strcmp(value.u.s, "deny") == 0) {
+                settings->notifications = SETTINGS_OSC52_DENY;
+                changed = true;
+            }
         } else if (key_is(key, "bell") && value.type == TOML_STRING) {
             if (strcmp(value.u.s, "visual") == 0) {
                 settings->bell = SETTINGS_BELL_VISUAL;
@@ -381,6 +374,11 @@ static bool apply_terminal(Settings *settings, toml_datum_t table)
         } else if (key_is(key, "env")) {
             if (apply_terminal_env(settings, value))
                 changed = true;
+        } else if (key_is(key, "scrollback_lines") &&
+                   value.type == TOML_INT64 && value.u.int64 >= 0 &&
+                   value.u.int64 <= SETTINGS_SCROLLBACK_MAX) {
+            settings->scrollback_lines = (int)value.u.int64;
+            changed = true;
         }
     }
     return changed;
@@ -590,6 +588,172 @@ bool settings_parse_toml(Settings *settings, const char *text, size_t length)
     return parse_toml(settings, text, length, NULL, 0);
 }
 
+/* Validate known values individually with the same rules as the legacy
+ * overlay parser. Unknown keys are intentionally ignored for compatibility. */
+static bool settings_known_key(const char *table, const char *key)
+{
+    static const char *const font[] = { "face", "path", "size", "fallback" };
+    static const char *const window[] = { "opacity", "backdrop", "decoration", "title_bar" };
+    static const char *const terminal[] = { "copy_on_select", "shell", "osc52", "notifications", "bell", "command", "cwd", "env", "scrollback_lines" };
+    static const char *const colors[] = { "scheme", "palette", "foreground", "background", "cursor", "selection_foreground", "selection_fg", "selection_background", "selection_bg" };
+    const char *const *names = NULL;
+    size_t count = 0, i;
+    if (key_is(table, "keys")) return true;
+    if (key_is(table, "font")) { names = font; count = sizeof font / sizeof font[0]; }
+    else if (key_is(table, "window")) { names = window; count = sizeof window / sizeof window[0]; }
+    else if (key_is(table, "terminal")) { names = terminal; count = sizeof terminal / sizeof terminal[0]; }
+    else if (key_is(table, "colors")) {
+        names = colors; count = sizeof colors / sizeof colors[0];
+        for (i = 0; i < 16; i++)
+            if (key_is(key, PALETTE_KEY_NAMES[i])) return true;
+    }
+    for (i = 0; i < count; i++)
+        if (key_is(key, names[i])) return true;
+    return false;
+}
+
+static bool settings_validate_table(const char *name, toml_datum_t table,
+                                    char *error, size_t capacity)
+{
+    int i;
+    bool known = key_is(name, "font") || key_is(name, "window") ||
+                 key_is(name, "terminal") || key_is(name, "colors") ||
+                 key_is(name, "keys");
+    if (!known) return true;
+    if (table.type != TOML_TABLE) {
+        if (error && capacity) snprintf(error, capacity, "[%s] must be a table", name);
+        return false;
+    }
+    for (i = 0; i < table.u.tab.size; i++) {
+        const char *key = table.u.tab.key[i];
+        toml_datum_t value = table.u.tab.value[i];
+        toml_datum_t one = table;
+        Settings scratch;
+        bool valid;
+        int j;
+        if (!settings_known_key(name, key)) continue;
+        settings_default(&scratch);
+        one.u.tab.size = 1;
+        one.u.tab.key = &table.u.tab.key[i];
+        one.u.tab.value = &table.u.tab.value[i];
+        if (key_is(name, "terminal") && key_is(key, "env")) {
+            valid = value.type == TOML_TABLE && value.u.tab.size <= SETTINGS_MAX_ENV;
+            for (j = 0; valid && j < value.u.tab.size; j++) {
+                toml_datum_t entry = value;
+                entry.u.tab.size = 1;
+                entry.u.tab.key = &value.u.tab.key[j];
+                entry.u.tab.value = &value.u.tab.value[j];
+                valid = apply_terminal_env(&scratch, entry);
+            }
+        } else if (key_is(name, "colors") && key_is(key, "palette")) {
+            valid = value.type == TOML_ARRAY && value.u.arr.size <= 16;
+            for (j = 0; valid && j < value.u.arr.size; j++) {
+                ColorRgb rgb;
+                toml_datum_t element = value.u.arr.elem[j];
+                valid = element.type == TOML_STRING &&
+                        (int)strlen(element.u.s) == element.u.str.len &&
+                        colors_parse_hex(element.u.s, &rgb);
+            }
+        } else {
+            valid = apply_table(&scratch, name, one);
+        }
+        if (value.type == TOML_STRING &&
+            (value.u.str.len < 0 || memchr(value.u.str.ptr, '\0', (size_t)value.u.str.len)))
+            valid = false;
+        if (!valid) {
+            if (error && capacity) snprintf(error, capacity, "invalid %s.%s", name, key);
+            return false;
+        }
+    }
+    if (key_is(name, "keys") && table.u.tab.size > SETTINGS_MAX_KEY_OVERRIDES) {
+        if (error && capacity) snprintf(error, capacity, "too many key bindings");
+        return false;
+    }
+    return true;
+}
+
+static unsigned settings_diff(const Settings *old, const Settings *next)
+{
+    unsigned diff = 0;
+    int i;
+    if (strcmp(old->font, next->font) || old->point_size != next->point_size ||
+        old->font_fallback_count != next->font_fallback_count)
+        diff |= SETTINGS_DIFF_FONT;
+    else for (i = 0; i < old->font_fallback_count; i++)
+        if (strcmp(old->font_fallback[i], next->font_fallback[i]))
+            diff |= SETTINGS_DIFF_FONT;
+    if (memcmp(&old->colors, &next->colors, sizeof old->colors))
+        diff |= SETTINGS_DIFF_COLORS;
+    if (memcmp(&old->keys, &next->keys, sizeof old->keys))
+        diff |= SETTINGS_DIFF_KEYS;
+    if (old->panel_opacity != next->panel_opacity || old->backdrop != next->backdrop ||
+        old->decoration != next->decoration || old->title_bar != next->title_bar)
+        diff |= SETTINGS_DIFF_WINDOW;
+    if (old->copy_on_select != next->copy_on_select || old->shell != next->shell ||
+        old->osc52 != next->osc52 || old->notifications != next->notifications ||
+        old->bell != next->bell || old->scrollback_lines != next->scrollback_lines ||
+        old->command_argc != next->command_argc || strcmp(old->cwd, next->cwd) ||
+        old->env_count != next->env_count)
+        diff |= SETTINGS_DIFF_TERMINAL;
+    for (i = 0; i < old->command_argc && i < next->command_argc; i++)
+        if (strcmp(old->command[i], next->command[i])) diff |= SETTINGS_DIFF_TERMINAL;
+    for (i = 0; i < old->env_count && i < next->env_count; i++)
+        if (strcmp(old->env[i].key, next->env[i].key) ||
+            strcmp(old->env[i].value, next->env[i].value)) diff |= SETTINGS_DIFF_TERMINAL;
+    return diff;
+}
+
+bool settings_reload_text(Settings *settings, const char *text, size_t length,
+                          unsigned *diff, char *error, size_t error_capacity)
+{
+    toml_result_t document;
+    Settings candidate;
+    int i;
+    if (diff) *diff = 0;
+    if (error && error_capacity) error[0] = '\0';
+    if (!settings || !text || length > SETTINGS_MAX_BYTES) {
+        if (error && error_capacity) snprintf(error, error_capacity, "invalid or oversized settings");
+        return false;
+    }
+    document = toml_parse(text, (int)length);
+    if (!document.ok) {
+        if (error && error_capacity) snprintf(error, error_capacity, "%s", document.errmsg);
+        toml_free(document);
+        return false;
+    }
+    settings_default(&candidate);
+    for (i = 0; i < document.toptab.u.tab.size; i++) {
+        const char *name = document.toptab.u.tab.key[i];
+        toml_datum_t table = document.toptab.u.tab.value[i];
+        if (!settings_validate_table(name, table, error, error_capacity)) {
+            toml_free(document);
+            return false;
+        }
+        apply_table(&candidate, name, table);
+    }
+    toml_free(document);
+    if (diff) *diff = settings_diff(settings, &candidate);
+    *settings = candidate;
+    return true;
+}
+
+bool settings_reload(Settings *settings, unsigned *diff,
+                     char *error, size_t error_capacity)
+{
+    char path[512];
+    char *text;
+    size_t length;
+    bool ok;
+    if (diff) *diff = 0;
+    if (!settings_path(path, sizeof path) || !(text = SDL_LoadFile(path, &length))) {
+        if (error && error_capacity) snprintf(error, error_capacity, "cannot read termica.toml");
+        return false;
+    }
+    ok = settings_reload_text(settings, text, length, diff, error, error_capacity);
+    SDL_free(text);
+    return ok;
+}
+
 static void append_piece(char *out, size_t capacity, size_t *used,
                          const char *piece, size_t length)
 {
@@ -660,6 +824,7 @@ void settings_format(const Settings *settings, char *out, size_t capacity)
 {
     const char *shell = "auto";
     const char *osc52 = "ask";
+    const char *notifications = "ask";
     const char *bell = "visual";
     const char *backdrop = "panel";
     const char *decoration = "rounded";
@@ -682,6 +847,11 @@ void settings_format(const Settings *settings, char *out, size_t capacity)
     switch (settings->osc52) {
     case SETTINGS_OSC52_ALLOW: osc52 = "allow"; break;
     case SETTINGS_OSC52_DENY: osc52 = "deny"; break;
+    default: break;
+    }
+    switch (settings->notifications) {
+    case SETTINGS_OSC52_ALLOW: notifications = "allow"; break;
+    case SETTINGS_OSC52_DENY: notifications = "deny"; break;
     default: break;
     }
     switch (settings->bell) {
@@ -749,11 +919,13 @@ void settings_format(const Settings *settings, char *out, size_t capacity)
                  "copy_on_select = %s\n"
                  "shell = \"%s\"\n"
                  "osc52 = \"%s\"\n"
-                 "bell = \"%s\"\n",
+                 "notifications = \"%s\"\n"
+                 "bell = \"%s\"\n"
+                 "scrollback_lines = %d\n",
                  opacity, backdrop, decoration,
                  settings->title_bar ? "true" : "false",
                  settings->copy_on_select ? "true" : "false",
-                 shell, osc52, bell);
+                 shell, osc52, notifications, bell, settings->scrollback_lines);
         append_piece(out, capacity, &used, middle, strlen(middle));
     }
 
@@ -936,8 +1108,6 @@ bool settings_load(Settings *settings)
 
     if (!settings)
         return false;
-    loaded_file_seen = false;
-    loaded_file_hash = 0;
     settings_default(settings);
     if (!settings_path(path, sizeof path))
         return false;
@@ -954,8 +1124,6 @@ bool settings_load(Settings *settings)
         return false;
     }
 
-    loaded_file_seen = true;
-    loaded_file_hash = config_hash_bytes(contents, length);
     parsed = parse_toml(settings, contents, length, error, sizeof error);
     SDL_free(contents);
     if (error[0])
@@ -963,64 +1131,3 @@ bool settings_load(Settings *settings)
     return parsed;
 }
 
-bool settings_save(const Settings *settings)
-{
-    char path[512];
-    char temporary[520];
-    char text[SETTINGS_FORMAT_BYTES];
-    SDL_PathInfo info;
-    SDL_IOStream *stream;
-    size_t length;
-    bool exists;
-
-    if (!settings || !settings_path(path, sizeof path))
-        return false;
-
-    /* Do not overwrite a file that appeared, disappeared or changed after
-     * it was read: the user may have edited it while the app was running. */
-    exists = SDL_GetPathInfo(path, &info) && info.type == SDL_PATHTYPE_FILE;
-    if (exists != loaded_file_seen)
-        return false;
-    if (exists) {
-        size_t current_length = 0;
-        char *current = (char *)SDL_LoadFile(path, &current_length);
-        bool same;
-
-        if (!current || current_length > SETTINGS_MAX_BYTES) {
-            SDL_free(current);
-            return false;
-        }
-        same = config_hash_bytes(current, current_length) == loaded_file_hash;
-        SDL_free(current);
-        if (!same)
-            return false;
-    }
-
-    config_create_directory(path);
-    settings_format(settings, text, sizeof text);
-    length = strlen(text);
-
-    if (snprintf(temporary, sizeof temporary, "%s.tmp", path) >=
-        (int)sizeof temporary)
-        return false;
-
-    stream = SDL_IOFromFile(temporary, "w");
-    if (!stream)
-        return false;
-    if (SDL_WriteIO(stream, text, length) != length) {
-        SDL_CloseIO(stream);
-        SDL_RemovePath(temporary);
-        return false;
-    }
-    if (!SDL_CloseIO(stream)) {
-        SDL_RemovePath(temporary);
-        return false;
-    }
-    if (!SDL_RenamePath(temporary, path)) {
-        SDL_RemovePath(temporary);
-        return false;
-    }
-    loaded_file_seen = true;
-    loaded_file_hash = config_hash_bytes(text, length);
-    return true;
-}

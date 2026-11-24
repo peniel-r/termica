@@ -223,6 +223,11 @@ static void on_reset(GhosttyTerminal terminal, void *userdata)
     term->command_start_pending = false;
     term->last_exit_code = 0;
     term->last_command_ms = 0;
+    term->notification_head = 0;
+    term->notification_count = 0;
+    term->progress.state = GHOSTTY_TERMINAL_PROGRESS_STATE_REMOVE;
+    term->progress.progress = -1;
+    term->progress_changed = true;
 }
 
 /* The library needs to answer device status reports, mode queries and
@@ -341,6 +346,130 @@ void term_set_clipboard_write(Term *term, TermClipboardWriteFn write,
     term->clipboard_userdata = userdata;
 }
 
+static void on_clipboard_read(GhosttyTerminal terminal, void *userdata,
+                              const GhosttyClipboardRead *request)
+{
+    Term *term = (Term *)userdata;
+    GhosttyClipboardReadReply reply = GHOSTTY_INIT_SIZED(GhosttyClipboardReadReply);
+    GhosttyClipboardContent content = { 0 };
+    static const char mime[] = "text/plain";
+    char name[128];
+    char *text = NULL;
+    TermClipboardResult result = TERM_CLIPBOARD_DENIED;
+    size_t n;
+
+    (void)terminal;
+    if (!request || !request->reply)
+        return;
+    n = request->name.ptr && request->name.len < sizeof name - 1
+            ? request->name.len : (request->name.ptr ? sizeof name - 1 : 0);
+    if (n)
+        memcpy(name, request->name.ptr, n);
+    name[n] = '\0';
+
+    if (request->location != GHOSTTY_CLIPBOARD_LOCATION_STANDARD) {
+        result = TERM_CLIPBOARD_UNSUPPORTED;
+    } else if (term && term->clipboard_read) {
+        result = term->clipboard_read(term->clipboard_read_userdata, name,
+                                      request->granted, &text);
+    }
+    if (result == TERM_CLIPBOARD_ALLOWED && text) {
+        content.mime.ptr = (const uint8_t *)mime;
+        content.mime.len = sizeof mime - 1;
+        content.data.ptr = (const uint8_t *)text;
+        content.data.len = strlen(text);
+        reply.result = GHOSTTY_CLIPBOARD_READ_RESULT_SUCCESS;
+        reply.contents = &content;
+        reply.contents_len = 1;
+        reply.available = &content.mime;
+        reply.available_len = 1;
+    } else if (result == TERM_CLIPBOARD_UNSUPPORTED) {
+        reply.result = GHOSTTY_CLIPBOARD_READ_RESULT_UNSUPPORTED;
+    } else {
+        reply.result = GHOSTTY_CLIPBOARD_READ_RESULT_DENIED;
+    }
+    request->reply(request, &reply);
+    SDL_free(text);
+}
+
+void term_set_clipboard_read(Term *term, TermClipboardReadFn read, void *userdata)
+{
+    if (!term)
+        return;
+    term->clipboard_read = read;
+    term->clipboard_read_userdata = userdata;
+}
+
+bool term_set_scrollback_lines(Term *term, size_t lines)
+{
+    size_t unlimited = SIZE_MAX;
+
+    if (!term || !term->handle)
+        return false;
+    /* A byte limit would otherwise silently truncate the requested lines. */
+    return ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
+                                &unlimited) == GHOSTTY_SUCCESS &&
+           ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES,
+                                &lines) == GHOSTTY_SUCCESS;
+}
+
+static void copy_ghostty_string(char *out, size_t capacity, GhosttyString in)
+{
+    size_t length = in.ptr ? in.len : 0;
+    if (length >= capacity) {
+        length = capacity - 1;
+        /* Do not leave a partial UTF-8 sequence at the buffer boundary. */
+        while (length > 0 && (in.ptr[length] & 0xc0) == 0x80)
+            length--;
+    }
+    if (length)
+        memcpy(out, in.ptr, length);
+    out[length] = '\0';
+}
+
+static void on_desktop_notification(GhosttyTerminal terminal, void *userdata,
+                                    const GhosttyTerminalDesktopNotification *event)
+{
+    Term *term = (Term *)userdata;
+    TermNotification *item;
+    unsigned index;
+
+    (void)terminal;
+    if (!term || !event || term->notification_count == TERM_NOTIFICATION_QUEUE)
+        return;
+    if (!term->notifications) {
+        term->notifications = malloc(TERM_NOTIFICATION_QUEUE * sizeof *term->notifications);
+        if (!term->notifications)
+            return;
+    }
+    index = (term->notification_head + term->notification_count) % TERM_NOTIFICATION_QUEUE;
+    item = &term->notifications[index];
+    copy_ghostty_string(item->title, sizeof item->title, event->title);
+    copy_ghostty_string(item->body, sizeof item->body, event->body);
+    term->notification_count++;
+}
+
+bool term_take_notification(Term *term, TermNotification *out)
+{
+    if (!term || !out || term->notification_count == 0)
+        return false;
+    *out = term->notifications[term->notification_head];
+    term->notification_head = (term->notification_head + 1) % TERM_NOTIFICATION_QUEUE;
+    term->notification_count--;
+    return true;
+}
+
+static void on_progress_report(GhosttyTerminal terminal, void *userdata,
+                               const GhosttyTerminalProgressReport *event)
+{
+    Term *term = (Term *)userdata;
+    (void)terminal;
+    if (term && event) {
+        term->progress = *event;
+        term->progress_changed = true;
+    }
+}
+
 bool term_init(Term *term, uint16_t columns, uint16_t rows)
 {
     bool ok = false;
@@ -385,6 +514,12 @@ bool term_init(Term *term, uint16_t columns, uint16_t rows)
                          (const void *)on_reset);
     ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_WRITE_PTY,
                          (const void *)on_write_pty);
+    ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_CLIPBOARD_READ,
+                         (const void *)on_clipboard_read);
+    ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_DESKTOP_NOTIFICATION,
+                         (const void *)on_desktop_notification);
+    ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_PROGRESS_REPORT,
+                         (const void *)on_progress_report);
     /* Only useful once the app installs a handler; registering it always is
      * what lets the kitty protocol know this terminal can answer at all. */
     ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE,
@@ -410,6 +545,7 @@ void term_free(Term *term)
     ghostty_render_state_row_iterator_free(term->row_iterator);
     ghostty_render_state_free(term->render_state);
     ghostty_terminal_free(term->handle);
+    free(term->notifications);
     memset(term, 0, sizeof *term);
 }
 

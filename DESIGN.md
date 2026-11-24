@@ -71,24 +71,28 @@ It never reimplements an escape sequence.
 |---|---|---|
 | `main.c` | Entry point, CLI parsing, startup/teardown, timers, `fit_grid`, event loop | `app`, `session`, `input`, `render`, `chrome`, `console`, `embed`, `font_lookup` |
 | `app.h` | Shared `App` struct, layout/timer constants and `SDL_EVENT_USER` codes | `session`, `git`, `glyph`, `panel`, `settings`, `statusbar`, `window` |
-| `session.{h,c}` | Per-session `Session` state: terminal, ConPTY, selection gestures, IME preedit, paste, pump | `term`, `pty`, `settings`, SDL |
-| `input.{h,c}` | Keyboard/scancode bindings, text/IME, mouse routing, OSC 22 cursor shape, autoscroll, focus, OSC 52 policy | `app`, `chrome` |
-| `render.{h,c}` | Frame rendering from libghostty's render state (cells, underlines, cursor, IME preedit) | `app`, `chrome`, `style` |
-| `chrome.{h,c}` | Frame preset geometry, custom title bar, scrollbar control, status bar tick and rendering | `app` |
-| `term.{h,c}` | Terminal, render state, key, mouse and focus encoders, selection, paste, OSC callbacks (title, pwd, OSC 133, OSC 52) | libghostty-vt |
+| `session.{h,c}` | Per-tab terminal, ConPTY, search, selection, IME and bounded output pump | `term`, `pty`, `search`, SDL |
+| `input.{h,c}` | Keyboard, text/IME, mouse, search and hyperlink interaction | `app`, `chrome`, `hyperlink` |
+| `render.{h,c}` | Frame rendering, search highlights and hovered links | `app`, `chrome`, `style` |
+| `chrome.{h,c}` | Frame geometry, tab strip, search overlay and status bar | `app` |
+| `term.{h,c}` | Terminal state, encoders, selection and OSC callbacks | libghostty-vt |
 | `pty.{h,c}` | Pipes, `CreatePseudoConsole`, child process, job object, reader thread, ring buffer, resize, ordered close | Win32 only, **no SDL** |
 | `glyph.{h,c}` | Opening fonts (disk, family, embedded), bold and italic faces, glyph cache, fallback, drawing cell text | SDL3_ttf, `embed`, `font_lookup` |
 | `style.{h,c}` | Turns a cell style into colours and decorations | pure |
 | `geometry.{h,c}` | Squircle math shared by the panel and the window region | pure |
 | `panel.{h,c}` | Translucent panel fill and border, antialiased corner masks | SDL renderer |
 | `window.{h,c}` | Window creation, decoration presets, hit test, DWM backdrop, `SetWindowRgn` | SDL, DWM |
-| `settings.{h,c}` | `termica.toml`: load, validate, canonical save, edit fingerprint | tomlc17 |
-| `statusbar.{h,c}` | `statusbar.toml`, format and style grammar, module values, line layout | tomlc17 |
+| `settings.{h,c}`, `statusbar.{h,c}` | Validated TOML settings and transactional reload | tomlc17 |
+| `config_watch.{h,c}`, `ui_settings.{h,c}` | Windows file watch and comment-preserving UI edits | Win32, SDL, tomlc17 |
+| `search.{h,c}` | Incremental scrollback search and match navigation | libghostty-vt, PCRE2 |
+| `hyperlink.{h,c}` | OSC 8 and detected URLs, scheme validation and opening | libghostty-vt, Win32 |
+| `clipboard.{h,c}`, `desktop_signal.{h,c}` | Clipboard read policy, notifications and taskbar progress | SDL, Win32 |
+| `toast.{h,c}` | In-window reload and save error feedback | SDL |
 | `git.{h,c}` | Background `git status --porcelain=v2 --branch` and its parser | Win32 |
 | `font_lookup.{h,c}` | Installed family name → `.ttf` path through the registry | Win32 |
 | `embed.{h,c}`, `fonts.rc.in` | Fonts compiled in as RCDATA (IDs 1-4: Maple Mono NF, 5: Symbols NF) | Win32 resources |
 | `console.{h,c}` | Reattaches the launching console for diagnostics (GUI-subsystem exe) | Win32 |
-| `selftest.c` | `--selftest`: 204 headless checks, including real ConPTY round trips | all of the above |
+| `selftest.c` | Headless checks, including real ConPTY round trips | all of the above |
 
 `style.c` and `geometry.c` have no SDL or Win32 state, and `pty.c` has no
 SDL dependency. That separation is what keeps most of the code headless-testable.
@@ -211,8 +215,9 @@ flowchart TD
 
 ## Rendering
 
-Each frame is drawn from libghostty's **render state**. termica never reads
-the screen buffer directly.
+Each frame is drawn from libghostty's **render state**. Search and hyperlink
+lookup also read grid snapshots on the main thread; those snapshots are not
+retained across terminal mutations.
 
 1. Panel: either the translucent fill with squircle masks, or a light tint
    over the DWM backdrop.
@@ -245,22 +250,15 @@ flowchart TD
 
 ## Configuration lifecycle
 
-Both TOML files follow the same lifecycle.
+Both files load over defaults at startup. On Windows, an overlapped
+`ReadDirectoryChangesW` watch signals changed names; the main loop reloads a
+fresh candidate and applies it only after validation. A failed reload keeps
+the previous configuration and displays a toast. Font, colors, keys,
+scrollback, window settings and status bar changes apply to running sessions.
 
-```mermaid
-stateDiagram-v2
-    [*] --> Defaults
-    Defaults --> Parsed: SDL_LoadFile + toml_parse
-    Parsed --> Applied: per-key typed validation\n(bad value keeps default)
-    Defaults --> Applied: syntax error (whole doc rejected, stderr)
-    Applied --> Fingerprinted: FNV-1a of bytes read
-    Fingerprinted --> Running: CLI overrides applied
-    Running --> CheckDisk: exit
-    CheckDisk --> Save: file unchanged on disk
-    CheckDisk --> Skip: file edited, created or deleted
-    Save --> [*]: write temp + rename (atomic)
-    Skip --> [*]
-```
+UI changes write only the affected key. The editor preserves other bytes and
+comments, compares the file before replacing it, and uses an atomic rename.
+Closing the app does not rewrite either file.
 
 ## Status bar
 
@@ -352,8 +350,8 @@ style = "fg:#F54F2E"
 
 ## Target architecture (v0.2)
 
-Today `App` in `main.c` owns exactly one terminal, one pty and one selection.
-Tabs need these per-session parts split out. This is PLAN item 2.1.
+`App` owns shared window state and a list of independent `Session`s, each
+with its own terminal, ConPTY, search and selection state.
 
 ```mermaid
 classDiagram
@@ -605,3 +603,19 @@ otherwise.
 - **Consequences:** Claims stay honest. Some features (IME, autoscroll, the
   OSC 22 cursor) wait for a human pass before release (see PLAN v0.1 exit
   criteria).
+
+### ADR-017: Bounded search, explicit desktop effects and live config
+
+- **Decision:** Search uses PCRE2 with bounded work per frame; terminal grid
+  access stays on the main thread. Each session's output pump is bounded so
+  continuous output cannot monopolize the event loop. Hyperlinks are resolved
+  at the pointer and only HTTP, HTTPS and mailto URIs reach the OS.
+- **Decision:** OSC clipboard reads and notifications are policy-gated and
+  default to deny. Notifications and taskbar progress are dispatched outside
+  libghostty callbacks. Windows toast registration is deferred until an
+  approved notification.
+- **Decision:** Watch both TOML files and apply validated snapshots live. Save
+  only keys changed through the UI rather than rewriting the file on exit.
+- **Consequences:** Search can advance incrementally over large histories;
+  Windows controls whether a submitted toast is displayed. A simultaneous
+  external edit can still race the final compare-and-rename of a UI save.

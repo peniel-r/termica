@@ -47,6 +47,20 @@ typedef TermClipboardResult (*TermClipboardWriteFn)(void *userdata,
                                                     size_t length,
                                                     const char *name);
 
+/* On success, the handler returns SDL-allocated UTF-8 text in *text; the
+ * terminal frees it after answering the request. */
+typedef TermClipboardResult (*TermClipboardReadFn)(void *userdata,
+                                                   const char *name,
+                                                   bool granted, char **text);
+
+#define TERM_NOTIFICATION_QUEUE 16
+#define TERM_NOTIFICATION_TITLE 256
+#define TERM_NOTIFICATION_BODY 2048
+typedef struct TermNotification {
+    char title[TERM_NOTIFICATION_TITLE];
+    char body[TERM_NOTIFICATION_BODY];
+} TermNotification;
+
 struct Term {
     GhosttyTerminal               handle;        /* the screen state      */
     GhosttyRenderState            render_state;  /* the frame we draw     */
@@ -73,6 +87,15 @@ struct Term {
      * outlive it. */
     TermClipboardWriteFn clipboard_write;
     void                *clipboard_userdata;
+    TermClipboardReadFn clipboard_read;
+    void               *clipboard_read_userdata;
+
+    /* Effects are collected inside VT callbacks and consumed afterwards. */
+    TermNotification *notifications; /* allocated only on first notification */
+    unsigned notification_head;
+    unsigned notification_count;
+    bool progress_changed;
+    GhosttyTerminalProgressReport progress;
 
     uint16_t columns;
     uint16_t rows;
@@ -117,6 +140,16 @@ void term_set_writer(Term *term, TermWriteFn writer, void *userdata);
  * library's requests are ignored (and the kitty protocol answers ENOSYS). */
 void term_set_clipboard_write(Term *term, TermClipboardWriteFn write,
                               void *userdata);
+
+/* Install the policy handler for clipboard reads. NULL denies requests. */
+void term_set_clipboard_read(Term *term, TermClipboardReadFn read,
+                             void *userdata);
+
+/* Configure retained history; Ghostty prunes in page-sized increments. */
+bool term_set_scrollback_lines(Term *term, size_t lines);
+
+/* Retrieve one queued OSC 9/777 notification, if present. */
+bool term_take_notification(Term *term, TermNotification *out);
 
 /* Create the terminal and everything around it. False on failure. */
 bool term_init(Term *term, uint16_t columns, uint16_t rows);

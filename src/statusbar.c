@@ -1,11 +1,8 @@
 /*
  * termica - the bottom status bar. See statusbar.h.
  *
- * statusbar.toml is read and written the same way as termica.toml: parsed
- * with tomlc17, unknown keys / wrong types / out-of-range values ignored
- * one at a time, a syntax error rejecting the whole document, and a
- * canonical rewrite on exit guarded by a file fingerprint so a hand edit
- * made while the app runs is not clobbered.
+ * Initial loading uses the legacy tolerant parser. Live reload validates
+ * recognized values transactionally, retaining the old bar on errors.
  */
 
 #include "statusbar.h"
@@ -29,9 +26,6 @@
 /* Longest file we are willing to read. */
 #define STATUSBAR_MAX_BYTES 65536
 
-/* Room for the formatted file. */
-#define STATUSBAR_FORMAT_BYTES 8192
-
 /* The spinner is fixed: these are the only frames it shows, and this is the
  * resting icon when the user has not set `[busy] idle`. U+F1807 is a
  * Material Design icon; it lives above U+FFFF so it is drawn uncached, and
@@ -48,9 +42,6 @@ static const char *const BUSY_FRAMES[] = {
  * particular). Scaling it by the folder's ink width / this glyph's ink
  * width, 1039 / 832, makes the two read as the same size. */
 #define BUSY_IDLE_SCALE 1.25f
-
-static bool loaded_file_seen;
-static uint64_t loaded_file_hash;
 
 /* ------------------------------------------------------------------------- */
 /* Small shared text helpers                                                  */
@@ -519,6 +510,126 @@ bool statusbar_parse_toml(Statusbar *sb, const char *text, size_t length)
     return parse_toml(sb, text, length, NULL, 0);
 }
 
+static bool statusbar_known_key(int id, const char *key)
+{
+    if (key_is(key, "format") || key_is(key, "style")) return true;
+    if (key_is(key, "symbol")) return id != STATUSBAR_BUSY;
+    if (id == STATUSBAR_DIRECTORY)
+        return key_is(key, "truncation_length") || key_is(key, "home_symbol");
+    if (id == STATUSBAR_GIT_STATUS)
+        return key_is(key, "ahead") || key_is(key, "behind") ||
+               key_is(key, "diverged") || key_is(key, "dirty") ||
+               key_is(key, "clean") || key_is(key, "conflicted");
+    if (id == STATUSBAR_CMD_STATUS)
+        return key_is(key, "style_success") || key_is(key, "style_failure") ||
+               key_is(key, "symbol_success") || key_is(key, "symbol_failure");
+    if (id == STATUSBAR_CMD_DURATION) return key_is(key, "min_time");
+    if (id == STATUSBAR_TIME) return key_is(key, "time_format");
+    if (id == STATUSBAR_BUSY) return key_is(key, "idle");
+    return false;
+}
+
+static bool valid_style(const char *text)
+{
+    const char *p = text;
+    while (*p) {
+        char token[64];
+        size_t n = 0;
+        StatusbarStyle style;
+        while (*p == ' ') p++;
+        if (!*p) break;
+        while (*p && *p != ' ') {
+            if (n + 1 >= sizeof token) return false;
+            token[n++] = *p++;
+        }
+        token[n] = '\0';
+        if (!statusbar_style_parse(token, &style)) return false;
+    }
+    return true;
+}
+
+bool statusbar_reload_text(Statusbar *sb, const char *text, size_t length,
+                           bool *changed, char *error, size_t error_capacity)
+{
+    toml_result_t document;
+    Statusbar candidate;
+    int i, j;
+    if (changed) *changed = false;
+    if (error && error_capacity) error[0] = '\0';
+    if (!sb || !text || length > STATUSBAR_MAX_BYTES) {
+        if (error && error_capacity) snprintf(error, error_capacity, "invalid or oversized statusbar settings");
+        return false;
+    }
+    document = toml_parse(text, (int)length);
+    if (!document.ok) {
+        if (error && error_capacity) snprintf(error, error_capacity, "%s", document.errmsg);
+        toml_free(document);
+        return false;
+    }
+    statusbar_default(&candidate);
+    for (i = 0; i < document.toptab.u.tab.size; i++) {
+        const char *name = document.toptab.u.tab.key[i];
+        toml_datum_t value = document.toptab.u.tab.value[i];
+        int id = module_id(name);
+        bool font = key_is(name, "font");
+        char *dst = NULL;
+        size_t cap = 0;
+        if (key_is(name, "format")) { dst = candidate.format; cap = sizeof candidate.format; }
+        else if (key_is(name, "center_format")) { dst = candidate.center_format; cap = sizeof candidate.center_format; }
+        else if (key_is(name, "right_format")) { dst = candidate.right_format; cap = sizeof candidate.right_format; }
+        if (dst) {
+            if (value.type != TOML_STRING || !set_string(dst, cap, value.u.str.ptr, value.u.str.len))
+                goto invalid;
+        } else if (font || id >= 0) {
+            if (value.type != TOML_TABLE) goto invalid;
+            for (j = 0; j < value.u.tab.size; j++) {
+                const char *key = value.u.tab.key[j];
+                toml_datum_t one = value;
+                bool known = font ? (key_is(key, "face") || key_is(key, "path") ||
+                                     key_is(key, "size")) : statusbar_known_key(id, key);
+                if (!known) continue;
+                one.u.tab.size = 1;
+                one.u.tab.key = &value.u.tab.key[j];
+                one.u.tab.value = &value.u.tab.value[j];
+                if (!apply_table(&candidate, name, one) ||
+                    ((!font && (key_is(key, "style") || key_is(key, "style_success") ||
+                                 key_is(key, "style_failure"))) &&
+                     !valid_style(value.u.tab.value[j].u.s))) {
+                    if (error && error_capacity) snprintf(error, error_capacity, "invalid %s.%s", name, key);
+                    toml_free(document);
+                    return false;
+                }
+            }
+        }
+        continue;
+invalid:
+        if (error && error_capacity) snprintf(error, error_capacity, "invalid %s", name);
+        toml_free(document);
+        return false;
+    }
+    toml_free(document);
+    if (changed) *changed = memcmp(sb, &candidate, sizeof candidate) != 0;
+    *sb = candidate;
+    return true;
+}
+
+bool statusbar_reload(Statusbar *sb, bool *changed,
+                      char *error, size_t error_capacity)
+{
+    char path[512];
+    char *text;
+    size_t length;
+    bool ok;
+    if (changed) *changed = false;
+    if (!statusbar_path(path, sizeof path) || !(text = SDL_LoadFile(path, &length))) {
+        if (error && error_capacity) snprintf(error, error_capacity, "cannot read statusbar.toml");
+        return false;
+    }
+    ok = statusbar_reload_text(sb, text, length, changed, error, error_capacity);
+    SDL_free(text);
+    return ok;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Formatting                                                                 */
 /* ------------------------------------------------------------------------- */
@@ -703,7 +814,7 @@ void statusbar_format(const Statusbar *sb, char *out, size_t capacity)
 }
 
 /* ------------------------------------------------------------------------- */
-/* Load / save                                                                */
+/* Loading                                                                    */
 /* ------------------------------------------------------------------------- */
 
 bool statusbar_path(char *out, size_t capacity)
@@ -722,8 +833,6 @@ bool statusbar_load(Statusbar *sb)
 
     if (!sb)
         return false;
-    loaded_file_seen = false;
-    loaded_file_hash = 0;
     statusbar_default(sb);
     if (!statusbar_path(path, sizeof path))
         return false;
@@ -740,8 +849,6 @@ bool statusbar_load(Statusbar *sb)
         return false;
     }
 
-    loaded_file_seen = true;
-    loaded_file_hash = config_hash_bytes(contents, length);
     parsed = parse_toml(sb, contents, length, error, sizeof error);
     SDL_free(contents);
     if (error[0])
@@ -749,65 +856,6 @@ bool statusbar_load(Statusbar *sb)
     return parsed;
 }
 
-bool statusbar_save(const Statusbar *sb)
-{
-    char path[512];
-    char temporary[520];
-    char text[STATUSBAR_FORMAT_BYTES];
-    SDL_PathInfo info;
-    SDL_IOStream *stream;
-    size_t length;
-    bool exists;
-
-    if (!sb || !statusbar_path(path, sizeof path))
-        return false;
-
-    exists = SDL_GetPathInfo(path, &info) && info.type == SDL_PATHTYPE_FILE;
-    if (exists != loaded_file_seen)
-        return false;
-    if (exists) {
-        size_t current_length = 0;
-        char *current = (char *)SDL_LoadFile(path, &current_length);
-        bool same;
-
-        if (!current || current_length > STATUSBAR_MAX_BYTES) {
-            SDL_free(current);
-            return false;
-        }
-        same = config_hash_bytes(current, current_length) == loaded_file_hash;
-        SDL_free(current);
-        if (!same)
-            return false;
-    }
-
-    config_create_directory(path);
-    statusbar_format(sb, text, sizeof text);
-    length = strlen(text);
-
-    if (snprintf(temporary, sizeof temporary, "%s.tmp", path) >=
-        (int)sizeof temporary)
-        return false;
-
-    stream = SDL_IOFromFile(temporary, "w");
-    if (!stream)
-        return false;
-    if (SDL_WriteIO(stream, text, length) != length) {
-        SDL_CloseIO(stream);
-        SDL_RemovePath(temporary);
-        return false;
-    }
-    if (!SDL_CloseIO(stream)) {
-        SDL_RemovePath(temporary);
-        return false;
-    }
-    if (!SDL_RenamePath(temporary, path)) {
-        SDL_RemovePath(temporary);
-        return false;
-    }
-    loaded_file_seen = true;
-    loaded_file_hash = config_hash_bytes(text, length);
-    return true;
-}
 
 /* ------------------------------------------------------------------------- */
 /* Pure helpers                                                               */

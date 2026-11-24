@@ -47,7 +47,8 @@ enum {
     APP_EVENT_BLINK      = 1,
     APP_EVENT_PTY        = 2,
     APP_EVENT_AUTOSCROLL = 3,
-    APP_EVENT_STATUSBAR  = 4
+    APP_EVENT_STATUSBAR  = 4,
+    APP_EVENT_SEARCH     = 5
 };
 
 typedef struct App {
@@ -102,6 +103,11 @@ typedef struct App {
      * from it. NULL cursor means the system default. */
     GhosttyMouseShape shape;
     SDL_Cursor       *cursor;
+    /* Pointer coordinates are re-resolved against the current viewport on
+     * each redraw; hyperlink grid references must never survive writes. */
+    float            link_pointer_x, link_pointer_y;
+    bool             link_pointer_valid;
+    bool             link_click_consumed;
 
     SDL_TimerID      autoscroll_timer;
     SDL_TimerID      blink_timer;

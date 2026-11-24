@@ -339,6 +339,28 @@ SDL_Window *window_create(const char *title, int width, int height,
     return window;
 }
 
+bool window_set_decoration(SDL_Window *window, WindowDecoration decoration,
+                           bool title_bar)
+{
+    bool native = decoration == WINDOW_DECORATION_NATIVE;
+    bool old_native = !hit_custom_frame;
+
+    if (!window || !SDL_SetWindowBordered(window, native))
+        return false;
+    if (!SDL_SetWindowHitTest(window, native ? NULL : hit_test, NULL)) {
+        SDL_SetWindowBordered(window, old_native);
+        return false;
+    }
+    hit_custom_frame = !native;
+    title_bar = title_bar && !native;
+    hit_drag_strip = native ? 0 : (title_bar ? WINDOW_TITLE_BAR_HEIGHT :
+                     (decoration == WINDOW_DECORATION_COMPACT ?
+                      WINDOW_COMPACT_DRAG_STRIP : WINDOW_DRAG_STRIP));
+    hit_buttons_width = title_bar ? WINDOW_TITLE_BAR_BUTTONS *
+                                   WINDOW_TITLE_BAR_BUTTON_WIDTH : 0;
+    return true;
+}
+
 WindowBackdrop window_sync_chrome(SDL_Window *window, WindowBackdrop backdrop,
                                   WindowDecoration decoration,
                                   int corner_radius)

@@ -45,6 +45,7 @@ typedef enum KeyAction {
     KEY_ACTION_CLOSE_TAB,
     KEY_ACTION_NEXT_TAB,
     KEY_ACTION_PREV_TAB,
+    KEY_ACTION_SEARCH,
     KEY_ACTION_QUIT
 } KeyAction;
 

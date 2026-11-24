@@ -5,7 +5,10 @@
 #include "input.h"
 
 #include "chrome.h"
+#include "hyperlink.h"
+#include "ui_settings.h"
 
+#include <string.h>
 #include <stdio.h>
 
 /* Rows moved by one wheel notch. */
@@ -255,6 +258,70 @@ static void write_key(App *app, const SDL_KeyboardEvent *event)
     }
 }
 
+/* A focused find bar owns text and editing keys, but tab/window bindings
+ * remain global. Text and IME commits never reach the shell in this mode. */
+static void search_key(App *app, Session *s, const SDL_KeyboardEvent *event,
+                       KeyAction action)
+{
+    Search *search = &s->search;
+    SDL_Keymod mods = event->mod;
+    bool changed = false;
+
+    if (s->composing_length && (event->scancode == SDL_SCANCODE_RETURN ||
+        event->scancode == SDL_SCANCODE_KP_ENTER ||
+        event->scancode == SDL_SCANCODE_ESCAPE ||
+        event->scancode == SDL_SCANCODE_BACKSPACE))
+        return;
+    if (event->scancode == SDL_SCANCODE_ESCAPE) {
+        search->open = false;
+        session_clear_composing(s);
+    } else if (action == KEY_ACTION_PASTE ||
+               (event->scancode == SDL_SCANCODE_V && (mods & SDL_KMOD_CTRL) &&
+                !(mods & (SDL_KMOD_ALT | SDL_KMOD_GUI)))) {
+        if (!event->repeat) {
+            char *text = SDL_GetClipboardText();
+            if (text) {
+                changed = search_insert(search, text);
+                SDL_free(text);
+            }
+        }
+    } else if ((mods & SDL_KMOD_ALT) &&
+               !(mods & (SDL_KMOD_CTRL | SDL_KMOD_GUI)) &&
+               event->scancode == SDL_SCANCODE_C) {
+        if (!event->repeat) {
+            search->case_sensitive = !search->case_sensitive;
+            search_invalidate(search);
+            changed = true;
+        }
+    } else if ((mods & SDL_KMOD_ALT) &&
+               !(mods & (SDL_KMOD_CTRL | SDL_KMOD_GUI)) &&
+               event->scancode == SDL_SCANCODE_R) {
+        if (!event->repeat) {
+            search->regex = !search->regex;
+            search_invalidate(search);
+            changed = true;
+        }
+    } else {
+        switch (event->scancode) {
+        case SDL_SCANCODE_BACKSPACE: search_backspace(search); changed = true; break;
+        case SDL_SCANCODE_DELETE: search_delete(search); changed = true; break;
+        case SDL_SCANCODE_LEFT: search_move_cursor(search, -1); break;
+        case SDL_SCANCODE_RIGHT: search_move_cursor(search, 1); break;
+        case SDL_SCANCODE_HOME: search->cursor = 0; break;
+        case SDL_SCANCODE_END: search->cursor = search->length; break;
+        case SDL_SCANCODE_RETURN:
+        case SDL_SCANCODE_KP_ENTER:
+        case SDL_SCANCODE_F3:
+            search_navigate(search, &s->term, (mods & SDL_KMOD_SHIFT) ? -1 : 1);
+            break;
+        default: break;
+        }
+    }
+    if (changed)
+        search_navigate(search, &s->term, 0);
+    app->needs_redraw = true;
+}
+
 void input_handle_key_down(App *app, const SDL_KeyboardEvent *event)
 {
     Session *s = app_active_session(app);
@@ -263,6 +330,22 @@ void input_handle_key_down(App *app, const SDL_KeyboardEvent *event)
 
     if (!s)
         return;
+    if (action == KEY_ACTION_SEARCH) {
+        if (!event->repeat) {
+            s->search.open = true;
+            session_clear_composing(s);
+            search_invalidate(&s->search);
+            search_navigate(&s->search, &s->term, 0);
+            app->needs_redraw = true;
+        }
+        return;
+    }
+    if (s->search.open && action != KEY_ACTION_QUIT &&
+        action != KEY_ACTION_NEW_TAB && action != KEY_ACTION_CLOSE_TAB &&
+        action != KEY_ACTION_NEXT_TAB && action != KEY_ACTION_PREV_TAB) {
+        search_key(app, s, event, action);
+        return;
+    }
     switch (action) {
     case KEY_ACTION_QUIT:
         if (!event->repeat)
@@ -319,21 +402,22 @@ void input_handle_key_down(App *app, const SDL_KeyboardEvent *event)
         }
         return;
     case KEY_ACTION_OPACITY_DOWN:
-        app->panel_opacity -= 0.05f;
+    case KEY_ACTION_OPACITY_UP: {
+        float old = app->panel_opacity;
+        app->panel_opacity += action == KEY_ACTION_OPACITY_DOWN ? -0.05f : 0.05f;
         if (app->panel_opacity < 0.0f)
             app->panel_opacity = 0.0f;
-        app->settings.panel_opacity = app->panel_opacity;
-        app->needs_redraw = true;
-        return;
-    case KEY_ACTION_OPACITY_UP:
-        app->panel_opacity += 0.05f;
         if (app->panel_opacity > 1.0f)
             app->panel_opacity = 1.0f;
         app->settings.panel_opacity = app->panel_opacity;
+        if (app->panel_opacity != old)
+            ui_settings_save(app, "opacity");
         app->needs_redraw = true;
         return;
+    }
     case KEY_ACTION_CYCLE_BACKDROP:
         if (!event->repeat) {
+            WindowBackdrop old = app->backdrop;
             WindowBackdrop next =
                 (WindowBackdrop)((app->backdrop + 1) % WINDOW_BACKDROP_COUNT);
             /* The OS may not know the material; the window says so and the
@@ -342,6 +426,8 @@ void input_handle_key_down(App *app, const SDL_KeyboardEvent *event)
                                                app->decoration,
                                                chrome_corner_radius(app));
             app->settings.backdrop = (int)app->backdrop;
+            if (app->backdrop != old)
+                ui_settings_save(app, "backdrop");
             app->needs_redraw = true;
         }
         return;
@@ -370,6 +456,24 @@ void input_handle_text_input(App *app, const SDL_TextInputEvent *event)
 
     if (!s)
         return;
+    if (s->search.open) {
+        const char *text = event->text;
+        char filtered[SEARCH_QUERY_CAPACITY];
+        if (text && strchr(text, '\r')) {
+            size_t i, n = 0;
+            for (i = 0; text[i] && n + 1 < sizeof filtered; i++)
+                if (text[i] != '\r')
+                    filtered[n++] = text[i];
+            filtered[n] = '\0';
+            /* Do not insert a partially copied UTF-8 event. */
+            text = text[i] ? NULL : filtered;
+        }
+        if (search_insert(&s->search, text))
+            search_navigate(&s->search, &s->term, 0);
+        session_clear_composing(s);
+        app->needs_redraw = true;
+        return;
+    }
     session_send_text(s, event->text);
     /* A commit ends the composition. */
     session_clear_composing(s);
@@ -536,6 +640,11 @@ static void apply_mouse_shape(App *app)
 void input_reset_mouse_shape(App *app)
 {
     SDL_Cursor *system_default = SDL_GetDefaultCursor();
+    app->link_click_consumed = false;
+    if (app->link_pointer_valid) {
+        app->link_pointer_valid = false;
+        app->needs_redraw = true;
+    }
 
     if (!app->cursor)
         return;
@@ -617,6 +726,15 @@ void input_handle_mouse_button(App *app, const SDL_MouseButtonEvent *event)
 
     if (!s)
         return;
+    if (!pressed && event->button == SDL_BUTTON_LEFT &&
+        app->link_click_consumed) {
+        app->link_click_consumed = false;
+        return;
+    }
+    if (!pressed && s->search.mouse_down) {
+        s->search.mouse_down = false;
+        return;
+    }
 
     /* The title bar is above the grid and owns its own clicks. */
     if (event->button == SDL_BUTTON_LEFT &&
@@ -643,6 +761,40 @@ void input_handle_mouse_button(App *app, const SDL_MouseButtonEvent *event)
         }
         return;
     }
+    if (pressed && !s->mouse_held && !s->select.dragging && !s->bar_drag) {
+        int hit = chrome_search_hit(app, event->x, event->y);
+        if (hit != CHROME_SEARCH_NONE) {
+            s->search.mouse_down = true;
+            if (event->button == SDL_BUTTON_LEFT) {
+                switch (hit) {
+                case CHROME_SEARCH_CASE:
+                    s->search.case_sensitive = !s->search.case_sensitive;
+                    search_invalidate(&s->search);
+                    search_navigate(&s->search, &s->term, 0);
+                    break;
+                case CHROME_SEARCH_REGEX:
+                    s->search.regex = !s->search.regex;
+                    search_invalidate(&s->search);
+                    search_navigate(&s->search, &s->term, 0);
+                    break;
+                case CHROME_SEARCH_PREV:
+                    search_navigate(&s->search, &s->term, -1);
+                    break;
+                case CHROME_SEARCH_NEXT:
+                    search_navigate(&s->search, &s->term, 1);
+                    break;
+                case CHROME_SEARCH_CLOSE:
+                    s->search.open = false;
+                    session_clear_composing(s);
+                    break;
+                default:
+                    break;
+                }
+                app->needs_redraw = true;
+            }
+            return;
+        }
+    }
 
     /* The bar comes first: it is outside the grid, so a program that owns
      * the pointer still cannot swallow the only control that reaches the
@@ -663,6 +815,17 @@ void input_handle_mouse_button(App *app, const SDL_MouseButtonEvent *event)
     }
 
     inside = cell_at(app, event->x, event->y, &cx, &cy);
+    if (inside && pressed && event->button == SDL_BUTTON_LEFT &&
+        (modifiers & SDL_KMOD_CTRL) && !s->select.dragging &&
+        !s->mouse_held && !pointer_belongs_to_shell(s, modifiers)) {
+        Hyperlink link;
+        if (hyperlink_at(&s->term, cx, cy, &link)) {
+            app->link_click_consumed = true;
+            hyperlink_open(link.uri);
+            return;
+        }
+    }
+
 
     if (pointer_belongs_to_shell(s, modifiers)) {
         /* Coordinates outside the grid are still worth sending while a
@@ -739,6 +902,21 @@ void input_handle_mouse_motion(App *app, const SDL_MouseMotionEvent *event)
 
     if (!s)
         return;
+    {
+        int old_x = 0, old_y = 0, new_x = 0, new_y = 0;
+        bool old_inside = app->link_pointer_valid &&
+            cell_at(app, app->link_pointer_x, app->link_pointer_y, &old_x, &old_y);
+        bool new_inside = cell_at(app, event->x, event->y, &new_x, &new_y);
+        int old_hit = app->link_pointer_valid
+            ? chrome_search_hit(app, app->link_pointer_x, app->link_pointer_y) : 0;
+        int new_hit = chrome_search_hit(app, event->x, event->y);
+        if (old_inside != new_inside || old_x != new_x || old_y != new_y ||
+            old_hit != new_hit)
+            app->needs_redraw = true;
+        app->link_pointer_x = event->x;
+        app->link_pointer_y = event->y;
+        app->link_pointer_valid = true;
+    }
     inside = cell_at(app, event->x, event->y, &cx, &cy);
 
     chrome_update_title_hover(app, event->x, event->y);
@@ -758,6 +936,10 @@ void input_handle_mouse_motion(App *app, const SDL_MouseMotionEvent *event)
         app->needs_redraw = true;
         return;
     }
+    if (!s->mouse_held && !s->select.dragging &&
+        chrome_search_hit(app, event->x, event->y) != CHROME_SEARCH_NONE)
+        return;
+
 
     if (pointer_belongs_to_shell(s, modifiers)) {
         if (inside || s->mouse_held)
@@ -809,7 +991,8 @@ void input_handle_mouse_wheel(App *app, const SDL_MouseWheelEvent *event)
     /* A program that tracks the mouse gets the wheel as button 4/5 presses
      * unless it enabled alternate scroll, in which case the encoder
      * produces nothing and the wheel scrolls the viewport. */
-    if (pointer_belongs_to_shell(s, modifiers)) {
+    if (chrome_search_hit(app, event->mouse_x, event->mouse_y) == CHROME_SEARCH_NONE &&
+        pointer_belongs_to_shell(s, modifiers)) {
         GhosttyMouseButton button = ticks > 0.0f ? GHOSTTY_MOUSE_BUTTON_FOUR
                                                  : GHOSTTY_MOUSE_BUTTON_FIVE;
         uint8_t encoded[128];

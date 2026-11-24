@@ -28,6 +28,10 @@
 
 #include "app.h"
 #include "chrome.h"
+#include "clipboard.h"
+#include "desktop_signal.h"
+#include "config_watch.h"
+#include "toast.h"
 #include "console.h"
 #include "embed.h"
 #include "font_lookup.h"
@@ -184,6 +188,9 @@ bool app_new_tab(App *app)
         free(s);
         return false;
     }
+    term_set_clipboard_read(&s->term, clipboard_handle_read, app);
+    term_set_scrollback_lines(&s->term, (size_t)app->settings.scrollback_lines);
+    s->term.progress_changed = true;
     term_set_colors(&s->term, &app->settings.colors);
     if (app->glyphs.cell_width > 0 && app->glyphs.cell_height > 0) {
         term_resize(&s->term, cols, rows, (uint32_t)app->glyphs.cell_width,
@@ -230,6 +237,7 @@ void app_close_tab(App *app, int index)
         app->active_session = app->session_count - 1;
     else if (index < app->active_session)
         app->active_session--;
+    app->sessions[app->active_session]->term.progress_changed = true;
 
     fit_grid(app);
     refresh_git_for_active(app);
@@ -248,6 +256,7 @@ void app_switch_tab(App *app, int index)
         return;
     input_autoscroll_start(app, 0);
     app->active_session = index;
+    app->sessions[index]->term.progress_changed = true;
     app->command_was_running = app->sessions[index]->term.command_running;
     refresh_git_for_active(app);
     app->needs_redraw = true;
@@ -394,6 +403,104 @@ static void open_statusbar_font(App *app, const char *grid_font_path)
     }
 }
 
+/* Apply a validated file snapshot on the UI thread. Font resources are
+ * prepared before replacing the old ones, so a failed load keeps the live
+ * configuration and grid intact. */
+static void reload_files(App *app, unsigned changes, const char *font_override,
+                         bool size_override)
+{
+    char error[256] = "Configuration reload failed";
+    bool reload_bar_font = false;
+    bool refit = false;
+
+    if (changes & CONFIG_WATCH_SETTINGS) {
+        Settings next = app->settings;
+        Settings old = app->settings;
+        unsigned diff = 0;
+        if (!settings_reload(&next, &diff, error, sizeof error)) {
+            toast_show(error);
+        } else if (diff) {
+            char old_path[sizeof app->font_path];
+            float next_size = size_override ? app->base_point_size : next.point_size;
+            Glyphs next_glyphs;
+            bool font_ok = true;
+
+            SDL_strlcpy(old_path, app->font_path, sizeof old_path);
+            app->settings = next;
+            if (diff & SETTINGS_DIFF_FONT) {
+                if (!font_override) {
+                    char resolved[512];
+                    const char *path = pick_font(NULL, next.font);
+                    if (path && font_lookup_path(path, resolved, sizeof resolved))
+                        path = resolved;
+                    SDL_strlcpy(app->font_path, path ? path : "", sizeof app->font_path);
+                }
+                font_ok = open_grid_font(app, &next_glyphs, next_size,
+                                         app->display_scale);
+            }
+            if (!font_ok) {
+                app->settings = old;
+                SDL_strlcpy(app->font_path, old_path, sizeof app->font_path);
+                toast_show("Configuration reload: unable to open font");
+            } else {
+                int i;
+                if (diff & SETTINGS_DIFF_FONT) {
+                    glyphs_close(&app->glyphs);
+                    app->glyphs = next_glyphs;
+                    app->base_point_size = next_size;
+                    app->current_point_size = next_size;
+                    reload_bar_font = true;
+                    refit = true;
+                }
+                if (diff & SETTINGS_DIFF_COLORS) {
+                    for (i = 0; i < app->session_count; i++)
+                        term_set_colors(&app->sessions[i]->term, &next.colors);
+                }
+                if (diff & SETTINGS_DIFF_TERMINAL) {
+                    for (i = 0; i < app->session_count; i++)
+                        term_set_scrollback_lines(&app->sessions[i]->term,
+                                                  (size_t)next.scrollback_lines);
+                }
+                if (diff & SETTINGS_DIFF_WINDOW) {
+                    WindowDecoration decoration = (WindowDecoration)next.decoration;
+                    bool title_bar = next.title_bar && decoration != WINDOW_DECORATION_NATIVE;
+                    if ((decoration != app->decoration || title_bar != app->title_bar) &&
+                        !window_set_decoration(app->window, decoration, title_bar)) {
+                        toast_show("Configuration reload: unable to change window frame");
+                    } else {
+                        app->decoration = decoration;
+                        app->title_bar = title_bar;
+                    }
+                    app->panel_opacity = next.panel_opacity;
+                    app->backdrop = window_sync_chrome(app->window,
+                        (WindowBackdrop)next.backdrop, app->decoration,
+                        chrome_corner_radius(app));
+                    refit = true;
+                }
+                app->needs_redraw = true;
+            }
+        }
+    }
+    if (changes & CONFIG_WATCH_STATUSBAR) {
+        bool changed = false;
+        if (!statusbar_reload(&app->statusbar, &changed, error, sizeof error))
+            toast_show(error);
+        else if (changed) {
+            app->busy_frame_count = statusbar_busy_frames(app->busy_frames,
+                                                           STATUSBAR_MAX_FRAMES);
+            reload_bar_font = true;
+            refit = true;
+            app->needs_redraw = true;
+        }
+    }
+    if (reload_bar_font) {
+        glyphs_close(&app->statusbar_glyphs);
+        open_statusbar_font(app, app->font_path[0] ? app->font_path : NULL);
+    }
+    if (refit)
+        fit_grid(app);
+}
+
 /* ------------------------------------------------------------------------- */
 /* Event dispatch and per-tick state sync                                     */
 /* ------------------------------------------------------------------------- */
@@ -413,6 +520,10 @@ static void dispatch_event(App *app, const SDL_Event *event)
             input_autoscroll_tick(app);
         } else if (event->user.code == APP_EVENT_STATUSBAR) {
             chrome_statusbar_tick(app);
+        } else if (event->user.code == APP_EVENT_SEARCH) {
+            Session *s = app_active_session(app);
+            if (s && search_pending(&s->search))
+                app->needs_redraw = true;
         }
         break;
     case SDL_EVENT_KEY_DOWN:
@@ -459,6 +570,31 @@ static void dispatch_event(App *app, const SDL_Event *event)
     }
 }
 
+/* OSC notifications are untrusted requests from the shell. A policy prompt
+ * runs only after the terminal's parser has returned to the main loop. */
+static bool notification_allowed(App *app, const TermNotification *item)
+{
+    static const SDL_MessageBoxButtonData buttons[] = {
+        { SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT |
+          SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Deny" },
+        { 0, 0, "Allow" }
+    };
+    char detail[512];
+    int pressed = 1;
+    const SDL_MessageBoxData box = {
+        SDL_MESSAGEBOX_WARNING, app->window, "Allow notification?", detail,
+        SDL_arraysize(buttons), buttons, NULL
+    };
+
+    if (app->settings.notifications == SETTINGS_OSC52_DENY)
+        return false;
+    if (app->settings.notifications == SETTINGS_OSC52_ALLOW)
+        return true;
+    snprintf(detail, sizeof detail, "A program requests a notification:\n%.400s",
+             item->title[0] ? item->title : item->body);
+    return SDL_ShowMessageBox(&box, &pressed) && pressed == 0;
+}
+
 static void sync_session_and_git(App *app)
 {
     Session *active;
@@ -473,6 +609,16 @@ static void sync_session_and_git(App *app)
 
         if (session_pump(s, &exited_now) && i == app->active_session)
             app->needs_redraw = true;
+        {
+            TermNotification notification;
+            while (term_take_notification(&s->term, &notification)) {
+                bool allowed = notification_allowed(app, &notification);
+                if (allowed && !desktop_signal_notify(true, notification.title,
+                        strlen(notification.title), notification.body,
+                        strlen(notification.body)))
+                    toast_show("Windows could not display the notification");
+            }
+        }
 
         if (s->term.title_changed) {
             s->term.title_changed = false;
@@ -492,6 +638,13 @@ static void sync_session_and_git(App *app)
     active = app_active_session(app);
     if (!active)
         return;
+    if (active->term.progress_changed) {
+        void *hwnd = SDL_GetPointerProperty(SDL_GetWindowProperties(app->window),
+                                             SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
+        desktop_signal_progress(hwnd, (int)active->term.progress.state,
+                                (int)active->term.progress.progress);
+        active->term.progress_changed = false;
+    }
 
     /* Handle BEL (0x07) according to [terminal] bell. */
     if (active->term.bell_rang) {
@@ -543,6 +696,8 @@ int main(int argc, char **argv)
     const char *font_path;
     const char *font_label;
     const char *requested_font = NULL;
+    ConfigWatch *watch = NULL;
+    bool size_override = false;
     float point_size = 0.0f;   /* 0 means "whatever the settings say" */
     int exit_code = 1;
     int index;
@@ -566,10 +721,12 @@ int main(int argc, char **argv)
     for (index = 1; index < argc; index++) {
         float size;
 
-        if (is_point_size(argv[index], &size))
+        if (is_point_size(argv[index], &size)) {
             point_size = size;
-        else if (!requested_font)
+            size_override = true;
+        } else if (!requested_font) {
             requested_font = argv[index];
+        }
     }
     if (point_size <= 0.0f)
         point_size = app.settings.point_size;
@@ -603,6 +760,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "TTF_Init: %s\n", SDL_GetError());
         goto cleanup;
     }
+    desktop_signal_init();
 
     app.window = window_create(APP_TITLE, 900, 480, app.decoration,
                                app.title_bar);
@@ -664,6 +822,9 @@ int main(int argc, char **argv)
         fprintf(stderr, "libghostty-vt setup failed\n");
         goto cleanup;
     }
+    watch = config_watch_start();
+    if (!watch)
+        toast_show("Configuration watcher could not start");
 
     app.blink_timer = SDL_AddTimer(500, on_blink_timer, &app);
     app.statusbar_timer = SDL_AddTimer(STATUSBAR_TIMER_MS, on_statusbar_timer,
@@ -679,6 +840,13 @@ int main(int argc, char **argv)
         } while (app.running && SDL_PollEvent(&event));
 
         sync_session_and_git(&app);
+        {
+            unsigned changes = config_watch_take(watch);
+            if (changes)
+                reload_files(&app, changes, requested_font, size_override);
+        }
+        if (toast_tick())
+            app.needs_redraw = true;
 
         if (app.running && app.needs_redraw) {
             render_frame(&app);
@@ -688,13 +856,8 @@ int main(int argc, char **argv)
     exit_code = 0;
 
 cleanup:
-    /* Every step is safe on a partly initialised app, so a failure in the
-     * middle of setup leaks nothing either. What the user changed while the
-     * window was open (opacity, backdrop) is remembered for next time. */
-    if (app.window) {
-        settings_save(&app.settings);
-        statusbar_save(&app.statusbar);
-    }
+    /* UI edits are saved when made; closing never rewrites configuration. */
+    config_watch_stop(watch);
     if (app.statusbar_timer)
         SDL_RemoveTimer(app.statusbar_timer);
     if (app.blink_timer)

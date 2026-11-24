@@ -16,6 +16,8 @@
 #include "embed.h"
 #include "font_lookup.h"
 #include "git.h"
+#include "desktop_signal.h"
+#include "hyperlink.h"
 #include "glyph.h"
 #include "input.h"
 #include "keys.h"
@@ -27,6 +29,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
+
+int config_test(void);
+int search_selftest(void);
 
 static int failure_count;
 
@@ -902,7 +907,7 @@ static void test_settings(void)
     check(settings.panel_opacity == 1.0f, "default opacity is 1.0");
     check(settings.backdrop == 1, "default backdrop is mica");
     check(settings.shell == SETTINGS_SHELL_AUTO, "default shell is auto");
-    check(settings.osc52 == SETTINGS_OSC52_ASK, "default osc52 is ask");
+    check(settings.osc52 == SETTINGS_OSC52_DENY, "default osc52 is deny");
     check(settings.font[0] == '\0', "default font is the built-in one");
     check(settings.decoration == SETTINGS_DECORATION_NATIVE,
           "default decoration is native");
@@ -1159,6 +1164,76 @@ static void test_clipboard_write(void)
     term_write_text(&term, "\x1b]52;c;b3NjNTItd29ya3M=\x07");
     check(true, "no handler means no crash");
 
+    term_free(&term);
+}
+
+static char clipboard_reply[1024];
+static size_t clipboard_reply_length;
+static bool clipboard_read_allowed;
+
+static void record_terminal_reply(void *userdata, const void *data, size_t length)
+{
+    size_t available = sizeof clipboard_reply - 1 - clipboard_reply_length;
+    (void)userdata;
+    if (length > available)
+        length = available;
+    memcpy(clipboard_reply + clipboard_reply_length, data, length);
+    clipboard_reply_length += length;
+    clipboard_reply[clipboard_reply_length] = '\0';
+}
+
+static TermClipboardResult test_clipboard_read_handler(void *userdata,
+                                                       const char *name,
+                                                       bool granted, char **text)
+{
+    (void)userdata;
+    (void)name;
+    (void)granted;
+    if (!clipboard_read_allowed)
+        return TERM_CLIPBOARD_DENIED;
+    *text = SDL_strdup("clipboard secret");
+    return *text ? TERM_CLIPBOARD_ALLOWED : TERM_CLIPBOARD_UNSUPPORTED;
+}
+
+static void test_terminal_effects(void)
+{
+    Term term;
+    TermNotification notification;
+    size_t limit = 0;
+
+    if (!term_init(&term, 80, 24)) {
+        check(false, "initialize terminal for effects");
+        return;
+    }
+    term_set_writer(&term, record_terminal_reply, NULL);
+    term_set_clipboard_read(&term, test_clipboard_read_handler, NULL);
+    clipboard_read_allowed = true;
+    clipboard_reply_length = 0;
+    clipboard_reply[0] = '\0';
+    term_write_text(&term, "\x1b]52;c;?\x07");
+    check(strstr(clipboard_reply, "Y2xpcGJvYXJkIHNlY3JldA==") != NULL,
+          "allowed OSC 52 read returns the clipboard text");
+    clipboard_read_allowed = false;
+    clipboard_reply_length = 0;
+    clipboard_reply[0] = '\0';
+    term_write_text(&term, "\x1b]52;c;?\x07");
+    check(strstr(clipboard_reply, "Y2xpcGJvYXJkIHNlY3JldA==") == NULL,
+          "denied OSC 52 read never returns the clipboard text");
+
+    check(term_set_scrollback_lines(&term, 1000) &&
+              ghostty_terminal_get(term.handle, GHOSTTY_TERMINAL_DATA_SCROLLBACK_MAX_LINES,
+                                   &limit) == GHOSTTY_SUCCESS && limit == 1000,
+          "configured scrollback line limit reaches the terminal");
+    term_write_text(&term, "\x1b]777;notify;Title;Body\x07");
+    check(term_take_notification(&term, &notification) &&
+              strcmp(notification.title, "Title") == 0 &&
+              strcmp(notification.body, "Body") == 0,
+          "OSC 777 notification is queued with its title and body");
+    term_write_text(&term, "\x1b]9;4;1;42\x07");
+    check(term.progress_changed &&
+              term.progress.state == GHOSTTY_TERMINAL_PROGRESS_STATE_SET &&
+              term.progress.progress == 42,
+          "OSC 9;4 progress reaches the terminal callback");
     term_free(&term);
 }
 
@@ -2042,6 +2117,11 @@ int term_selftest(void)
     test_embedded_fonts();
     test_font_lookup();
     test_clipboard_write();
+    test_terminal_effects();
+    failure_count += config_test();
+    failure_count += desktop_signal_selftest();
+    failure_count += hyperlink_selftest();
+    failure_count += search_selftest();
 #ifdef _WIN32
     test_pty();
     test_pty_writer_queue();
