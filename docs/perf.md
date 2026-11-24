@@ -67,10 +67,36 @@ an idle system for defensible comparisons.
 
 ## Scrolling frame time
 
-Not measured. PresentMon 2.6.0 was available but ETW session creation failed
-with `access denied`: the current account lacks administrator or Performance
-Log Users privileges. Do not compare screenshots or timer periods as frame
-presentation times. To complete this measurement, capture each terminal's
-scrolling presents with an appropriately authorized PresentMon account,
-record the scenario and p50/p95 frame times, and compare the same geometry,
-font, scrollback contents, refresh rate and renderer.
+PresentMon 2.6.0 captured each target process separately with administrator
+approval. Three newly created windows were resized to 916 × 519 pixels on a
+1920 × 1080, 60 Hz display. Each received the same 2,400 numbered text lines;
+120 wheel messages were posted to its own window, at approximately 30 ms
+intervals, alternating 20 up and 20 down. Screenshots confirmed that all three
+viewports scrolled. Termica and WezTerm were configured at 11 points; Windows
+Terminal used its existing profile. Font faces, window chrome and renderer
+settings were not identical.
+
+For each single run, the table uses the dominant swapchain's PresentMon samples
+whose `CPUStartQPCTimeInMs` fell inside the input interval, excluding the
+first sample. Percentiles use the nearest-rank method. Frame interval is
+`MsBetweenPresents`; GPU time is `MsGPUTime`, both in milliseconds.
+
+| Terminal | Frames | Interval p50 | Interval p95 | Interval max | GPU p50 | GPU p95 |
+|---|---:|---:|---:|---:|---:|---:|
+| termica v0.3 | 123 | 31.14 | 32.60 | 350.06 | 1.83 | 3.90 |
+| Windows Terminal Preview | 117 | 31.26 | 32.69 | 46.12 | 0.77 | 0.99 |
+| WezTerm | 102 | 31.18 | 32.60 | 45.74 | 1.71 | 4.13 |
+
+The interval is largely determined by the 30 ms input cadence, not intrinsic
+rendering time; messages may coalesce and unrelated redraws can be counted.
+Termica had one 350 ms interval in this run. GPU and presentation modes also
+differed: Windows Terminal used DXGI flip; termica used DXGI/GDI composition;
+WezTerm reported an `Other` present runtime with GDI composition. These are
+single samples, not controlled rankings. Repeat with matched fonts and
+settings before drawing broader conclusions.
+
+To reproduce, use PresentMon with ETW permission, capture only the new
+window's process (`--process_id <PID> --qpc_time_ms --timed 8
+--terminate_after_timed --output_file <CSV>`), and filter the recorded
+samples to the wheel-input interval using the same performance-counter clock.
+Do not grant permanent administrator privileges merely to run the test.
