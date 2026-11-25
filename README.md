@@ -126,11 +126,23 @@ pwsh -File ./run.ps1 -Wsl
 pwsh -File ./run.ps1 -Wsl -WslDistribution Ubuntu -SelfTest
 ```
 
-Build `build/native/termica` in the selected WSL distribution first. The
-launcher uses the default distribution unless `-WslDistribution` is given.
-Use `-Preset` to select another `build/` subdirectory, or `-WslBinary` to
-run a Linux executable outside the checkout. `-Font` in WSL mode takes a
-Linux font path or installed family name.
+`-Wsl` runs a Linux executable, not the Windows build. If the binary is
+missing, open WSL in the checkout and build it there:
+
+```powershell
+wsl.exe --cd $PWD.Path
+# In the WSL shell, after installing the Linux build prerequisites:
+cmake -S . -B build/native -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build/native
+exit
+```
+
+The launcher uses the default distribution unless `-WslDistribution` is
+given. Use `-Preset` to select another `build/` subdirectory, or `-WslBinary`
+to run a Linux executable outside the checkout. `-Font` in WSL mode takes a
+Linux font path or installed family name. On WSLg, the launcher disables SDL's
+X11 RandR probe when `SDL_VIDEO_X11_XRANDR` is unset, avoiding broken RandR
+outputs; an explicit environment setting is preserved.
 
 ### Command line
 

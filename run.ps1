@@ -86,15 +86,8 @@ if ($Wsl) {
         if (-not $PSBoundParameters.ContainsKey('Preset')) { $Preset = 'native' }
         $WslBinary = "./build/$Preset/termica"
     }
-    $wslArgs = @('--cd', $project)
-    if ($WslDistribution) { $wslArgs += @('--distribution', $WslDistribution) }
-    $wslArgs += @('--exec', $WslBinary)
-    if ($SelfTest) {
-        $wslArgs += '--selftest'
-    } else {
-        if ($Font) { $wslArgs += $Font }
-        if ($Size) { $wslArgs += $Size }
-    }
+    $wslBaseArgs = @('--cd', $project)
+    if ($WslDistribution) { $wslBaseArgs += @('--distribution', $WslDistribution) }
     # ProcessStartInfo uses an explicit Windows command line so PowerShell
     # 5.1 preserves literal quotes as well as spaces in Linux arguments.
     function ConvertTo-WindowsArgument([string] $argument) {
@@ -122,14 +115,50 @@ if ($Wsl) {
         [void] $result.Append('"')
         return $result.ToString()
     }
-    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = $wslCommand.Source
-    $startInfo.Arguments = (($wslArgs | ForEach-Object { ConvertTo-WindowsArgument $_ }) -join ' ')
-    $startInfo.UseShellExecute = $false
-    $startInfo.WorkingDirectory = $project
-    $process = [System.Diagnostics.Process]::Start($startInfo)
-    $process.WaitForExit()
-    exit $process.ExitCode
+    function Invoke-WslProcess([string[]] $arguments) {
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = $wslCommand.Source
+        $startInfo.Arguments = (($arguments | ForEach-Object { ConvertTo-WindowsArgument $_ }) -join ' ')
+        $startInfo.UseShellExecute = $false
+        $startInfo.WorkingDirectory = $project
+        $process = [System.Diagnostics.Process]::Start($startInfo)
+        try {
+            $process.WaitForExit()
+            return $process.ExitCode
+        } finally {
+            $process.Dispose()
+        }
+    }
+
+    $defaultBinary = -not $PSBoundParameters.ContainsKey('WslBinary')
+    if ($defaultBinary -or $WslBinary.Contains('/')) {
+        $check = Invoke-WslProcess ($wslBaseArgs + @('--exec', 'test', '-x', $WslBinary))
+        if ($check -eq 1) {
+            if (-not $defaultBinary) {
+                throw "WSL executable '$WslBinary' is missing or not executable in the selected distribution."
+            }
+            if ($Preset -eq 'native') {
+                $hint = 'In WSL, from this checkout, run: cmake -S . -B build/native -G Ninja -DCMAKE_BUILD_TYPE=Release; cmake --build build/native.'
+            } else {
+                $hint = 'Build the selected preset directory inside WSL as described in README.md.'
+            }
+            throw "WSL executable '$WslBinary' is missing or not executable. $hint Install the Linux prerequisites in README.md, or pass -WslBinary with an existing Linux build."
+        }
+        if ($check -ne 0) { exit $check }
+    }
+
+    # Some WSLg X servers expose an invalid RandR output, which makes SDL's
+    # X11 initialization abort. Preserve an explicit user choice and limit
+    # the workaround to WSLg; the fixed shell code never interpolates argv.
+    $bootstrap = 'if [ -n "${WSL_INTEROP-}" ] && [ -n "${WAYLAND_DISPLAY-}" ] && [ -z "${SDL_VIDEO_X11_XRANDR+x}" ]; then SDL_VIDEO_X11_XRANDR=0; export SDL_VIDEO_X11_XRANDR; fi; exec "$@"'
+    $wslArgs = $wslBaseArgs + @('--exec', '/bin/sh', '-c', $bootstrap, 'termica-wsl', $WslBinary)
+    if ($SelfTest) {
+        $wslArgs += '--selftest'
+    } else {
+        if ($Font) { $wslArgs += $Font }
+        if ($Size) { $wslArgs += $Size }
+    }
+    exit (Invoke-WslProcess $wslArgs)
 }
 
 $exe = Join-Path $project "build\$Preset\termica.exe"
