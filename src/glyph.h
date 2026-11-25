@@ -45,6 +45,9 @@
 #define GLYPH_EXTRA_BUCKETS      2048
 #define GLYPH_MAX_USER_FALLBACKS 8
 #define GLYPH_MAX_SYS_FALLBACKS  6
+#if defined(__linux__) || defined(__APPLE__)
+#define GLYPH_MAX_NATIVE_FALLBACKS 12
+#endif
 
 #define GLYPH_ATLAS_SIZE         1024
 #define GLYPH_ATLAS_PAGES        8
@@ -113,6 +116,13 @@ typedef struct Glyphs {
 
     /* Symbols Nerd Font Mono, compiled in, as the last resort for symbols. */
     TTF_Font *symbol_fallback;
+
+#if defined(__linux__) || defined(__APPLE__)
+    /* On-demand native fallback faces, kept after the built-in symbols face. */
+    TTF_Font *native_fallbacks[GLYPH_MAX_NATIVE_FALLBACKS];
+    bool      native_fallback_color[GLYPH_MAX_NATIVE_FALLBACKS];
+    int       native_fallback_count;
+#endif
 
     /* True when the main family is the font compiled into the executable
      * (no path, or the requested path could not be opened). */

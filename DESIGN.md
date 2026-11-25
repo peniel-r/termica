@@ -71,12 +71,12 @@ It never reimplements an escape sequence.
 |---|---|---|
 | `main.c` | Entry point, CLI parsing, startup/teardown, timers, `fit_grid`, event loop | `app`, `session`, `input`, `render`, `chrome`, `console`, `embed`, `font_lookup` |
 | `app.h` | Shared `App` struct, layout/timer constants and `SDL_EVENT_USER` codes | `session`, `git`, `glyph`, `panel`, `settings`, `statusbar`, `window` |
-| `session.{h,c}` | Per-tab terminal, ConPTY, search, selection, IME and bounded output pump | `term`, `pty`, `search`, SDL |
+| `session.{h,c}` | Per-tab terminal, PTY, search, selection, IME and bounded output pump | `term`, `pty`, `search`, SDL |
 | `input.{h,c}` | Keyboard, text/IME, mouse, search and hyperlink interaction | `app`, `chrome`, `hyperlink` |
 | `render.{h,c}` | Damage-tracked grid row cache, search highlights and hovered links | `app`, `chrome`, `style` |
 | `chrome.{h,c}` | Frame geometry, tab strip, search overlay and status bar | `app` |
 | `term.{h,c}` | Terminal state, encoders, selection and OSC callbacks | libghostty-vt |
-| `pty.{h,c}` | Pipes, `CreatePseudoConsole`, child process, job object, reader thread, ring buffer, resize, ordered close | Win32 only, **no SDL** |
+| `pty.{h,c}`, `pty_posix.c` | ConPTY or POSIX PTY, child process, asynchronous FIFO I/O, resize and cleanup | Win32 or POSIX, **no SDL** |
 | `glyph.{h,c}` | Fonts, bounded glyph atlases, HarfBuzz-shaped runs, fallback and drawing | SDL3_ttf, `embed`, `font_lookup` |
 | `style.{h,c}` | Turns a cell style into colours and decorations | pure |
 | `geometry.{h,c}` | Squircle math shared by the panel, Liquid Glass SDF and the window region | pure |
@@ -84,15 +84,15 @@ It never reimplements an escape sequence.
 | `glass.{h,c}` | Liquid Glass surface optics (squircle SDF, convex rim refraction, RGB dispersion, Dual Kawase wallpaper blur, opposing-light specular contours and glass capsules) | SDL renderer, `geometry`, WIC (Win32) |
 | `window.{h,c}` | Window creation, decoration presets, hit test, DWM/composition backdrop, `SetWindowRgn` | SDL, DWM |
 | `settings.{h,c}`, `statusbar.{h,c}` | Validated TOML settings and transactional reload | tomlc17 |
-| `config_watch.{h,c}`, `ui_settings.{h,c}` | Windows file watch and comment-preserving UI edits | Win32, SDL, tomlc17 |
+| `config_watch.{h,c}`, `ui_settings.{h,c}` | Windows, Linux and macOS file watches and comment-preserving UI edits | Win32/POSIX, SDL, tomlc17 |
 | `search.{h,c}` | Incremental scrollback search and match navigation | libghostty-vt, PCRE2 |
-| `hyperlink.{h,c}` | OSC 8 and detected URLs, scheme validation and opening | libghostty-vt, Win32 |
-| `clipboard.{h,c}`, `desktop_signal.{h,c}` | Clipboard read policy, notifications and taskbar progress | SDL, Win32 |
+| `hyperlink.{h,c}` | OSC 8 and detected URLs, scheme validation and desktop opening | libghostty-vt, SDL/Win32 |
+| `clipboard.{h,c}`, `desktop_signal.{h,c}` | Clipboard read policy, notifications and platform progress | SDL, Win32/GIO/Cocoa |
 | `diagnostics.{h,c}` | Local log, version and unhandled-exception minidump | Win32, DbgHelp |
 | `toast.{h,c}` | In-window reload and save error feedback | SDL |
-| `git.{h,c}` | Background `git status --porcelain=v2 --branch` and its parser | Win32 |
-| `font_lookup.{h,c}` | Installed family name → `.ttf` path through the registry | Win32 |
-| `embed.{h,c}`, `fonts.rc.in` | Fonts compiled in as RCDATA (IDs 1-4: Maple Mono NF, 5: Symbols NF) | Win32 resources |
+| `git.{h,c}` | Deadline-bounded background `git status --porcelain=v2 --branch` and its parser | Win32/POSIX |
+| `font_lookup.{h,c}` | Installed family and face lookup | registry, Fontconfig or CoreText |
+| `embed.{h,c}`, `fonts.rc.in`, `fonts.S.in` | Maple Mono NF and Symbols NF compiled into the executable | Win32 resources or Unix binary sections |
 | `console.{h,c}` | Reattaches the launching console for diagnostics (GUI-subsystem exe) | Win32 |
 | `selftest.c` | Headless checks, including real ConPTY round trips | all of the above |
 
@@ -142,6 +142,12 @@ stateDiagram-v2
     Running --> Closing: window closed / Ctrl+Shift+Q
     Closing --> [*]: ClosePseudoConsole, join reader, close job (kills tree)
 ```
+
+On Linux and macOS, each session uses an `openpty` master/slave and a new
+controlling-terminal session. The child executes the configured UTF-8 argv
+directly without a shell command string; reader/writer threads preserve bounded
+output backpressure and FIFO input, and resize uses `TIOCSWINSZ`. Closing the
+session terminates its shell and jobs, and reaps the direct child.
 
 ## Threading model
 
@@ -757,3 +763,18 @@ otherwise.
   wallpaper rather than arbitrary mid-stack windows, keeping frame cost near
   zero when cached and avoiding self-capture feedback loops. All optical math
   and software-rendered pixels are verified headlessly in `--selftest`.
+
+### ADR-023: Native POSIX backends
+
+- **Decision:** Preserve the ConPTY backend on Windows and use a native POSIX
+  PTY backend on Linux and macOS. Command arrays remain argv arrays through
+  `execve`; the child creates a controlling terminal and receives the configured
+  directory and environment without shell interpolation.
+- **Decision:** Link the bundled font bytes on Unix, resolve installed fonts
+  with Fontconfig or CoreText, and use inotify or kqueue for configuration
+  changes. Open URLs through the desktop API and deliver policy-approved
+  notifications via D-Bus or UserNotifications.
+- **Consequences:** POSIX PTYs forward Kitty APC sequences that ConPTY drops.
+  Linux has no standard taskbar progress protocol; macOS notifications need
+  an identified app bundle and OS permission. Unix builds use an installed
+  libghostty-vt or build the pinned source with Zig 0.17.

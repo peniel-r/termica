@@ -35,6 +35,13 @@
 int config_test(void);
 int search_selftest(void);
 int glyph_atlas_selftest(void);
+#ifndef _WIN32
+int pty_posix_selftest(void);
+int git_posix_selftest(void);
+int font_posix_selftest(void);
+int config_watch_posix_selftest(void);
+int hyperlink_posix_selftest(void);
+#endif
 
 static int failure_count;
 
@@ -1638,7 +1645,6 @@ static void test_kitty_graphics_conpty(void)
  * Symbols Nerd Font Mono fallback being present. */
 static void test_embedded_fonts(void)
 {
-#ifdef _WIN32
     const void *data = NULL;
     size_t size = 0;
 
@@ -1649,9 +1655,6 @@ static void test_embedded_fonts(void)
               data && size > 1024,
           "Symbols Nerd Font Mono is embedded");
     check(embedded_font_available(), "embedded_font_available is true");
-#else
-    check(true, "embedded fonts are Windows-only");
-#endif
 }
 
 /* A font setting may be a family name. The resolver leaves a path that
@@ -1660,7 +1663,9 @@ static void test_embedded_fonts(void)
 static void test_font_lookup(void)
 {
     char path[512];
+#ifdef _WIN32
     char again[512];
+#endif
 
     check(!font_lookup_path("termica-no-such-font-family", path, sizeof path),
           "an unknown font name is not resolved");
@@ -1839,6 +1844,7 @@ static void test_statusbar_helpers(void)
     statusbar_shorten_path(&sb, "a/b", out, sizeof out);
     check(strcmp(out, "a/b") == 0, "fewer parts than the limit stay whole");
 
+#ifdef _WIN32
     /* The child's PEB reports the working directory with a trailing
      * separator; the display must not show it. */
     sb.modules[STATUSBAR_DIRECTORY].truncation_length = 0;
@@ -1860,6 +1866,15 @@ static void test_statusbar_helpers(void)
         check(strcmp(out, expected) == 0,
               "the home symbol re-joins with a separator");
     }
+#else
+    sb.modules[STATUSBAR_DIRECTORY].truncation_length = 0;
+    statusbar_shorten_path(&sb, "/tmp/work/project/", out, sizeof out);
+    check(strcmp(out, "/tmp/work/project") == 0,
+          "full Unix path keeps its root and drops trailing slash");
+    statusbar_shorten_path(&sb, "/tmp/a\\b", out, sizeof out);
+    check(strcmp(out, "/tmp/a\\b") == 0,
+          "a Unix backslash remains part of a directory name");
+#endif
 
     statusbar_format_duration(750, out, sizeof out);
     check(strcmp(out, "750ms") == 0, "millisecond duration");
@@ -1937,6 +1952,14 @@ static void test_term_pwd_and_prompts(void)
 #else
     check(term_pwd(&term) && strcmp(term_pwd(&term), "C:/Users/a b") == 0,
           "OSC 7 decodes the file URI");
+#endif
+#ifndef _WIN32
+    write_string(term.handle, "\x1b]7;file://localhost/home/a%20b\x07");
+    check(term_pwd(&term) && strcmp(term_pwd(&term), "/home/a b") == 0,
+          "OSC 7 localhost retains the Unix root slash");
+    write_string(term.handle, "\x1b]7;file:///tmp/test\x07");
+    check(term_pwd(&term) && strcmp(term_pwd(&term), "/tmp/test") == 0,
+          "OSC 7 empty authority retains the Unix root slash");
 #endif
 
     write_string(term.handle, "\x1b]9;9;\"C:\\work\\termica\"\x07");
@@ -2528,6 +2551,12 @@ int term_selftest(void)
     test_session_pump_continuation();
     test_clipboard_write_conpty();
     test_kitty_graphics_conpty();
+#else
+    failure_count += pty_posix_selftest();
+    failure_count += git_posix_selftest();
+    failure_count += font_posix_selftest();
+    failure_count += config_watch_posix_selftest();
+    failure_count += hyperlink_posix_selftest();
 #endif
 
     printf("\n%s (%d failure%s)\n", failure_count ? "FAILED" : "OK",

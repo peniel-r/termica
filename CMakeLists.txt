@@ -1,9 +1,14 @@
 cmake_minimum_required(VERSION 3.21)
 project(termica VERSION 0.3.0 LANGUAGES C)
 
-# The font is embedded as Windows RCDATA resources.
+# Windows resources and Unix binary sections carry the same bundled fonts.
 if(WIN32)
     enable_language(RC)
+elseif(UNIX)
+    enable_language(ASM)
+    if(APPLE)
+        enable_language(OBJC)
+    endif()
 endif()
 
 # Your own code is strict C99.
@@ -12,6 +17,9 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
 include(FetchContent)
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+endif()
 
 # ---- SDL3 + SDL3_ttf, built from source and linked statically ---------------
 # Offline? Point these at local checkouts instead of downloading:
@@ -28,6 +36,14 @@ set(SDLTTF_VENDORED  ON  CACHE BOOL "" FORCE)  # bundled FreeType + HarfBuzz
 set(SDLTTF_PLUTOSVG  OFF CACHE BOOL "" FORCE)  # not needed, saves build time
 set(SDLTTF_SAMPLES   OFF CACHE BOOL "" FORCE)
 set(SDLTTF_INSTALL   OFF CACHE BOOL "" FORCE)
+
+# SDL_ttf disables FreeType's PNG bitmap glyph support in vendored builds
+# by default. Noto Color Emoji and similar Unix fonts require it.
+if(UNIX)
+    set(FT_DISABLE_ZLIB OFF CACHE BOOL "" FORCE)
+    set(FT_DISABLE_PNG OFF CACHE BOOL "" FORCE)
+    set(FT_REQUIRE_PNG ON CACHE BOOL "" FORCE)
+endif()
 
 FetchContent_Declare(SDL3
     GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
@@ -118,14 +134,20 @@ if(WIN32)
     list(APPEND CMAKE_PREFIX_PATH ${ghostty_root})
     find_package(ghostty-vt CONFIG REQUIRED)
 else()
-    find_package(ghostty-vt CONFIG QUIET)
-    if(NOT TARGET ghostty-vt::ghostty-vt)
-        message(FATAL_ERROR
-            "libghostty-vt not found. This milestone needs it; only Windows has a "
-            "prebuilt release. Build it from source (needs Zig 0.17):\n"
-            "  zig build -Doptimize=ReleaseFast --prefix <dir>\n"
-            "then configure with -DCMAKE_PREFIX_PATH=<dir>.\n"
-            "See https://lib.ghostty.org/vt/installing.html")
+    # Prefer an installed matching library; otherwise use the official pinned
+    # source release. The source build requires Zig 0.17 on PATH.
+    find_package(ghostty-vt ${GHOSTTY_VERSION} CONFIG QUIET)
+    if(TARGET ghostty-vt::ghostty-vt)
+        set(TERMICA_GHOSTTY_TARGET ghostty-vt::ghostty-vt)
+    else()
+        if(NOT GHOSTTY_VERSION STREQUAL "1.0.1")
+            message(FATAL_ERROR "Install ghostty-vt ${GHOSTTY_VERSION} or update the source checksum")
+        endif()
+        FetchContent_Declare(ghostty
+            URL https://release.files.ghostty.org/libghostty-vt/1.0.1/libghostty-vt-1.0.1.tar.gz
+            URL_HASH SHA256=333dfce97641ef9b536bb9e08907ad86abaaada50e8f7417b70d9284adef37aa)
+        FetchContent_MakeAvailable(ghostty)
+        set(TERMICA_GHOSTTY_TARGET ghostty-vt-static)
     endif()
 endif()
 
@@ -205,6 +227,10 @@ if(WIN32)
     # reclaims the launching console so the diagnostics still show up when
     # it is started from a shell.
     set_target_properties(termica PROPERTIES WIN32_EXECUTABLE TRUE)
+elseif(APPLE)
+    set_target_properties(termica PROPERTIES MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_GUI_IDENTIFIER "org.termica.terminal"
+        MACOSX_BUNDLE_BUNDLE_NAME "Termica")
 endif()
 
 # Maple Mono NF, built into the executable. Configured rather
@@ -215,8 +241,40 @@ if(WIN32)
                    "${CMAKE_CURRENT_BINARY_DIR}/termica_fonts.rc" @ONLY)
     target_sources(termica PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/termica_fonts.rc")
 endif()
+if(UNIX)
+    set(TERMICA_FONT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts")
+    configure_file(src/fonts.S.in "${CMAKE_CURRENT_BINARY_DIR}/termica_fonts.S" @ONLY)
+    target_sources(termica PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/termica_fonts.S"
+        src/pty_posix.c src/pty_posix_test.c src/git_posix_test.c
+        src/font_posix_test.c src/config_watch_posix_test.c src/hyperlink_posix_test.c)
+    set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/termica_fonts.S"
+        PROPERTIES OBJECT_DEPENDS "${TERMICA_FONT_DIR}/MapleMono-NF-Regular.ttf;${TERMICA_FONT_DIR}/MapleMono-NF-Bold.ttf;${TERMICA_FONT_DIR}/MapleMono-NF-Italic.ttf;${TERMICA_FONT_DIR}/MapleMono-NF-BoldItalic.ttf;${TERMICA_FONT_DIR}/SymbolsNerdFontMono-Regular.ttf")
+    find_package(Threads REQUIRED)
+    target_link_libraries(termica PRIVATE Threads::Threads)
+    if(APPLE)
+        target_sources(termica PRIVATE src/desktop_signal_mac.m)
+        set_source_files_properties(src/desktop_signal_mac.m PROPERTIES COMPILE_OPTIONS "-fblocks")
+        target_link_libraries(termica PRIVATE "-framework Cocoa" "-framework UserNotifications" "-framework CoreText" "-framework CoreFoundation")
+    else()
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
+        pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0)
+        target_link_libraries(termica PRIVATE util PkgConfig::FONTCONFIG PkgConfig::GIO)
+    endif()
+endif()
 target_link_libraries(termica PRIVATE SDL3_ttf::SDL3_ttf SDL3::SDL3)
-target_link_libraries(termica PRIVATE ghostty-vt::ghostty-vt)
+if(UNIX)
+    # SDL_ttf merges vendored FreeType into its static archive; retain its
+    # PNG/zlib dependencies explicitly for bitmap colour fonts.
+    find_package(PNG REQUIRED)
+    find_package(ZLIB REQUIRED)
+    target_link_libraries(termica PRIVATE PNG::PNG ZLIB::ZLIB)
+endif()
+if(WIN32)
+    target_link_libraries(termica PRIVATE ghostty-vt::ghostty-vt)
+else()
+    target_link_libraries(termica PRIVATE ${TERMICA_GHOSTTY_TARGET})
+endif()
 target_link_libraries(termica PRIVATE tomlc17)
 target_link_libraries(termica PRIVATE pcre2-8-static)
 target_compile_definitions(termica PRIVATE

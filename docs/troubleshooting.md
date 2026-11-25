@@ -1,8 +1,9 @@
 # Troubleshooting
 
-termica requires Windows 10 version 1809 or later; Mica and Acrylic require
-Windows 11 22H2 or later. See the [configuration and key reference](configuration.md)
-for supported settings, defaults and key names.
+On Windows, termica requires Windows 10 version 1809 or later; Mica and
+Acrylic require Windows 11 22H2 or later. Linux needs an X11 or Wayland
+session, Fontconfig and GIO; macOS uses the app bundle. See the
+[configuration and key reference](configuration.md) for all settings.
 
 ## Startup and shells
 
@@ -20,16 +21,22 @@ for supported settings, defaults and key names.
   cwd = 'C:\work'
   ```
 
+- On Linux and macOS, `shell = "auto"` selects `$SHELL` when it names an
+  executable, otherwise `/bin/sh`. Use `command = ["/bin/bash", "-l"]`
+  or another argv array for a specific shell. There is no shell-string
+  interpolation of command arguments.
+
 - To isolate configuration problems, close termica, make a backup of
-  `%APPDATA%\termica\termica.toml` and `statusbar.toml`, then temporarily
-  rename them and restart. Missing files use defaults. Restore the backups
-  after diagnosis; do not delete settings you need.
+  `termica.toml` and `statusbar.toml` under `%APPDATA%\termica` on Windows or
+  `${XDG_CONFIG_HOME:-$HOME/.config}/termica` on Unix, then temporarily rename
+  them and restart. Missing files use defaults. Restore the backups afterwards.
 
 ## Configuration and appearance
 
-- Check the file is in `%APPDATA%\termica\` and is valid TOML. Use a literal
-  string such as `'C:\Fonts\font.ttf'` or escape each backslash in a double
-  quoted string. Wrong types and out-of-range values are not accepted. During
+- Check the appropriate configuration directory and use valid TOML. On
+  Windows, use a literal string such as `'C:\Fonts\font.ttf'` or escape each
+  backslash in a double-quoted string.
+  Wrong types and out-of-range values are not accepted. During
   live reload, a syntax error or invalid recognized value retains the previous
   configuration and shows a message; unknown keys are ignored. Initial loading
   ignores invalid individual values instead.
@@ -56,6 +63,9 @@ for supported settings, defaults and key names.
   to take the pointer back. OSC 52 clipboard access and OSC notifications are
   denied by default; configure their policies only if you trust the program.
   Windows notification settings or Focus Assist can also suppress alerts.
+- On Linux, notifications require a session D-Bus notification service and URL
+  opening requires a working desktop opener. On macOS, run the app bundle and
+  grant notification permission when prompted.
 
 ## Crash reports and privacy
 
@@ -65,8 +75,8 @@ opt out before launching from PowerShell, set `$env:TERMICA_DIAGNOSTICS = '0'`;
 remove the variable to restore the default. A missing dump does not mean a
 crash did not happen: the process may not have been able to write one.
 
-To report a crash, record the Windows version, exact steps and the output of
-`termica.exe --version` from the affected build. Include any relevant log
+To report a crash, record the OS version, exact steps and the output of
+`termica --version` from the affected build. Include any relevant log
 entries and indicate whether a dump exists. **Minidumps can contain private
 terminal and process memory, secrets, and paths.** Inspect logs and config for
 sensitive information too; redact before sharing. Do not upload a dump to a

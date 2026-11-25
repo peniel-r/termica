@@ -2,6 +2,16 @@
  * termica - the git status provider. See git.h.
  */
 
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "git.h"
 
 #include <SDL3/SDL.h>
@@ -18,6 +28,17 @@
 #define NTDDI_VERSION 0x0A000006
 #endif
 #include <windows.h>
+#else
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+extern char **environ;
 #endif
 
 /* Longest `git status --porcelain=v2 --branch` output we read. */
@@ -239,11 +260,175 @@ bool git_status_for(const char *directory, GitStatus *out)
 
 #else /* !_WIN32 */
 
+/* Keep the pipe ends outside the standard descriptor range: the caller may
+ * have closed stdin, stdout, or stderr before starting termica. */
+static bool git_pipe(int ends[2])
+{
+    int i;
+
+#ifdef __linux__
+    if (pipe2(ends, O_CLOEXEC) != 0)
+        return false;
+#else
+    /* Older macOS versions do not provide pipe2. */
+    if (pipe(ends) != 0)
+        return false;
+    if (fcntl(ends[0], F_SETFD, FD_CLOEXEC) < 0 ||
+        fcntl(ends[1], F_SETFD, FD_CLOEXEC) < 0)
+        goto fail;
+#endif
+
+    for (i = 0; i < 2; i++) {
+        if (ends[i] <= STDERR_FILENO) {
+            int fd = fcntl(ends[i], F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+            if (fd < 0)
+                goto fail;
+            close(ends[i]);
+            ends[i] = fd;
+        }
+    }
+    return true;
+
+fail:
+    close(ends[0]);
+    close(ends[1]);
+    return false;
+}
+
 bool git_status_for(const char *directory, GitStatus *out)
 {
-    (void)directory;
-    if (out)
-        memset(out, 0, sizeof *out);
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attributes;
+    int ends[2];
+    int flags, status = 0;
+    short spawn_flags = POSIX_SPAWN_SETPGROUP;
+    pid_t pid, waited;
+    char buffer[GIT_OUTPUT_BYTES];
+    size_t used = 0;
+    Uint64 deadline;
+    bool eof = false, reaped = false, failed = false;
+    char *argv[] = {"git", "-C", (char *)directory, "status",
+                    "--porcelain=v2", "--branch", NULL};
+
+    if (!out)
+        return false;
+    memset(out, 0, sizeof *out);
+    if (!directory || !directory[0] || !git_pipe(ends))
+        return false;
+
+    flags = fcntl(ends[0], F_GETFL);
+    if (flags < 0 || fcntl(ends[0], F_SETFL, flags | O_NONBLOCK) < 0)
+        goto fail_pipe;
+    if (posix_spawn_file_actions_init(&actions) != 0)
+        goto fail_pipe;
+    if (posix_spawnattr_init(&attributes) != 0)
+        goto fail_actions;
+#ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
+    /* A simultaneous worker may be between pipe() and FD_CLOEXEC on macOS. */
+    spawn_flags |= POSIX_SPAWN_CLOEXEC_DEFAULT;
+#endif
+
+    /* -C changes only the child's working directory. Passing it as an argv
+     * element preserves UTF-8 and metacharacters without involving a shell. */
+    if (posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null",
+                                         O_RDONLY, 0) != 0 ||
+        posix_spawn_file_actions_adddup2(&actions, ends[1], STDOUT_FILENO) != 0 ||
+        posix_spawn_file_actions_adddup2(&actions, ends[1], STDERR_FILENO) != 0 ||
+        posix_spawn_file_actions_addclose(&actions, ends[0]) != 0 ||
+        posix_spawn_file_actions_addclose(&actions, ends[1]) != 0 ||
+        posix_spawnattr_setpgroup(&attributes, 0) != 0 ||
+        posix_spawnattr_setflags(&attributes, spawn_flags) != 0 ||
+        posix_spawnp(&pid, "git", &actions, &attributes, argv, environ) != 0) {
+        posix_spawnattr_destroy(&attributes);
+        goto fail_actions;
+    }
+    posix_spawnattr_destroy(&attributes);
+    posix_spawn_file_actions_destroy(&actions);
+    close(ends[1]);
+
+    deadline = SDL_GetTicks() + GIT_TIMEOUT_MS;
+    while (!reaped) {
+        Uint64 now = SDL_GetTicks();
+        int timeout;
+
+        if (now >= deadline) {
+            failed = true;
+            break;
+        }
+        if (!eof) {
+            char extra;
+            size_t room = sizeof buffer - 1 - used;
+            ssize_t n = read(ends[0], room ? buffer + used : &extra,
+                             room ? room : 1);
+            if (n > 0) {
+                if (!room) {
+                    failed = true; /* Never parse a truncated status. */
+                    break;
+                }
+                used += (size_t)n;
+                continue;
+            }
+            if (n == 0)
+                eof = true;
+            else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                failed = true;
+                break;
+            }
+        }
+
+        /* Don't reap before EOF: retaining the child PID until then prevents
+         * its process group ID being reused while a descendant holds stdout. */
+        if (eof) {
+            waited = waitpid(pid, &status, WNOHANG);
+            if (waited == pid) {
+                reaped = true;
+                break;
+            }
+            if (waited < 0 && errno != EINTR) {
+                reaped = errno == ECHILD;
+                failed = true;
+                break;
+            }
+        }
+
+        timeout = (int)(deadline - now);
+        if (timeout > 25)
+            timeout = 25;
+        if (!eof) {
+            struct pollfd pfd;
+            pfd.fd = ends[0];
+            pfd.events = POLLIN;
+            pfd.revents = 0;
+            if (poll(&pfd, 1, timeout) < 0 && errno != EINTR) {
+                failed = true;
+                break;
+            }
+        } else if (poll(NULL, 0, timeout) < 0 && errno != EINTR) {
+            failed = true;
+            break;
+        }
+    }
+
+    if (!reaped) {
+        /* Kill the whole group, including helpers that inherited the pipe.
+         * Also signal the direct child in case it changed process groups. */
+        (void)kill(-pid, SIGKILL);
+        (void)kill(pid, SIGKILL);
+        do {
+            waited = waitpid(pid, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+    }
+    close(ends[0]);
+    if (failed || !reaped || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        return false;
+    buffer[used] = '\0';
+    return git_parse_status(buffer, used, out);
+
+fail_actions:
+    posix_spawn_file_actions_destroy(&actions);
+fail_pipe:
+    close(ends[0]);
+    close(ends[1]);
     return false;
 }
 

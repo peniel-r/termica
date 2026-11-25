@@ -48,8 +48,8 @@ void git_close(Git *git);
 bool git_parse_status(const char *text, size_t length, GitStatus *out);
 
 /* Run git synchronously in `directory`. Blocks; the worker thread uses it
- * and the self test can too. False when the directory is not a repository
- * or git cannot run. */
+ * and the self test can too. False when the directory is not a repository,
+ * git cannot run or the run times out. POSIX also rejects oversized output. */
 bool git_status_for(const char *directory, GitStatus *out);
 
 #endif /* TERMICA_GIT_H */

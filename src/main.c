@@ -377,10 +377,7 @@ static bool is_point_size(const char *text, float *out)
     return true;
 }
 
-/* The font is optional. Order: a path on the command line, then the one in
- * the settings file, then the built-in Maple Mono NF. A build without the
- * embedded font (anything but Windows) falls back to a monospace font from
- * the system. */
+/* Command-line and configured faces precede the bundled font. */
 static const char *pick_font(const char *requested, const char *from_settings)
 {
     static const char *fallbacks[] = {
@@ -413,12 +410,16 @@ static void open_statusbar_font(App *app, const char *grid_font_path)
 {
     const char *face = app->statusbar.font[0] ? app->statusbar.font : NULL;
     const char *sb_font = NULL;
+#ifdef _WIN32
     char resolved[512];
+#endif
 
     if (face) {
+#ifdef _WIN32
         if (font_lookup_path(face, resolved, sizeof resolved))
             sb_font = resolved;
         else
+#endif
             sb_font = face;
     }
     if (!sb_font)
@@ -464,10 +465,14 @@ static void reload_files(App *app, unsigned changes, const char *font_override,
             app->settings = next;
             if (diff & SETTINGS_DIFF_FONT) {
                 if (!font_override) {
+#ifdef _WIN32
                     char resolved[512];
+#endif
                     const char *path = pick_font(NULL, next.font);
+#ifdef _WIN32
                     if (path && font_lookup_path(path, resolved, sizeof resolved))
                         path = resolved;
+#endif
                     SDL_strlcpy(app->font_path, path ? path : "", sizeof app->font_path);
                 }
                 font_ok = open_grid_font(app, &next_glyphs, next_size,
@@ -690,7 +695,7 @@ static void sync_session_and_git(App *app)
                 if (allowed && !desktop_signal_notify(true, notification.title,
                         strlen(notification.title), notification.body,
                         strlen(notification.body)))
-                    toast_show("Windows could not display the notification");
+                    toast_show("The desktop could not display the notification");
             }
         }
 
@@ -776,7 +781,9 @@ static void sync_session_and_git(App *app)
 int main(int argc, char **argv)
 {
     App app;
+#ifdef _WIN32
     char resolved_font[512];
+#endif
     const char *font_path;
     const char *font_label;
     const char *requested_font = NULL;
@@ -839,9 +846,11 @@ int main(int argc, char **argv)
 
     font_path = pick_font(requested_font, app.settings.font);
     /* A settings file may name the installed family instead of a file. */
+#ifdef _WIN32
     if (font_path &&
         font_lookup_path(font_path, resolved_font, sizeof resolved_font))
         font_path = resolved_font;
+#endif
     if (!font_path && !embedded_font_available()) {
         fprintf(stderr, "usage: %s [--selftest] "
                 "[font-face-or-path] [point-size]\n", argv[0]);

@@ -394,8 +394,9 @@ static bool apply_backdrop(SDL_Window *window, WindowBackdrop backdrop,
 {
     (void)window;
     (void)native;
-    return backdrop == WINDOW_BACKDROP_PANEL ||
-           window_backdrop_is_glass(backdrop);
+    /* DWM and Windows wallpaper refraction are not available here. Do not
+     * claim a backdrop was installed when the platform cannot supply it. */
+    return backdrop == WINDOW_BACKDROP_PANEL;
 }
 static void apply_region(SDL_Window *window, int corner_radius)
 {
@@ -404,7 +405,8 @@ static void apply_region(SDL_Window *window, int corner_radius)
 }
 void window_flash_taskbar(SDL_Window *window)
 {
-    (void)window;
+    if (window)
+        (void)SDL_FlashWindow(window, SDL_FLASH_UNTIL_FOCUSED);
 }
 #endif
 

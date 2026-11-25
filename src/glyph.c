@@ -196,12 +196,30 @@ static bool atlas_store(Glyphs *glyphs, SDL_Surface *surface, Glyph *glyph)
 
 /* Standard OS fallback families for colour emoji, symbols and CJK. */
 static const char *const SYSTEM_FALLBACK_FAMILIES[] = {
+#if defined(__APPLE__)
+    "Apple Color Emoji",
+    "Apple Symbols",
+    "PingFang SC",
+    "Hiragino Sans",
+    "Apple SD Gothic Neo",
+    "Songti SC",
+#elif defined(__linux__)
+    "Noto Color Emoji",
+    "Noto Emoji",
+    "Noto Sans Symbols 2",
+    "Noto Sans CJK SC",
+    "Noto Sans CJK JP",
+    "Noto Sans CJK KR",
+    "Noto Sans CJK TC",
+    "DejaVu Sans",
+#else
     "Segoe UI Emoji",
     "Segoe UI Symbol",
     "Microsoft YaHei",
     "Yu Gothic",
     "Malgun Gothic",
     "SimSun",
+#endif
     NULL
 };
 
@@ -244,7 +262,11 @@ int glyphs_resolve_fallback_paths(const char *const *user_fallbacks,
             strlen(resolved) >= 256)
             continue;
         for (j = 0; j < written; j++) {
+#ifdef _WIN32
             if (SDL_strcasecmp(out[j], resolved) == 0) {
+#else
+            if (strcmp(out[j], resolved) == 0) {
+#endif
                 duplicate = true;
                 break;
             }
@@ -255,9 +277,12 @@ int glyphs_resolve_fallback_paths(const char *const *user_fallbacks,
     return written;
 }
 
-/* The face that can draw this codepoint: primary -> built-in Maple Mono ->
- * user fallbacks -> OS CJK/emoji fallbacks -> Symbols Nerd Font Mono. */
-static TTF_Font *font_with_glyph(const Glyphs *glyphs, int slot,
+#if defined(__linux__) || defined(__APPLE__)
+static TTF_Font *open_indexed_font(const char *path, int index, float point_size);
+#endif
+
+/* Preserve the fixed fallback order before asking the OS for another face. */
+static TTF_Font *font_with_glyph(Glyphs *glyphs, int slot,
                                  Uint32 codepoint, bool *out_color)
 {
     TTF_Font *font = font_for_slot(glyphs, slot);
@@ -288,6 +313,31 @@ static TTF_Font *font_with_glyph(const Glyphs *glyphs, int slot,
     if (glyphs->symbol_fallback &&
         TTF_FontHasGlyph(glyphs->symbol_fallback, codepoint))
         return glyphs->symbol_fallback;
+#if defined(__linux__) || defined(__APPLE__)
+    for (i = 0; i < glyphs->native_fallback_count; i++) {
+        if (TTF_FontHasGlyph(glyphs->native_fallbacks[i], codepoint)) {
+            if (out_color)
+                *out_color = glyphs->native_fallback_color[i];
+            return glyphs->native_fallbacks[i];
+        }
+    }
+    if (glyphs->native_fallback_count < GLYPH_MAX_NATIVE_FALLBACKS) {
+        char path[512];
+        int index;
+        if (font_lookup_codepoint(codepoint, path, sizeof path, &index)) {
+            font = open_indexed_font(path, index, TTF_GetFontSize(glyphs->regular));
+            if (font && TTF_FontHasGlyph(font, codepoint)) {
+                int native_slot = glyphs->native_fallback_count++;
+                glyphs->native_fallbacks[native_slot] = font;
+                glyphs->native_fallback_color[native_slot] = path_is_color_emoji(path);
+                if (out_color)
+                    *out_color = glyphs->native_fallback_color[native_slot];
+                return font;
+            }
+            if (font) TTF_CloseFont(font);
+        }
+    }
+#endif
     return NULL;
 }
 
@@ -457,6 +507,53 @@ static TTF_Font *open_variant(const char *font_path, float point_size,
     return NULL;
 }
 
+#if defined(__linux__) || defined(__APPLE__)
+/* A native family can select a nonzero face inside a font collection. */
+static TTF_Font *open_indexed_font(const char *path, int index, float point_size)
+{
+    SDL_PropertiesID props;
+    TTF_Font *font;
+
+    if (index == 0)
+        return TTF_OpenFont(path, point_size);
+    props = SDL_CreateProperties();
+    if (!props)
+        return NULL;
+    if (!SDL_SetStringProperty(props, TTF_PROP_FONT_CREATE_FILENAME_STRING, path) ||
+        !SDL_SetFloatProperty(props, TTF_PROP_FONT_CREATE_SIZE_FLOAT, point_size) ||
+        !SDL_SetNumberProperty(props, TTF_PROP_FONT_CREATE_FACE_NUMBER, index)) {
+        SDL_DestroyProperties(props);
+        return NULL;
+    }
+    font = TTF_OpenFontWithProperties(props);
+    SDL_DestroyProperties(props);
+    return font;
+}
+
+static TTF_Font *open_native_variant(const char *name, const char *regular_path,
+                                     float point_size, bool bold, bool italic,
+                                     const char *const *suffixes)
+{
+    SDL_PathInfo info;
+    char path[512];
+    int index;
+    TTF_Font *font;
+    bool explicit_path = SDL_GetPathInfo(name, &info) && info.type == SDL_PATHTYPE_FILE;
+
+    /* A user-specified file's adjacent faces take precedence over a different
+     * installed copy of the same family. */
+    if (explicit_path) {
+        font = open_variant(regular_path, point_size, suffixes);
+        if (font) return font;
+    }
+    if (font_lookup_face(name, bold, italic, path, sizeof path, &index)) {
+        font = open_indexed_font(path, index, point_size);
+        if (font) return font;
+    }
+    return explicit_path ? NULL : open_variant(regular_path, point_size, suffixes);
+}
+#endif
+
 /* Open one face from the executable's resources. Null when this build has
  * no embedded font or the resource is missing. */
 static TTF_Font *open_embedded(EmbeddedFontFace face, float point_size)
@@ -522,6 +619,29 @@ bool glyphs_open_ex(Glyphs *glyphs, SDL_Renderer *renderer,
     }
 
     if (font_path) {
+#if defined(__linux__) || defined(__APPLE__)
+        char resolved[512];
+        const char *regular_path = font_path;
+        int index = 0;
+        if (font_lookup_face(font_path, false, false, resolved, sizeof resolved, &index))
+            regular_path = resolved;
+        glyphs->regular = open_indexed_font(regular_path, index, scaled_size);
+        if (glyphs->regular) {
+            const char *variant_name = font_path;
+            if (SDL_strcasecmp(font_path, "monospace") == 0 ||
+                SDL_strcasecmp(font_path, "sans-serif") == 0 ||
+                SDL_strcasecmp(font_path, "serif") == 0) {
+                const char *family = TTF_GetFontFamilyName(glyphs->regular);
+                if (family && family[0]) variant_name = family;
+            }
+            glyphs->bold = open_native_variant(variant_name, regular_path, scaled_size,
+                                               true, false, BOLD_SUFFIXES);
+            glyphs->italic = open_native_variant(variant_name, regular_path, scaled_size,
+                                                 false, true, ITALIC_SUFFIXES);
+            glyphs->bold_italic = open_native_variant(variant_name, regular_path, scaled_size,
+                                                      true, true, BOLD_ITALIC_SUFFIXES);
+        }
+#else
         glyphs->regular = TTF_OpenFont(font_path, scaled_size);
         if (glyphs->regular) {
             glyphs->bold = open_variant(font_path, scaled_size, BOLD_SUFFIXES);
@@ -530,6 +650,7 @@ bool glyphs_open_ex(Glyphs *glyphs, SDL_Renderer *renderer,
             glyphs->bold_italic = open_variant(font_path, scaled_size,
                                                BOLD_ITALIC_SUFFIXES);
         }
+#endif
     }
 
     if (!glyphs->regular) {
@@ -555,10 +676,19 @@ bool glyphs_open_ex(Glyphs *glyphs, SDL_Renderer *renderer,
 
         if (!user_fallbacks || !user_fallbacks[i] || !user_fallbacks[i][0])
             continue;
+#if defined(__linux__) || defined(__APPLE__)
+        {
+            int index = 0;
+            path = font_lookup_face(user_fallbacks[i], false, false, resolved,
+                                    sizeof resolved, &index) ? resolved : user_fallbacks[i];
+            face = open_indexed_font(path, index, scaled_size);
+        }
+#else
         path = font_lookup_path(user_fallbacks[i], resolved, sizeof resolved)
                    ? resolved
                    : user_fallbacks[i];
         face = TTF_OpenFont(path, scaled_size);
+#endif
         if (face) {
             int slot = glyphs->user_fallback_count++;
             glyphs->user_fallbacks[slot] = face;
@@ -572,10 +702,20 @@ bool glyphs_open_ex(Glyphs *glyphs, SDL_Renderer *renderer,
         char resolved[512];
         TTF_Font *face;
 
+#if defined(__linux__) || defined(__APPLE__)
+        {
+            int index;
+            if (!font_lookup_face(SYSTEM_FALLBACK_FAMILIES[i], false, false,
+                                  resolved, sizeof resolved, &index))
+                continue;
+            face = open_indexed_font(resolved, index, scaled_size);
+        }
+#else
         if (!font_lookup_path(SYSTEM_FALLBACK_FAMILIES[i], resolved,
                               sizeof resolved))
             continue;
         face = TTF_OpenFont(resolved, scaled_size);
+#endif
         if (face) {
             int slot = glyphs->sys_fallback_count++;
             glyphs->sys_fallbacks[slot] = face;
@@ -658,6 +798,12 @@ void glyphs_close(Glyphs *glyphs)
         if (glyphs->sys_fallbacks[i])
             TTF_CloseFont(glyphs->sys_fallbacks[i]);
     }
+#if defined(__linux__) || defined(__APPLE__)
+    for (i = 0; i < glyphs->native_fallback_count; i++) {
+        if (glyphs->native_fallbacks[i])
+            TTF_CloseFont(glyphs->native_fallbacks[i]);
+    }
+#endif
     if (glyphs->fallback)
         TTF_CloseFont(glyphs->fallback);
     if (glyphs->symbol_fallback)

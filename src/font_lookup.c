@@ -16,8 +16,8 @@
  * Relative file names (system fonts are stored that way) are looked for in
  * %WINDIR%\Fonts and %LOCALAPPDATA%\Microsoft\Windows\Fonts.
  *
- * Strict C99. The registry half is Windows-only; elsewhere only a name that
- * is already a readable file resolves.
+ * Linux uses fontconfig; macOS uses CoreText. Both retain collection face
+ * indices so that a family inside a TTC opens as the intended font.
  */
 
 #include "font_lookup.h"
@@ -304,6 +304,320 @@ static bool lookup_windows(const char *name, char *out, size_t capacity)
 
 #endif /* _WIN32 */
 
+#if defined(__linux__)
+#include <fontconfig/fontconfig.h>
+
+static bool fontconfig_family_is(const FcPattern *font, const char *family)
+{
+    FcChar8 *candidate;
+    int i;
+    for (i = 0; FcPatternGetString(font, FC_FAMILY, i, &candidate) == FcResultMatch; i++) {
+        if (FcStrCmpIgnoreCase(candidate, (const FcChar8 *)family) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool lookup_fontconfig(const char *name, bool bold, bool italic,
+                              char *out, size_t capacity, int *face_index)
+{
+    SDL_PathInfo info;
+    FcPattern *query = NULL, *file_font = NULL;
+    FcFontSet *fonts = NULL;
+    const char *family = name;
+    FcChar8 *file_family;
+    FcResult result;
+    bool generic, found = false;
+    int i, count;
+
+    if (SDL_GetPathInfo(name, &info) && info.type == SDL_PATHTYPE_FILE) {
+        if (!bold && !italic) {
+            size_t length = strlen(name);
+            if (length >= capacity)
+                return false;
+            memcpy(out, name, length + 1);
+            *face_index = 0;
+            return true;
+        }
+        file_font = FcFreeTypeQuery((const FcChar8 *)name, 0, NULL, &count);
+        if (!file_font || FcPatternGetString(file_font, FC_FAMILY, 0,
+                                             &file_family) != FcResultMatch)
+            goto done;
+        family = (const char *)file_family;
+    }
+    generic = SDL_strcasecmp(family, "monospace") == 0 ||
+              SDL_strcasecmp(family, "sans-serif") == 0 ||
+              SDL_strcasecmp(family, "serif") == 0;
+    query = FcPatternCreate();
+    if (!query || !FcPatternAddString(query, FC_FAMILY, (const FcChar8 *)family) ||
+        !FcPatternAddInteger(query, FC_WEIGHT, bold ? FC_WEIGHT_BOLD : FC_WEIGHT_REGULAR) ||
+        !FcPatternAddInteger(query, FC_SLANT, italic ? FC_SLANT_ITALIC : FC_SLANT_ROMAN) ||
+        !FcConfigSubstitute(NULL, query, FcMatchPattern))
+        goto done;
+    FcDefaultSubstitute(query);
+    fonts = FcFontSort(NULL, query, FcFalse, NULL, &result);
+    if (!fonts)
+        goto done;
+    for (i = 0; i < fonts->nfont; i++) {
+        FcPattern *font = fonts->fonts[i];
+        FcChar8 *file;
+        int weight = FC_WEIGHT_REGULAR, slant = FC_SLANT_ROMAN, index = 0;
+        size_t length;
+
+        if (!generic && !fontconfig_family_is(font, family))
+            continue;
+        (void)FcPatternGetInteger(font, FC_WEIGHT, 0, &weight);
+        (void)FcPatternGetInteger(font, FC_SLANT, 0, &slant);
+        if ((bold || italic) &&
+            ((weight >= FC_WEIGHT_DEMIBOLD) != bold ||
+             (slant != FC_SLANT_ROMAN) != italic))
+            continue;
+        if (FcPatternGetString(font, FC_FILE, 0, &file) != FcResultMatch)
+            continue;
+        (void)FcPatternGetInteger(font, FC_INDEX, 0, &index);
+        length = strlen((const char *)file);
+        if (length >= capacity)
+            break;
+        memcpy(out, file, length + 1);
+        *face_index = index;
+        found = true;
+        break;
+    }
+done:
+    if (fonts) FcFontSetDestroy(fonts);
+    if (query) FcPatternDestroy(query);
+    if (file_font) FcPatternDestroy(file_font);
+    return found;
+}
+
+static bool fontconfig_codepoint(uint32_t codepoint, char *out, size_t capacity,
+                                 int *face_index)
+{
+    FcPattern *query = FcPatternCreate();
+    FcCharSet *charset = FcCharSetCreate();
+    FcFontSet *fonts = NULL;
+    FcResult result;
+    bool found = false;
+    int i;
+
+    if (!query || !charset || !FcCharSetAddChar(charset, codepoint) ||
+        !FcPatternAddCharSet(query, FC_CHARSET, charset) ||
+        !FcConfigSubstitute(NULL, query, FcMatchPattern))
+        goto done;
+    FcDefaultSubstitute(query);
+    fonts = FcFontSort(NULL, query, FcFalse, NULL, &result);
+    if (!fonts) goto done;
+    for (i = 0; i < fonts->nfont; ++i) {
+        FcCharSet *coverage;
+        FcChar8 *file;
+        int index = 0;
+        size_t length;
+        if (FcPatternGetCharSet(fonts->fonts[i], FC_CHARSET, 0, &coverage) != FcResultMatch ||
+            !FcCharSetHasChar(coverage, codepoint) ||
+            FcPatternGetString(fonts->fonts[i], FC_FILE, 0, &file) != FcResultMatch)
+            continue;
+        length = strlen((const char *)file);
+        if (length >= capacity) continue;
+        (void)FcPatternGetInteger(fonts->fonts[i], FC_INDEX, 0, &index);
+        memcpy(out, file, length + 1);
+        *face_index = index;
+        found = true;
+        break;
+    }
+done:
+    if (fonts) FcFontSetDestroy(fonts);
+    if (charset) FcCharSetDestroy(charset);
+    if (query) FcPatternDestroy(query);
+    return found;
+}
+#elif defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#include <CoreText/CoreText.h>
+#include <limits.h>
+
+/* CoreText descriptors carry URLs, not FreeType collection indices. Match
+ * the PostScript name against the file's descriptor array to recover it. */
+static bool coretext_file_face(CTFontDescriptorRef descriptor, char *out,
+                               size_t capacity, int *face_index)
+{
+    CFURLRef url = (CFURLRef)CTFontDescriptorCopyAttribute(descriptor, kCTFontURLAttribute);
+    CFStringRef name = (CFStringRef)CTFontDescriptorCopyAttribute(descriptor, kCTFontNameAttribute);
+    CFArrayRef faces = NULL;
+    bool found = false;
+    CFIndex i;
+
+    if (!url || !name || capacity > LONG_MAX ||
+        !CFURLGetFileSystemRepresentation(url, true, (UInt8 *)out, (CFIndex)capacity))
+        goto done;
+    faces = CTFontManagerCreateFontDescriptorsFromURL(url);
+    if (!faces)
+        goto done;
+    for (i = 0; i < CFArrayGetCount(faces) && i <= INT_MAX; i++) {
+        CTFontDescriptorRef item = (CTFontDescriptorRef)CFArrayGetValueAtIndex(faces, i);
+        CFStringRef item_name = (CFStringRef)CTFontDescriptorCopyAttribute(item, kCTFontNameAttribute);
+        if (item_name && CFEqual(name, item_name)) {
+            *face_index = (int)i;
+            found = true;
+        }
+        if (item_name) CFRelease(item_name);
+        if (found) break;
+    }
+done:
+    if (faces) CFRelease(faces);
+    if (name) CFRelease(name);
+    if (url) CFRelease(url);
+    return found;
+}
+
+static bool lookup_coretext(const char *name, bool bold, bool italic,
+                            char *out, size_t capacity, int *face_index)
+{
+    SDL_PathInfo info;
+    CFStringRef family = NULL;
+    CFURLRef url = NULL;
+    CFArrayRef file_faces = NULL, matches = NULL;
+    CFDictionaryRef attributes = NULL;
+    CTFontDescriptorRef query = NULL;
+    CFSetRef required = NULL;
+    const void *key = kCTFontFamilyNameAttribute, *value;
+    bool found = false;
+    CFIndex i;
+    int pass;
+
+    if (SDL_GetPathInfo(name, &info) && info.type == SDL_PATHTYPE_FILE) {
+        if (!bold && !italic) {
+            size_t length = strlen(name);
+            if (length >= capacity) return false;
+            memcpy(out, name, length + 1);
+            *face_index = 0;
+            return true;
+        }
+        url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)name,
+                                                       (CFIndex)strlen(name), false);
+        if (!url) goto done;
+        file_faces = CTFontManagerCreateFontDescriptorsFromURL(url);
+        if (!file_faces || CFArrayGetCount(file_faces) == 0) goto done;
+        family = (CFStringRef)CTFontDescriptorCopyAttribute(
+            (CTFontDescriptorRef)CFArrayGetValueAtIndex(file_faces, 0), kCTFontFamilyNameAttribute);
+    } else {
+        family = CFStringCreateWithCString(NULL, name, kCFStringEncodingUTF8);
+    }
+    if (!family) goto done;
+    value = family;
+    attributes = CFDictionaryCreate(NULL, &key, &value, 1,
+                                    &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    required = CFSetCreate(NULL, &key, 1, &kCFTypeSetCallBacks);
+    if (!attributes || !required) goto done;
+    query = CTFontDescriptorCreateWithAttributes(attributes);
+    if (!query) goto done;
+    matches = CTFontDescriptorCreateMatchingFontDescriptors(query, required);
+    if (!matches) goto done;
+    /* If the family has no regular face, keep the same last-resort behavior
+     * as the Windows and fontconfig resolvers. */
+    for (pass = 0; pass < ((!bold && !italic) ? 2 : 1) && !found; ++pass) {
+        for (i = 0; i < CFArrayGetCount(matches); i++) {
+            CTFontDescriptorRef candidate = (CTFontDescriptorRef)CFArrayGetValueAtIndex(matches, i);
+            CFStringRef candidate_family = (CFStringRef)CTFontDescriptorCopyAttribute(candidate, kCTFontFamilyNameAttribute);
+            CFDictionaryRef traits = (CFDictionaryRef)CTFontDescriptorCopyAttribute(candidate, kCTFontTraitsAttribute);
+            CFNumberRef symbolic = traits ? (CFNumberRef)CFDictionaryGetValue(traits, kCTFontSymbolicTrait) : NULL;
+            int bits = 0;
+            bool same, is_bold, is_italic;
+
+            if (symbolic) CFNumberGetValue(symbolic, kCFNumberIntType, &bits);
+            same = candidate_family && CFStringCompare(family, candidate_family,
+                                                        kCFCompareCaseInsensitive) == kCFCompareEqualTo;
+            is_bold = (bits & kCTFontBoldTrait) != 0;
+            is_italic = (bits & kCTFontItalicTrait) != 0;
+            if (candidate_family) CFRelease(candidate_family);
+            if (traits) CFRelease(traits);
+            if (same && (pass || (is_bold == bold && is_italic == italic)) &&
+                coretext_file_face(candidate, out, capacity, face_index)) {
+                found = true;
+                break;
+            }
+        }
+    }
+done:
+    if (matches) CFRelease(matches);
+    if (query) CFRelease(query);
+    if (required) CFRelease(required);
+    if (attributes) CFRelease(attributes);
+    if (file_faces) CFRelease(file_faces);
+    if (url) CFRelease(url);
+    if (family) CFRelease(family);
+    return found;
+}
+
+static bool coretext_codepoint(uint32_t codepoint, char *out, size_t capacity,
+                               int *face_index)
+{
+    UniChar chars[2];
+    CFIndex length = 1;
+    CFStringRef text;
+    CTFontRef base, fallback;
+    CTFontDescriptorRef descriptor;
+    bool found = false;
+
+    if (codepoint < 0x10000) {
+        chars[0] = (UniChar)codepoint;
+    } else {
+        codepoint -= 0x10000;
+        chars[0] = (UniChar)(0xd800 + (codepoint >> 10));
+        chars[1] = (UniChar)(0xdc00 + (codepoint & 0x3ff));
+        length = 2;
+    }
+    text = CFStringCreateWithCharacters(NULL, chars, length);
+    if (!text) return false;
+    base = CTFontCreateWithName(CFSTR("Helvetica"), 12, NULL);
+    if (base) {
+        fallback = CTFontCreateForString(base, text, CFRangeMake(0, length));
+        if (fallback) {
+            descriptor = CTFontCopyFontDescriptor(fallback);
+            if (descriptor) {
+                found = coretext_file_face(descriptor, out, capacity, face_index);
+                CFRelease(descriptor);
+            }
+            CFRelease(fallback);
+        }
+        CFRelease(base);
+    }
+    CFRelease(text);
+    return found;
+}
+#endif
+
+bool font_lookup_face(const char *name, bool bold, bool italic,
+                      char *out, size_t capacity, int *face_index)
+{
+    if (!name || !name[0] || !out || capacity == 0 || !face_index)
+        return false;
+#if defined(__linux__)
+    return lookup_fontconfig(name, bold, italic, out, capacity, face_index);
+#elif defined(__APPLE__)
+    return lookup_coretext(name, bold, italic, out, capacity, face_index);
+#else
+    if (bold || italic) return false;
+    if (!font_lookup_path(name, out, capacity)) return false;
+    *face_index = 0;
+    return true;
+#endif
+}
+
+bool font_lookup_codepoint(uint32_t codepoint, char *out, size_t capacity,
+                           int *face_index)
+{
+    if (!out || !capacity || !face_index || codepoint > 0x10ffff ||
+        (codepoint >= 0xd800 && codepoint <= 0xdfff))
+        return false;
+#if defined(__linux__)
+    return fontconfig_codepoint(codepoint, out, capacity, face_index);
+#elif defined(__APPLE__)
+    return coretext_codepoint(codepoint, out, capacity, face_index);
+#else
+    return false;
+#endif
+}
+
 bool font_lookup_path(const char *name, char *out, size_t capacity)
 {
     SDL_PathInfo info;
@@ -323,6 +637,11 @@ bool font_lookup_path(const char *name, char *out, size_t capacity)
 
 #ifdef _WIN32
     return lookup_windows(name, out, capacity);
+#elif defined(__linux__) || defined(__APPLE__)
+    {
+        int face_index;
+        return font_lookup_face(name, false, false, out, capacity, &face_index);
+    }
 #else
     return false;
 #endif

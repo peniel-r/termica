@@ -268,6 +268,23 @@ static void test_backpressure_and_signals(void)
     pty_close(pty);
 }
 
+static void test_apc_transport(void)
+{
+    char error[256], output[1024];
+    const char *argv[] = {
+        "/bin/sh", "-c",
+        "printf 'before\\033_Ga=T,f=32,s=1,v=1,i=77;/wAA/w==\\033\\\\after'"
+    };
+    Pty *pty = pty_spawn_posix(argv, 3, NULL, NULL, 0, 80, 24,
+                               NULL, NULL, error, sizeof error);
+    uint32_t code = 0;
+    bool ok = pty && collect(pty, output, sizeof output, &code, 5000);
+    check(ok && code == 0 &&
+          strstr(output, "before\x1b_Ga=T,f=32,s=1,v=1,i=77;/wAA/w==\x1b\\after"),
+          "POSIX PTY forwards Kitty APC image payloads intact");
+    pty_close(pty);
+}
+
 static bool process_terminated(pid_t pid)
 {
     if (kill(pid, 0) < 0 && errno == ESRCH) return true;
@@ -342,6 +359,7 @@ int pty_posix_selftest(void)
     test_errors();
     test_io_and_concurrency();
     test_backpressure_and_signals();
+    test_apc_transport();
     test_cleanup(directory);
     rmdir(directory);
     return failures;

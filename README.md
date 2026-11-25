@@ -2,9 +2,9 @@
 
 # termica
 
-**A small, native Windows terminal emulator built on [libghostty-vt](https://lib.ghostty.org/vt/), SDL3 and ConPTY.**
+**A native terminal emulator for Windows, Linux and macOS, built on [libghostty-vt](https://lib.ghostty.org/vt/) and SDL3.**
 
-![Platform](https://img.shields.io/badge/platform-Windows%2010%201809%2B-0078D4)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0078D4)
 ![Language](https://img.shields.io/badge/language-C99-555)
 ![Status](https://img.shields.io/badge/status-pre--alpha-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -20,10 +20,8 @@
 - **Correct emulation, without writing it ourselves.** Parsing, screen state,
   scrollback, reflow, key and mouse encoding all come from libghostty-vt,
   the same VT core that Ghostty uses.
-- **A real Windows citizen.** It runs your shell in a ConPTY, uses Mica,
-  Mica Alt, Acrylic and Liquid Glass backdrops, has rounded squircle corners or
-  the native frame, and ships as a GUI-subsystem executable with no console
-  flash.
+- **Native shell transport.** ConPTY on Windows; a POSIX pseudoterminal on
+  Linux and macOS. Tabs own their processes and close them on exit.
 - **Works out of the box.** Maple Mono NF and Symbols Nerd Font faces are
   built in, so prompt glyphs and icons render without installing fonts.
 - **Small and readable.** Strict C99 with a headless self-test suite.
@@ -32,30 +30,32 @@
 
 | Area | What works today |
 |---|---|
-| **Shell** | `pwsh` → `powershell` → `cmd` auto-detection, UTF-8 end to end, resize and per-tab process-tree cleanup; closing the last tab closes the window |
+| **Shell** | Windows `pwsh` → `powershell` → `cmd` auto-detection; on Unix, `$SHELL` or `/bin/sh`. Custom argv, resize and per-tab process cleanup |
 | **Rendering** | 24-bit colour, bold, italic, dim, inverse, strikethrough and overline, five underline kinds (single, double, curly, dotted, dashed), all cursor styles plus blinking, wide characters, and configurable programming ligatures through HarfBuzz-shaped runs |
-| **Images** | Kitty graphics parsing, storage and drawing (raw/PNG, three layers, z-order, animations) are implemented and self-tested, but Windows ConPTY consumes the APC escape codes programs use to send images. See limitations |
+| **Images** | Kitty graphics parsing and drawing; POSIX PTYs forward APC sequences. Windows ConPTY consumes APC; Sixel remains unsupported |
 | **Scrollback** | Mouse wheel, keyboard scrolling, a draggable scrollbar, configurable history, and search with case and regex toggles |
 | **Selection** | Cell, word, line and block (Alt) selection. The selection follows its text through output and reflow, autoscrolls at the edges, and can copy on select |
 | **Mouse** | Mouse reporting (modes 9/1000/1002/1003, SGR/UTF-8/urxvt/pixel formats), Shift to take the pointer back, OSC 22 pointer shape |
 | **Clipboard** | Bracketed paste, unsafe-paste confirmation, and OSC 52 reads and writes with an `ask`/`allow`/`deny` policy (default `deny`) |
 | **Input** | Alt keys reach the shell outside search, focus reporting (mode 1004), IME preedit drawn at the cursor |
-| **Window** | `rounded`, `square`, `compact` and `native` frames, an optional drawn title bar, Mica/Mica Alt/Acrylic/Liquid Glass backdrops, adjustable opacity |
+| **Window** | `rounded`, `square`, `compact` and `native` frames, an optional drawn title bar and adjustable opacity; Windows also supports Mica, Acrylic and Liquid Glass backdrops |
 | **Tabs** | Multiple independent sessions, a tab strip and keyboard and mouse controls |
 | **Links** | OSC 8 and detected URLs, underlined on hover and opened with Ctrl+click for allowed schemes |
-| **Desktop** | Policy-gated OSC notifications and taskbar progress |
+| **Desktop** | Policy-gated notifications on Windows, Linux and macOS; taskbar progress on Windows and macOS |
 | **Status bar** | Starship-style `statusbar.toml`: directory, git branch and status, last command's exit code and duration, a busy spinner, a clock |
 | **Diagnostics** | Version information, a local log and an unhandled-exception minidump on Windows |
 | **Config** | Validated TOML, live reload, and targeted UI saves that preserve comments |
 
 ## Requirements
 
-- **Run:** Windows 10 1809 or later (ConPTY). The Mica and Acrylic backdrops
-  need Windows 11 22H2 or later. On older systems termica falls back to its own
-  drawn panel.
-- **Build:** CMake ≥ 3.21, Ninja, git, and the
-  [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) toolchain. You don't need
-  Visual Studio, MSYS2 or Zig.
+- **Windows:** Windows 10 1809 or later; Mica and Acrylic require Windows 11
+  22H2. Build with CMake ≥ 3.21, Ninja, Git and llvm-mingw.
+- **Linux:** a desktop with X11 or Wayland, a C/C++ toolchain, CMake ≥ 3.21,
+  Ninja, Git, Fontconfig, GIO and libpng development headers. SDL's X11 or
+  Wayland development dependencies are required for the corresponding backend.
+- **macOS:** Xcode command-line tools, CMake ≥ 3.21, Ninja, Git and libpng.
+- **Unix libghostty-vt:** install the pinned library, or put Zig 0.17 on PATH;
+  CMake downloads and builds the pinned source release when not installed.
 
 ## Quick start
 
@@ -99,6 +99,25 @@ The build produces `termica.exe` and the adjacent `ghostty-vt.dll`.
 pwsh -File ./build.ps1 -Preset llvm-mingw-debug
 pwsh -File ./run.ps1   -Preset llvm-mingw-debug
 ```
+
+### Linux and macOS
+
+Build with the native compiler and Zig 0.17 available on PATH:
+
+```sh
+cmake -S . -B build/native -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build/native
+./build/native/termica --selftest     # Linux
+./build/native/termica                # Linux
+./build/native/termica.app/Contents/MacOS/termica --selftest  # macOS
+open build/native/termica.app          # macOS
+```
+
+On Linux, install your distribution's development packages for Fontconfig,
+GIO, libpng, X11 or Wayland, and OpenGL before configuring. On macOS, install
+libpng and build the app bundle; notifications may require OS permission.
+An installed libghostty-vt can instead be selected with
+`-DCMAKE_PREFIX_PATH=/path/to/prefix`.
 
 ### Command line
 
@@ -197,9 +216,8 @@ bell = "visual"        # visual | taskbar | none
   `copy_on_select` are the same key.
 - **Windows paths** need escaped backslashes (`"C:\\Fonts\\x.ttf"`) or a
   literal string (`'C:\Fonts\x.ttf'`).
-- **Font family names** such as `"Cascadia Code"` are resolved through the
-  Windows font registry, per-user fonts first. termica finds matching
-  bold and italic faces automatically.
+- **Font family names** are resolved through the Windows font registry,
+  Fontconfig on Linux or CoreText on macOS, with matching faces and fallbacks.
 - **UI edits** save only the changed key in place, preserving other settings
   and comments. Closing the window does not rewrite either configuration file.
 
@@ -260,8 +278,14 @@ duration is hidden rather than reused from a previous command.
   and draws Kitty images (covered by `--selftest`), but a program running in a
   tab cannot get an image through the pty until the transport forwards APC.
   Sixel is not supported either.
+- Windows-specific backdrop materials fall back to the drawn panel on Linux
+  and macOS; native compositor blur is not implemented.
 - Windows may suppress notifications according to its notification settings
   or Focus Assist.
+- Linux taskbar progress has no standard freedesktop protocol. Notifications
+  require a running session D-Bus notification service; URLs use the desktop
+  opener. macOS notifications require OS authorization and the app bundle.
+- The macOS backend has not yet been validated on native macOS hardware.
 - Windows minidumps can contain private terminal text, process memory and paths.
   See [troubleshooting](docs/troubleshooting.md#crash-reports-and-privacy)
   before sharing logs or dumps. Set `TERMICA_DIAGNOSTICS=0` to disable them.

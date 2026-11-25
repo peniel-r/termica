@@ -155,4 +155,5 @@ update it and uninstall it, with no manual steps.
 - IME preedit that pushes text aside instead of overwriting cells, with no
   128-byte limit
 - Session restore
-- Non-Windows backends (the pty stub exists, and SDL is portable)
+- Validate the implemented macOS backend on native macOS hardware (the Linux
+  backend is exercised under WSLg; no macOS runtime was available here)

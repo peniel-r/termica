@@ -77,8 +77,7 @@ WindowBackdrop window_sync_chrome(SDL_Window *window, WindowBackdrop backdrop,
                                   WindowDecoration decoration,
                                   int corner_radius);
 
-/* Flash the window's taskbar button until it gains focus (Windows
- * FlashWindowEx with FLASHW_TRAY | FLASHW_TIMERNOFG; no-op elsewhere). */
+/* Request taskbar or dock attention until the window gains focus. */
 void window_flash_taskbar(SDL_Window *window);
 
 /* Tell the custom-frame hit test how wide (in logical window coordinates)

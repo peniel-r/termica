@@ -17,9 +17,23 @@ fi
 
 typeset -g __termica_ran=0
 
+__termica_uri_path() {
+    local LC_ALL=C uri_path=$1 out='' ch hex
+    local -i i
+    for ((i=1; i<=${#uri_path}; i++)); do
+        ch=${uri_path[i]}
+        case $ch in
+            [a-zA-Z0-9._~/-]) out+=$ch ;;
+            *) printf -v hex '%02X' "'$ch"; out+=%$hex ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
 __termica_precmd() {
     local code=$?
-    local dir=${PWD// /%20}
+    local dir
+    dir=$(__termica_uri_path "$PWD")
 
     if [[ "$__termica_ran" = 1 ]]; then
         printf '\033]133;D;%d\a' "$code"

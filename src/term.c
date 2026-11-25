@@ -10,6 +10,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* libghostty's options API takes callback addresses as const void *. GCC
+ * diagnoses this documented ABI conversion in strict ISO C mode. */
+#if defined(__GNUC__) && !defined(__clang__)
+#define GHOSTTY_CALLBACK(fn) __extension__ (const void *)(fn)
+#else
+#define GHOSTTY_CALLBACK(fn) (const void *)(fn)
+#endif
+
 /* The program rang the bell (BEL, 0x07). Callbacks must not mutate the
  * terminal or touch UI; record the flag for the main loop. */
 static void on_bell(GhosttyTerminal terminal, void *userdata)
@@ -93,8 +101,12 @@ static void term_decode_pwd(const GhosttyString *raw, char *out, size_t cap)
     if (length >= 7 && memcmp(src, "file://", 7) == 0) {
         in = 7;
         if (in < length && src[in] == '/') {
-            /* file:///path: an empty authority. */
-            in++;
+            /* Keep the Unix root slash. Drop it only before a drive letter. */
+            if (in + 3 < length &&
+                ((src[in + 1] >= 'A' && src[in + 1] <= 'Z') ||
+                 (src[in + 1] >= 'a' && src[in + 1] <= 'z')) &&
+                src[in + 2] == ':' && src[in + 3] == '/')
+                in++;
         } else {
             /* An authority. file://C:/... is a Windows drive, not a host,
              * so keep it; anything else is a hostname to skip up to the
@@ -105,8 +117,11 @@ static void term_decode_pwd(const GhosttyString *raw, char *out, size_t cap)
                   src[in + 1] == ':' && src[in + 2] == '/')) {
                 while (in < length && src[in] != '/')
                     in++;
-                if (in < length)
-                    in++;   /* the slash after the host */
+                if (in + 3 < length && src[in] == '/' &&
+                    ((src[in + 1] >= 'A' && src[in + 1] <= 'Z') ||
+                     (src[in + 1] >= 'a' && src[in + 1] <= 'z')) &&
+                    src[in + 2] == ':' && src[in + 3] == '/')
+                    in++;
             }
         }
     }
@@ -535,7 +550,7 @@ static void ensure_sys(void)
     if (installed)
         return;
     installed = true;
-    ghostty_sys_set(GHOSTTY_SYS_OPT_DECODE_PNG, (const void *)&decode_png);
+    ghostty_sys_set(GHOSTTY_SYS_OPT_DECODE_PNG, GHOSTTY_CALLBACK(decode_png));
 }
 
 bool term_init(Term *term, uint16_t columns, uint16_t rows)
@@ -588,27 +603,26 @@ bool term_init(Term *term, uint16_t columns, uint16_t rows)
                          GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_FILE,
                          &image_file_medium);
     ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_BELL,
-                         (const void *)on_bell);
+                         GHOSTTY_CALLBACK(on_bell));
     ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_TITLE_CHANGED,
-                         (const void *)on_title_changed);
+                         GHOSTTY_CALLBACK(on_title_changed));
     ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_PWD_CHANGED,
-                         (const void *)on_pwd_changed);
+                         GHOSTTY_CALLBACK(on_pwd_changed));
     ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_SEMANTIC_PROMPT,
-                         (const void *)on_semantic_prompt);
+                         GHOSTTY_CALLBACK(on_semantic_prompt));
     ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_RESET,
-                         (const void *)on_reset);
+                         GHOSTTY_CALLBACK(on_reset));
     ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_WRITE_PTY,
-                         (const void *)on_write_pty);
+                         GHOSTTY_CALLBACK(on_write_pty));
     ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_CLIPBOARD_READ,
-                         (const void *)on_clipboard_read);
+                         GHOSTTY_CALLBACK(on_clipboard_read));
     ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_DESKTOP_NOTIFICATION,
-                         (const void *)on_desktop_notification);
+                         GHOSTTY_CALLBACK(on_desktop_notification));
     ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_PROGRESS_REPORT,
-                         (const void *)on_progress_report);
-    /* Only useful once the app installs a handler; registering it always is
-     * what lets the kitty protocol know this terminal can answer at all. */
+                         GHOSTTY_CALLBACK(on_progress_report));
+    /* Registering the clipboard callback lets kitty know it can answer. */
     ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE,
-                         (const void *)on_clipboard_write);
+                         GHOSTTY_CALLBACK(on_clipboard_write));
     ok = true;
 
 done:

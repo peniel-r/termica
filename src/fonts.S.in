@@ -1,0 +1,47 @@
+/* Bundled fonts in the executable on ELF and Mach-O platforms. */
+#ifdef __APPLE__
+.section __TEXT,__const
+#define SYMBOL(name) _##name
+#else
+.section .rodata
+#define SYMBOL(name) name
+#endif
+
+.balign 16
+.globl SYMBOL(termica_font_regular_start)
+SYMBOL(termica_font_regular_start):
+.incbin "@TERMICA_FONT_DIR@/MapleMono-NF-Regular.ttf"
+.globl SYMBOL(termica_font_regular_end)
+SYMBOL(termica_font_regular_end):
+
+.balign 16
+.globl SYMBOL(termica_font_bold_start)
+SYMBOL(termica_font_bold_start):
+.incbin "@TERMICA_FONT_DIR@/MapleMono-NF-Bold.ttf"
+.globl SYMBOL(termica_font_bold_end)
+SYMBOL(termica_font_bold_end):
+
+.balign 16
+.globl SYMBOL(termica_font_italic_start)
+SYMBOL(termica_font_italic_start):
+.incbin "@TERMICA_FONT_DIR@/MapleMono-NF-Italic.ttf"
+.globl SYMBOL(termica_font_italic_end)
+SYMBOL(termica_font_italic_end):
+
+.balign 16
+.globl SYMBOL(termica_font_bold_italic_start)
+SYMBOL(termica_font_bold_italic_start):
+.incbin "@TERMICA_FONT_DIR@/MapleMono-NF-BoldItalic.ttf"
+.globl SYMBOL(termica_font_bold_italic_end)
+SYMBOL(termica_font_bold_italic_end):
+
+.balign 16
+.globl SYMBOL(termica_font_symbols_start)
+SYMBOL(termica_font_symbols_start):
+.incbin "@TERMICA_FONT_DIR@/SymbolsNerdFontMono-Regular.ttf"
+.globl SYMBOL(termica_font_symbols_end)
+SYMBOL(termica_font_symbols_end):
+
+#ifndef __APPLE__
+.section .note.GNU-stack,"",%progbits
+#endif

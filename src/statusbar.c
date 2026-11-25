@@ -861,17 +861,25 @@ bool statusbar_load(Statusbar *sb)
 /* Pure helpers                                                               */
 /* ------------------------------------------------------------------------- */
 
-/* Fold a path byte for a Windows-style comparison: separators are
- * equivalent and case does not matter. OSC 7 arrives with forward slashes,
- * the child's PEB path and USERPROFILE with backslashes; both must match
- * the home directory the same way. */
+/* Windows path matching is case-insensitive; POSIX paths are not. */
 static char canon_home_char(char c)
 {
+#ifdef _WIN32
     if (c == '/')
         c = '\\';
     if (c >= 'A' && c <= 'Z')
         c = (char)(c + 32);
+#endif
     return c;
+}
+
+static bool path_separator(char c)
+{
+#ifdef _WIN32
+    return c == '/' || c == '\\';
+#else
+    return c == '/';
+#endif
 }
 
 void statusbar_shorten_path(const Statusbar *sb, const char *path, char *out,
@@ -895,19 +903,17 @@ void statusbar_shorten_path(const Statusbar *sb, const char *path, char *out,
     if (!path || !path[0])
         return;
 
-    /* Split into components, dropping empty ones from leading or doubled
-     * separators. The kept result is a slice of the original string, so the
-     * path's own separators survive and the trailing separator the child's
-     * PEB reports is simply past the last component. */
+    /* Split components using the platform's path separators. The result
+     * retains the path's own separators and drops a trailing separator. */
     for (p = path; *p && ncomp < 64; ) {
         const char *start;
 
-        while (*p == '/' || *p == '\\')
+        while (path_separator(*p))
             p++;
         if (!*p)
             break;
         start = p;
-        while (*p && *p != '/' && *p != '\\')
+        while (*p && !path_separator(*p))
             p++;
         comp_start[ncomp] = start;
         comp_end[ncomp] = p;
@@ -918,12 +924,11 @@ void statusbar_shorten_path(const Statusbar *sb, const char *path, char *out,
         return;
     }
 
-    /* Replace the home directory's leading components with home_symbol,
-     * compared per component with separators and case folded, so an OSC 7
-     * path with forward slashes and a PEB path with backslashes both match
-     * USERPROFILE. */
+    /* Replace the leading home components using native case rules. */
+#ifdef _WIN32
     home = SDL_getenv("USERPROFILE");
     if (!home || !home[0])
+#endif
         home = SDL_getenv("HOME");
     if (home && home[0] && home_symbol[0]) {
         const char *hc[64];
@@ -934,12 +939,12 @@ void statusbar_shorten_path(const Statusbar *sb, const char *path, char *out,
         for (p = home; *p && hn < 64; ) {
             const char *start;
 
-            while (*p == '/' || *p == '\\')
+            while (path_separator(*p))
                 p++;
             if (!*p)
                 break;
             start = p;
-            while (*p && *p != '/' && *p != '\\')
+            while (*p && !path_separator(*p))
                 p++;
             hc[hn] = start;
             hl[hn] = (int)(p - start);
@@ -981,11 +986,13 @@ void statusbar_shorten_path(const Statusbar *sb, const char *path, char *out,
             const char *begin = comp_start[keep_from];
             size_t length;
 
-            /* After a home substitution the slice starts at the separator
-             * that followed the home components, so "~" joins as "~\dir". */
-            if (first_out > 0 && begin > path &&
-                (begin[-1] == '/' || begin[-1] == '\\'))
+            /* Rejoin the home symbol with the separator following it. */
+            if (first_out > 0 && begin > path && path_separator(begin[-1]))
                 begin--;
+#ifndef _WIN32
+            else if (first_out == 0 && keep_from == 0 && path[0] == '/')
+                begin = path;
+#endif
             length = (size_t)(comp_end[ncomp - 1] - begin);
             buf_append(out, capacity, &used, begin, length);
         }

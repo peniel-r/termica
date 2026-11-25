@@ -255,16 +255,7 @@ int glyph_atlas_selftest(void)
     if (frame)
         renderer = SDL_CreateSoftwareRenderer(frame);
     if (renderer) {
-#ifdef _WIN32
         opened = glyphs_open(&glyphs, renderer, NULL, 16.0f, 1.0f);
-#else
-        opened = glyphs_open(&glyphs, renderer,
-                             "assets/fonts/MapleMono-NF-Regular.ttf", 16.0f,
-                             1.0f);
-        if (opened && !glyphs.symbol_fallback)
-            glyphs.symbol_fallback = TTF_OpenFont(
-                "assets/fonts/SymbolsNerdFontMono-Regular.ttf", 16.0f);
-#endif
     }
     check(opened, "glyph atlas software renderer and bundled font setup");
     if (!opened)
