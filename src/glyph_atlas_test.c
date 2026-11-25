@@ -87,6 +87,39 @@ static bool has_ink(const SDL_Surface *surface)
     return false;
 }
 
+/* Leftmost painted pixel, or the surface width when there is no ink. */
+static int ink_min_x(const SDL_Surface *surface)
+{
+    int x, y;
+
+    if (!surface)
+        return 0;
+    for (y = 0; y < surface->h; y++) {
+        const Uint8 *row = (const Uint8 *)surface->pixels +
+                           (size_t)y * surface->pitch;
+        for (x = 0; x < surface->w; x++) {
+            const Uint8 *pixel = row + (size_t)x * 4;
+            if (pixel[0] != 19 || pixel[1] != 31 || pixel[2] != 47)
+                return x;
+        }
+    }
+    return surface->w;
+}
+
+/* Does the shaped run start in the same cell as the per-cell version? */
+static bool ink_starts_near(const SDL_Surface *run, const SDL_Surface *cells,
+                            int tolerance)
+{
+    int delta;
+
+    if (!run || !cells)
+        return false;
+    delta = ink_min_x(run) - ink_min_x(cells);
+    if (delta < 0)
+        delta = -delta;
+    return delta <= tolerance;
+}
+
 /* Count strongly different colour channels, ignoring the one-level
  * antialiasing difference between two rasterisation paths. */
 static int strong_difference(const SDL_Surface *a, const SDL_Surface *b)
@@ -203,8 +236,7 @@ static bool color_modulation(Glyphs *glyphs, SDL_Surface *frame)
 }
 
 int glyph_atlas_selftest(void)
-{
-    SDL_Surface *frame = NULL, *before = NULL, *after = NULL;
+{    SDL_Surface *frame = NULL, *before = NULL, *after = NULL;
     SDL_Renderer *renderer = NULL;
     SDL_Texture *target = NULL;
     Glyphs glyphs = {0};
@@ -361,6 +393,16 @@ int glyph_atlas_selftest(void)
         cells = cells_snapshot(&glyphs, frame, "->", 2, false, false, white);
         check(run && cells && strong_difference(run, cells) > 100,
               "a shaped run applies the font's -> ligature");
+        check(ink_starts_near(run, cells, glyphs.cell_width / 2),
+              "a two-cell ligature starts in its first cell");
+        SDL_DestroySurface(run);
+        SDL_DestroySurface(cells);
+
+        run = run_snapshot(&glyphs, frame, " ->", 3, false, false, white);
+        cells = cells_snapshot(&glyphs, frame, " ->", 3, false, false, white);
+        check(run && cells && ink_starts_near(run, cells,
+                                              glyphs.cell_width / 2),
+              "a ligature after spaces still starts in its own cell");
         SDL_DestroySurface(run);
         SDL_DestroySurface(cells);
 
@@ -368,6 +410,16 @@ int glyph_atlas_selftest(void)
         cells = cells_snapshot(&glyphs, frame, "===", 3, false, false, white);
         check(run && cells && strong_difference(run, cells) > 100,
               "a three-cell ligature is shaped as one run");
+        check(ink_starts_near(run, cells, glyphs.cell_width / 2),
+              "a three-cell ligature starts in its first cell");
+        SDL_DestroySurface(run);
+        SDL_DestroySurface(cells);
+
+        run = run_snapshot(&glyphs, frame, "==>", 3, false, false, white);
+        cells = cells_snapshot(&glyphs, frame, "==>", 3, false, false, white);
+        check(run && cells && ink_starts_near(run, cells,
+                                              glyphs.cell_width / 2),
+              "a long arrow ligature starts in its first cell");
         SDL_DestroySurface(run);
         SDL_DestroySurface(cells);
 

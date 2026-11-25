@@ -941,82 +941,95 @@ bool glyphs_draw_run(Glyphs *glyphs, const char *text, size_t length,
     if (!data)
         return false;
 
-    for (i = 0; i < data->num_ops; i++) {
-        const TTF_CopyOperation *op;
-        size_t offset, end;
-        int next, same;
+    {
+        int previous_offset = -1;
 
-        if (data->ops[i].cmd != TTF_DRAW_COMMAND_COPY)
-            continue;
-        op = &data->ops[i].copy;
-        offset = (size_t)op->text_offset;
-        if (offset >= length)
-            continue;
+        for (i = 0; i < data->num_ops; i++) {
+            const TTF_CopyOperation *op;
+            size_t start, end;
+            int next, same;
 
-        /* A cluster runs until the next copy operation with a different
-         * source offset. Multiple glyphs can share one offset. */
-        next = i + 1;
-        same = 1;
-        while (next < data->num_ops) {
-            if (data->ops[next].cmd == TTF_DRAW_COMMAND_COPY &&
-                (size_t)data->ops[next].copy.text_offset != offset)
-                break;
-            if (data->ops[next].cmd == TTF_DRAW_COMMAND_COPY)
-                same++;
-            next++;
-        }
-        end = next < data->num_ops
-                  ? (size_t)data->ops[next].copy.text_offset : length;
-        if (end <= offset || end > length)
-            end = length;
+            if (data->ops[i].cmd != TTF_DRAW_COMMAND_COPY)
+                continue;
+            op = &data->ops[i].copy;
+            if (op->text_offset < 0 || (size_t)op->text_offset >= length)
+                continue;
 
-        if (end - offset == 1 && same == 1) {
-            TTF_Font *glyph_font = op->glyph_font ? op->glyph_font : font;
-            int minx, maxx, miny, maxy, advance;
+            /* HarfBuzz reports a ligature's cluster as the offset of its
+             * last input character. The bytes between the previous glyph's
+             * offset and this one are the cluster, including spaces that
+             * produced no glyph operation of their own. */
+            start = (size_t)(previous_offset + 1);
+            end = (size_t)op->text_offset + 1;
+            if (end > length)
+                end = length;
+            if (start >= end)
+                start = (size_t)op->text_offset;
 
-            /* One cell: place the glyph from its own bearing, not from the
-             * run's accumulated font advances, so cells never drift. */
-            if (TTF_GetGlyphMetrics(glyph_font,
-                    (Uint32)(unsigned char)text[offset], &minx, &maxx,
-                    &miny, &maxy, &advance)) {
-                draw_shaped_glyph(glyphs, glyph_font, op->glyph_index,
-                                  &op->src,
-                                  x + (float)offset * (float)glyphs->cell_width
-                                    + (float)minx,
-                                  y + (float)op->dst.y, color, bold);
+            /* Several glyphs can share one cluster. */
+            next = i + 1;
+            same = 1;
+            while (next < data->num_ops) {
+                if (data->ops[next].cmd == TTF_DRAW_COMMAND_COPY &&
+                    data->ops[next].copy.text_offset != op->text_offset)
+                    break;
+                if (data->ops[next].cmd == TTF_DRAW_COMMAND_COPY)
+                    same++;
+                next++;
             }
-        } else {
-            /* A ligature or other multi-cell cluster: shape just this
-             * substring so its operations are relative to the cluster's
-             * own origin. */
-            float cluster_x = x + (float)offset * (float)glyphs->cell_width;
 
-            if (TTF_SetTextFont(glyphs->text_cluster, font) &&
-                TTF_SetTextString(glyphs->text_cluster, text + offset,
-                                  end - offset) &&
-                TTF_UpdateText(glyphs->text_cluster)) {
-                TTF_TextData *cluster = glyphs->text_cluster->internal;
-                int k;
+            if (end - start == 1 && same == 1) {
+                TTF_Font *glyph_font = op->glyph_font ? op->glyph_font : font;
+                int minx, maxx, miny, maxy, advance;
 
-                for (k = 0; cluster && k < cluster->num_ops; k++) {
-                    const TTF_CopyOperation *cluster_op;
+                /* One cell: place the glyph from its own bearing, not from
+                 * the run's accumulated font advances, so cells never
+                 * drift. */
+                if (TTF_GetGlyphMetrics(glyph_font,
+                        (Uint32)(unsigned char)text[start], &minx, &maxx,
+                        &miny, &maxy, &advance)) {
+                    draw_shaped_glyph(glyphs, glyph_font, op->glyph_index,
+                                      &op->src,
+                                      x + (float)start *
+                                            (float)glyphs->cell_width
+                                        + (float)minx,
+                                      y + (float)op->dst.y, color, bold);
+                }
+            } else {
+                /* A ligature or other multi-cell cluster: shape just this
+                 * substring so its operations are relative to the cluster's
+                 * own origin. */
+                float cluster_x = x + (float)start *
+                                      (float)glyphs->cell_width;
 
-                    if (cluster->ops[k].cmd != TTF_DRAW_COMMAND_COPY)
-                        continue;
-                    cluster_op = &cluster->ops[k].copy;
-                    draw_shaped_glyph(glyphs,
-                                      cluster_op->glyph_font ? cluster_op->glyph_font
-                                                             : font,
-                                      cluster_op->glyph_index,
-                                      &cluster_op->src,
-                                      cluster_x + (float)cluster_op->dst.x,
-                                      y + (float)cluster_op->dst.y, color,
-                                      bold);
+                if (TTF_SetTextFont(glyphs->text_cluster, font) &&
+                    TTF_SetTextString(glyphs->text_cluster, text + start,
+                                      end - start) &&
+                    TTF_UpdateText(glyphs->text_cluster)) {
+                    TTF_TextData *cluster = glyphs->text_cluster->internal;
+                    int k;
+
+                    for (k = 0; cluster && k < cluster->num_ops; k++) {
+                        const TTF_CopyOperation *cluster_op;
+
+                        if (cluster->ops[k].cmd != TTF_DRAW_COMMAND_COPY)
+                            continue;
+                        cluster_op = &cluster->ops[k].copy;
+                        draw_shaped_glyph(glyphs,
+                                          cluster_op->glyph_font
+                                              ? cluster_op->glyph_font : font,
+                                          cluster_op->glyph_index,
+                                          &cluster_op->src,
+                                          cluster_x + (float)cluster_op->dst.x,
+                                          y + (float)cluster_op->dst.y, color,
+                                          bold);
+                    }
                 }
             }
-        }
 
-        i = next - 1;
+            previous_offset = op->text_offset;
+            i = next - 1;
+        }
     }
     return true;
 }
