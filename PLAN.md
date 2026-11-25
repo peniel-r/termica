@@ -125,7 +125,7 @@ codebase that can grow.
 | 3.5 | **Crash diagnostics** (done) | A log file in `%LOCALAPPDATA%\termica\logs`, a minidump on unhandled exceptions, and a `--version` output to paste into bug reports. |
 | 3.6 | **User docs** (done) | A configuration reference generated from the settings tables, a key binding reference, troubleshooting, and issue templates. |
 | 3.7 | **Images** (blocked on transport) | Kitty graphics parsing, storage, layers, clipping and animations work through libghostty-vt and are covered by `--selftest`. Windows ConPTY consumes APC sequences, so no program can deliver an image through the pty yet; the item stays blocked until the transport forwards APC. Sixel is documented as unsupported because the library does not parse it. |
-| 3.8 | **Ligatures** (done) | Adjacent printable-ASCII cells with the same style and colour are shaped as one run with SDL_ttf's HarfBuzz support, so `->`, `=>`, `!=` and three-cell sequences use the font's ligature glyphs. Glyphs snap to their cells without drift; the cursor, wide characters, fallback faces and combining clusters keep the per-cell path. Covered by `--selftest` on a software renderer. |
+| 3.8 | **Ligatures** (done) | Adjacent printable-ASCII cells with the same style and colour are shaped as one run with SDL_ttf's HarfBuzz support, so `->`, `=>`, `!=` and three-cell sequences use the font's ligature glyphs. Glyphs snap to their cells without drift; the cursor, wide characters, fallback faces and combining clusters keep the per-cell path. `[font] ligatures = false` restores per-cell drawing. Covered by `--selftest` on a software renderer. |
 
 ### Exit criteria
 

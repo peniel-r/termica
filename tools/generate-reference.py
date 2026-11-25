@@ -75,6 +75,7 @@ def settings_reference(settings, header):
         'font.face': ('font', 'Empty uses the built-in font; otherwise an installed family or font file.'),
         'font.path': ('font', 'Legacy alias for `face`.'),
         'font.size': ('point_size', 'Number, greater than 0 and at most 200 points.'),
+        'font.ligatures': ('ligatures', "Boolean; shape adjacent ASCII cells so the font's programming ligatures render."),
         'font.fallback': (None, 'Array of up to SETTINGS_MAX_FALLBACKS nonempty font families or paths; then OS and Symbols Nerd Font fallback.'),
         'window.opacity': ('panel_opacity', 'Number from 0 to 1.'),
         'window.backdrop': ('backdrop', '`panel`, `mica`, `mica_alt` (also `mica-alt`), or `acrylic`.'),

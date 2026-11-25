@@ -236,8 +236,9 @@ retained across terminal mutations.
 6. Glyphs share bounded texture atlas pages, with separate style and colour
    entries and whole-page eviction. Oversized glyphs use a temporary texture.
    Adjacent printable-ASCII cells with the same style and colour are shaped
-   as one HarfBuzz run, so ligatures stay whole; every glyph is still drawn
-   at its own cell's x, so the grid never drifts.
+   as one HarfBuzz run when `[font] ligatures` is enabled (the default), so
+   ligatures stay whole; every glyph is still drawn at its own cell's x, so
+   the grid never drifts.
 7. Decorations: the five underline kinds, strikethrough, overline.
 8. Cursor (block, hollow, bar or underline, with a blink phase) and the IME
    preedit.
@@ -703,10 +704,11 @@ otherwise.
   positioned from its own bearing, so the grid never accumulates font-advance
   drift; a multi-cell cluster is re-shaped on its own and drawn at the first
   cell. Shaped glyph indices use a separate face/index cache and the same
-  bounded atlas as ordinary glyphs. Cursors, wide cells, fallback faces,
-  combining clusters and control characters keep the per-cell path. If
-  shaping cannot be initialised, the terminal silently falls back to
-  per-cell drawing.
+  bounded atlas as ordinary glyphs. `[font] ligatures = false` turns run
+  shaping off and forces the per-cell path; a live change invalidates the row
+  cache. Cursors, wide cells, fallback faces, combining clusters and control
+  characters keep the per-cell path. If shaping cannot be initialised, the
+  terminal silently falls back to per-cell drawing.
 - **Consequences:** Fonts with programming ligatures render them without
   changing cell geometry, selection or cursor behaviour. Colour changes,
   cursors and fallback cells split a run, so a ligature can disappear when

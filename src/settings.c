@@ -49,6 +49,7 @@ void settings_default(Settings *settings)
 {
     memset(settings, 0, sizeof *settings);
     settings->point_size = 11.0f;
+    settings->ligatures = true;
     settings->panel_opacity = 1.0f;
     settings->backdrop = 1;             /* WINDOW_BACKDROP_MICA        */
     settings->decoration = SETTINGS_DECORATION_NATIVE;
@@ -136,6 +137,9 @@ static bool apply_font(Settings *settings, toml_datum_t table)
                 settings->point_size = (float)number;
                 changed = true;
             }
+        } else if (key_is(key, "ligatures") && value.type == TOML_BOOLEAN) {
+            settings->ligatures = value.u.boolean;
+            changed = true;
         } else if (key_is(key, "fallback") && value.type == TOML_ARRAY) {
             char parsed[SETTINGS_MAX_FALLBACKS][256];
             int count = value.u.arr.size;
@@ -592,7 +596,7 @@ bool settings_parse_toml(Settings *settings, const char *text, size_t length)
  * overlay parser. Unknown keys are intentionally ignored for compatibility. */
 static bool settings_known_key(const char *table, const char *key)
 {
-    static const char *const font[] = { "face", "path", "size", "fallback" };
+    static const char *const font[] = { "face", "path", "size", "ligatures", "fallback" };
     static const char *const window[] = { "opacity", "backdrop", "decoration", "title_bar" };
     static const char *const terminal[] = { "copy_on_select", "shell", "osc52", "notifications", "bell", "command", "cwd", "env", "scrollback_lines" };
     static const char *const colors[] = { "scheme", "palette", "foreground", "background", "cursor", "selection_foreground", "selection_fg", "selection_background", "selection_bg" };
@@ -682,6 +686,8 @@ static unsigned settings_diff(const Settings *old, const Settings *next)
     else for (i = 0; i < old->font_fallback_count; i++)
         if (strcmp(old->font_fallback[i], next->font_fallback[i]))
             diff |= SETTINGS_DIFF_FONT;
+    if (old->ligatures != next->ligatures)
+        diff |= SETTINGS_DIFF_LIGATURES;
     if (memcmp(&old->colors, &next->colors, sizeof old->colors))
         diff |= SETTINGS_DIFF_COLORS;
     if (memcmp(&old->keys, &next->keys, sizeof old->keys))
@@ -884,8 +890,9 @@ void settings_format(const Settings *settings, char *out, size_t capacity)
              "\n"
              "[font]\n"
              "face = \"%s\"\n"
-             "size = %s\n",
-             font, size);
+             "size = %s\n"
+             "ligatures = %s\n",
+             font, size, settings->ligatures ? "true" : "false");
     used = strlen(out);
 
     if (settings->font_fallback_count > 0) {

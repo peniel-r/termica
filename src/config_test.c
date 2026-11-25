@@ -17,6 +17,7 @@ static void config_check(bool condition, const char *description, int *failures)
 int config_test(void)
 {
     Settings settings;
+    Settings ligatures;
     Statusbar statusbar;
     unsigned diff;
     bool changed;
@@ -27,8 +28,20 @@ int config_test(void)
     settings_default(&settings);
     config_check(settings.osc52 == SETTINGS_OSC52_DENY &&
                  settings.notifications == SETTINGS_OSC52_DENY &&
-                 settings.scrollback_lines == SETTINGS_SCROLLBACK_DEFAULT,
-                 "secure policies and scrollback default", &failures);
+                 settings.scrollback_lines == SETTINGS_SCROLLBACK_DEFAULT &&
+                 settings.ligatures,
+                 "secure policies, ligatures and scrollback default", &failures);
+    settings_default(&ligatures);
+    text = "[font]\nligatures = false\n";
+    config_check(settings_reload_text(&ligatures, text, strlen(text), &diff,
+                                      error, sizeof error) &&
+                 diff == SETTINGS_DIFF_LIGATURES && !ligatures.ligatures,
+                 "font ligatures can be disabled", &failures);
+    text = "[font]\nligatures = \"yes\"\n";
+    config_check(!settings_reload_text(&ligatures, text, strlen(text), &diff,
+                                       error, sizeof error) &&
+                 !ligatures.ligatures,
+                 "ligatures require a boolean", &failures);
     text = "[font]\nsize = 15\n[colors]\nscheme = \"light\"\n"
            "[terminal]\nscrollback_lines = 42\n";
     config_check(settings_reload_text(&settings, text, strlen(text), &diff,
@@ -68,6 +81,10 @@ int config_test(void)
     settings_format(&settings, out, sizeof out);
     config_check(strstr(out, "scrollback_lines = 1000000") != NULL,
                  "scrollback formats", &failures);
+    settings.ligatures = false;
+    settings_format(&settings, out, sizeof out);
+    config_check(strstr(out, "ligatures = false") != NULL,
+                 "disabled ligatures format", &failures);
 
     statusbar_default(&statusbar);
     text = "[font]\nsize = 16\n[directory]\ntruncation_length = 2\n";

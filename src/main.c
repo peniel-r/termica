@@ -477,6 +477,12 @@ static void reload_files(App *app, unsigned changes, const char *font_override,
                     reload_bar_font = true;
                     refit = true;
                 }
+                if (diff & SETTINGS_DIFF_LIGATURES) {
+                    /* Runs are built while rows are painted, so the next
+                     * full repaint picks the new setting up. */
+                    render_invalidate(app);
+                    app->needs_redraw = true;
+                }
                 if (diff & SETTINGS_DIFF_COLORS) {
                     for (i = 0; i < app->session_count; i++)
                         term_set_colors(&app->sessions[i]->term, &next.colors);

@@ -35,7 +35,8 @@ enum {
     SETTINGS_DIFF_COLORS   = 1u << 1,
     SETTINGS_DIFF_KEYS     = 1u << 2,
     SETTINGS_DIFF_WINDOW   = 1u << 3,
-    SETTINGS_DIFF_TERMINAL = 1u << 4
+    SETTINGS_DIFF_TERMINAL = 1u << 4,
+    SETTINGS_DIFF_LIGATURES = 1u << 5
 };
 
 typedef struct SettingsEnv {
@@ -81,6 +82,7 @@ typedef enum {
 typedef struct Settings {
     char font[512];        /* empty = the built-in Maple Mono NF     */
     float point_size;      /* default 11                             */
+    bool ligatures;        /* default true                           */
     char font_fallback[SETTINGS_MAX_FALLBACKS][256];
     int  font_fallback_count;
     float panel_opacity;   /* default 1.0, 0..1                      */

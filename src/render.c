@@ -552,7 +552,8 @@ static void paint_row(FrameContext *frame, Session *session, int row_position,
             bool can_hold;
 
             resolve_cell_style(frame, &cell, &style);
-            can_hold = run_can_hold(&app->glyphs, &cell, &style);
+            can_hold = app->settings.ligatures &&
+                       run_can_hold(&app->glyphs, &cell, &style);
             if (run_active &&
                 (run.length >= TEXT_RUN_BYTES || !can_hold ||
                  !run_matches(&run, &cell, &style))) {
