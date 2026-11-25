@@ -420,6 +420,94 @@ bool desktop_signal_progress(void *native_hwnd, int state, int progress)
     CoUninitialize();
     return SUCCEEDED(hr);
 }
+#elif defined(__linux__) || defined(__APPLE__)
+#ifdef __linux__
+#include <gio/gio.h>
+#else
+/* Implemented in the Cocoa bridge, called only on the UI thread. */
+bool desktop_signal_macos_notify(const char *title, const char *body);
+bool desktop_signal_macos_progress(int state, int progress);
+#endif
+
+/* Match the Windows UTF-8/control policy without interpreting markup or
+ * truncating at an embedded NUL. The caller owns the returned buffer. */
+static char *notification_text(const char *text, size_t length)
+{
+    size_t ignored, at, used = 0;
+    char *result;
+    if ((!text && length) || length > (SIZE_MAX - 1) / 3 ||
+        !xml_text(text, length, NULL, &ignored)) return NULL;
+    result = (char *)malloc(length * 3 + 1);
+    if (!result) return NULL;
+    for (at = 0; at < length; ++at) {
+        unsigned char c = (unsigned char)text[at];
+        if ((c < 0x20 && c != 9 && c != 10 && c != 13) ||
+            (c == 0xef && length - at >= 3 &&
+             (unsigned char)text[at + 1] == 0xbf &&
+             ((unsigned char)text[at + 2] == 0xbe ||
+              (unsigned char)text[at + 2] == 0xbf))) {
+            memcpy(result + used, "\xef\xbf\xbd", 3);
+            used += 3;
+            if (c == 0xef) at += 2;
+        } else {
+            result[used++] = text[at];
+        }
+    }
+    result[used] = '\0';
+    return result;
+}
+
+bool desktop_signal_init(void) { return true; }
+
+bool desktop_signal_notify(bool allowed, const char *title, size_t title_length,
+                           const char *body, size_t body_length)
+{
+    char *safe_title, *safe_body;
+    bool ok = false;
+    if (!allowed || (!title && title_length) || (!body && body_length)) return false;
+    if (!title_length) { title = "termica"; title_length = sizeof("termica") - 1; }
+    safe_title = notification_text(title, title_length);
+    safe_body = notification_text(body, body_length);
+    if (!safe_title || !safe_body) goto done;
+#ifdef __linux__
+    {
+        GDBusConnection *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
+        GVariant *reply;
+        char *escaped;
+        if (!bus) goto done;
+        /* Freedesktop notification bodies may contain markup; terminal text
+         * is plain text, never an instruction to the notification daemon. */
+        escaped = g_markup_escape_text(safe_body, -1);
+        reply = g_dbus_connection_call_sync(bus, "org.freedesktop.Notifications",
+            "/org/freedesktop/Notifications", "org.freedesktop.Notifications",
+            "Notify", g_variant_new("(susss@as@a{sv}i)", "termica", 0u,
+                "", safe_title, escaped, g_variant_new_strv(NULL, 0),
+                g_variant_new_array(G_VARIANT_TYPE("{sv}"), NULL, 0), -1),
+            G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, 750, NULL, NULL);
+        if (reply) { g_variant_unref(reply); ok = true; }
+        g_free(escaped);
+        g_object_unref(bus);
+    }
+#else
+    ok = desktop_signal_macos_notify(safe_title, safe_body);
+#endif
+done:
+    free(safe_title);
+    free(safe_body);
+    return ok;
+}
+
+bool desktop_signal_progress(void *native_hwnd, int state, int progress)
+{
+    (void)native_hwnd;
+    if (state < 0 || state > 4 || progress < -1 || progress > 100) return false;
+#ifdef __APPLE__
+    return desktop_signal_macos_progress(state, progress);
+#else
+    /* No standard freedesktop taskbar progress protocol exists. */
+    return false;
+#endif
+}
 #else
 bool desktop_signal_init(void) { return false; }
 bool desktop_signal_notify(bool allowed, const char *title, size_t title_length,

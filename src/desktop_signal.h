@@ -1,6 +1,6 @@
-/* Windows notifications and taskbar progress. All platform calls belong on
- * the UI thread, never inside a libghostty callback. No COM objects or input
- * buffers are retained between calls. */
+/* Desktop notifications and taskbar/Dock progress. All platform calls belong
+ * on the UI thread, never inside a libghostty callback. Input buffers are not
+ * retained between calls. */
 #ifndef TERMICA_DESKTOP_SIGNAL_H
 #define TERMICA_DESKTOP_SIGNAL_H
 
@@ -29,25 +29,29 @@ bool desktop_signal_notification_xml(const char *title, size_t title_length,
                                      const char *body, size_t body_length,
                                      char **xml, size_t *xml_length);
 
-/* Call once on the UI thread before creating any windows. Sets the process
- * AppUserModelID without creating files. Return false on failure; callers may
- * still use taskbar progress. No matching shutdown is needed. */
+/* Call once on the UI thread before creating any windows. On Windows this
+ * sets the process AppUserModelID without creating files. No matching shutdown
+ * is needed. */
 bool desktop_signal_init(void);
 
 /* The caller implements ask/allow/deny and must pass true only after approval.
- * An approved request creates or validates the per-user Start-menu shortcut
- * required for unpackaged Windows toast notifications; denied requests do not
- * touch it. Returns false if denied, invalid, unsupported, or a Windows API
- * fails. True means Show succeeded, not that the OS chose to display the toast
- * (Windows notification settings / focus assist may suppress it). Input is
- * borrowed. */
+ * Windows creates or validates the per-user Start-menu shortcut needed for
+ * unpackaged toasts only after approval. Linux uses the freedesktop session
+ * notification service; macOS submits to the native notification center.
+ * Returns false if denied, invalid, unsupported or the platform API fails.
+ * On Windows and Linux true means the platform accepted the request. On macOS
+ * it means the authorization request was queued; permission can be denied
+ * asynchronously. No platform guarantees display. Input is borrowed. macOS
+ * notification availability depends on application identity and settings. */
 bool desktop_signal_notify(bool allowed, const char *title, size_t title_length,
                            const char *body, size_t body_length);
 
-/* native_hwnd is the SDL window's SDL_PROP_WINDOW_WIN32_HWND_POINTER. Values
- * are GhosttyTerminalProgressReport.state and .progress. For -1, the current
- * taskbar percentage is left unchanged. Returns false on invalid arguments or
- * a Windows API failure. No policy is applied to taskbar progress. */
+/* On Windows native_hwnd is SDL_PROP_WINDOW_WIN32_HWND_POINTER; on other
+ * platforms it is ignored. Values are GhosttyTerminalProgressReport.state and
+ * .progress. For -1, the current percentage is left unchanged. Returns false
+ * on invalid arguments, an unsupported platform, or a platform API failure.
+ * macOS draws an app-wide Dock tile; Linux has no standard taskbar protocol.
+ * No policy is applied to taskbar progress. */
 bool desktop_signal_progress(void *native_hwnd, int state, int progress);
 
 /* Called by --selftest; prints checks and returns the number of failures. */

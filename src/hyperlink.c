@@ -10,6 +10,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shellapi.h>
+#else
+#include <SDL3/SDL.h>
 #endif
 
 typedef struct LinkPosition {
@@ -158,7 +160,9 @@ bool hyperlink_open(const char *uri)
                                      SW_SHOWNORMAL) > 32;
     }
 #else
-    return false;
+    /* SDL uses the desktop portal or an argv-based xdg-open on Unix and
+     * NSWorkspace on macOS; the URI is never interpolated into a shell. */
+    return SDL_OpenURL(uri);
 #endif
 }
 

@@ -1,5 +1,8 @@
 /* Directory monitoring and targeted TOML edits. UI ownership stays on the
- * main thread: the overlapped directory request is only harvested by take(). */
+ * main thread: filesystem events are only harvested by take(). */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
 #include "config_watch.h"
 #include "settings.h"
 #include "tomlc17.h"
@@ -112,6 +115,222 @@ void config_watch_stop(ConfigWatch *watch)
     }
     CloseHandle(watch->event);
     CloseHandle(watch->directory);
+    free(watch);
+}
+#elif defined(__linux__)
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/inotify.h>
+#include <unistd.h>
+
+struct ConfigWatch {
+    int fd;
+    int directory;
+    char path[512];
+};
+
+static bool watch_arm(ConfigWatch *watch)
+{
+    watch->directory = inotify_add_watch(watch->fd, watch->path,
+        IN_MODIFY | IN_CLOSE_WRITE | IN_ATTRIB | IN_CREATE | IN_DELETE |
+        IN_MOVED_FROM | IN_MOVED_TO | IN_DELETE_SELF | IN_MOVE_SELF);
+    return watch->directory >= 0;
+}
+
+ConfigWatch *config_watch_start(void)
+{
+    ConfigWatch *watch = (ConfigWatch *)calloc(1, sizeof *watch);
+    char *slash;
+    int flags;
+    if (!watch) return NULL;
+    if (!settings_path(watch->path, sizeof watch->path)) { free(watch); return NULL; }
+    config_create_directory(watch->path);
+    slash = strrchr(watch->path, '/');
+    if (!slash) { free(watch); return NULL; }
+    *slash = '\0';
+    watch->fd = inotify_init();
+    if (watch->fd < 0) { free(watch); return NULL; }
+    flags = fcntl(watch->fd, F_GETFL);
+    if (flags < 0 || fcntl(watch->fd, F_SETFL, flags | O_NONBLOCK) < 0 ||
+        fcntl(watch->fd, F_SETFD, FD_CLOEXEC) < 0) {
+        close(watch->fd); free(watch); return NULL;
+    }
+    watch->directory = -1;
+    (void)watch_arm(watch); /* Retry when a missing directory appears. */
+    return watch;
+}
+
+unsigned config_watch_take(ConfigWatch *watch)
+{
+    union { struct inotify_event align; char bytes[16384]; } buffer;
+    unsigned flags = 0;
+    int reads;
+    if (!watch) return 0;
+    if (watch->directory < 0 && watch_arm(watch))
+        flags |= CONFIG_WATCH_SETTINGS | CONFIG_WATCH_STATUSBAR;
+    /* A busy directory must not monopolize the UI thread. */
+    for (reads = 0; reads < 4; ++reads) {
+        ssize_t size = read(watch->fd, buffer.bytes, sizeof buffer.bytes);
+        size_t at = 0;
+        if (size < 0) {
+            if (errno == EINTR) continue;
+            if (errno != EAGAIN && errno != EWOULDBLOCK)
+                flags |= CONFIG_WATCH_SETTINGS | CONFIG_WATCH_STATUSBAR;
+            break;
+        }
+        if (!size) break;
+        while (at + sizeof(struct inotify_event) <= (size_t)size) {
+            const struct inotify_event *event =
+                (const struct inotify_event *)(buffer.bytes + at);
+            size_t record = sizeof *event + event->len;
+            if (record > (size_t)size - at) {
+                flags |= CONFIG_WATCH_SETTINGS | CONFIG_WATCH_STATUSBAR;
+                break;
+            }
+            if (event->mask & IN_Q_OVERFLOW)
+                flags |= CONFIG_WATCH_SETTINGS | CONFIG_WATCH_STATUSBAR;
+            if (event->wd == watch->directory) {
+                if (event->mask & (IN_IGNORED | IN_DELETE_SELF | IN_MOVE_SELF)) {
+                    if (!(event->mask & IN_IGNORED))
+                        (void)inotify_rm_watch(watch->fd, watch->directory);
+                    watch->directory = -1;
+                    flags |= CONFIG_WATCH_SETTINGS | CONFIG_WATCH_STATUSBAR;
+                } else if (event->len && memchr(event->name, '\0', event->len)) {
+                    if (strcmp(event->name, "termica.toml") == 0)
+                        flags |= CONFIG_WATCH_SETTINGS;
+                    else if (strcmp(event->name, "statusbar.toml") == 0)
+                        flags |= CONFIG_WATCH_STATUSBAR;
+                }
+            }
+            at += record;
+        }
+    }
+    return flags;
+}
+
+void config_watch_stop(ConfigWatch *watch)
+{
+    if (!watch) return;
+    close(watch->fd);
+    free(watch);
+}
+#elif defined(__APPLE__)
+#include <fcntl.h>
+#include <stdint.h>
+#include <time.h>
+#include <sys/event.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+struct ConfigWatch {
+    int queue;
+    int directory;
+    int files[2];
+    char path[512];
+};
+
+static int watch_open(ConfigWatch *watch, const char *path)
+{
+    struct kevent change;
+    int fd = open(path, O_EVTONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    EV_SET(&change, (uintptr_t)fd, EVFILT_VNODE, EV_ADD | EV_CLEAR,
+           NOTE_WRITE | NOTE_EXTEND | NOTE_ATTRIB | NOTE_DELETE | NOTE_RENAME |
+           NOTE_REVOKE, 0, NULL);
+    if (kevent(watch->queue, &change, 1, NULL, 0, NULL) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static void watch_files(ConfigWatch *watch)
+{
+    static const char *names[] = { "termica.toml", "statusbar.toml" };
+    char path[sizeof watch->path + 16];
+    int i;
+    for (i = 0; i < 2; ++i) {
+        if (watch->files[i] >= 0) close(watch->files[i]);
+        snprintf(path, sizeof path, "%s/%s", watch->path, names[i]);
+        watch->files[i] = watch_open(watch, path);
+    }
+}
+
+ConfigWatch *config_watch_start(void)
+{
+    ConfigWatch *watch = (ConfigWatch *)calloc(1, sizeof *watch);
+    char *slash;
+    if (!watch) return NULL;
+    if (!settings_path(watch->path, sizeof watch->path)) { free(watch); return NULL; }
+    config_create_directory(watch->path);
+    slash = strrchr(watch->path, '/');
+    if (!slash) { free(watch); return NULL; }
+    *slash = '\0';
+    watch->queue = kqueue();
+    if (watch->queue < 0) { free(watch); return NULL; }
+    if (fcntl(watch->queue, F_SETFD, FD_CLOEXEC) < 0) {
+        close(watch->queue); free(watch); return NULL;
+    }
+    watch->directory = -1;
+    watch->files[0] = watch->files[1] = -1;
+    watch->directory = watch_open(watch, watch->path);
+    if (watch->directory >= 0) watch_files(watch);
+    return watch;
+}
+
+unsigned config_watch_take(ConfigWatch *watch)
+{
+    struct kevent events[16];
+    struct timespec zero = {0, 0};
+    unsigned flags = 0;
+    int count, i;
+    bool refresh = false;
+    if (!watch) return 0;
+    if (watch->directory < 0) {
+        watch->directory = watch_open(watch, watch->path);
+        if (watch->directory >= 0) {
+            watch_files(watch);
+            flags |= CONFIG_WATCH_SETTINGS | CONFIG_WATCH_STATUSBAR;
+        }
+    }
+    count = kevent(watch->queue, NULL, 0, events, 16, &zero);
+    if (count < 0) return flags | CONFIG_WATCH_SETTINGS | CONFIG_WATCH_STATUSBAR;
+    for (i = 0; i < count; ++i) {
+        int fd = (int)events[i].ident;
+        if (fd == watch->directory) {
+            flags |= CONFIG_WATCH_SETTINGS | CONFIG_WATCH_STATUSBAR;
+            refresh = true;
+            if (events[i].fflags & (NOTE_DELETE | NOTE_RENAME | NOTE_REVOKE)) {
+                close(watch->directory);
+                watch->directory = -1;
+            }
+        } else if (fd == watch->files[0]) {
+            flags |= CONFIG_WATCH_SETTINGS;
+            if (events[i].fflags & (NOTE_DELETE | NOTE_RENAME | NOTE_REVOKE)) refresh = true;
+        } else if (fd == watch->files[1]) {
+            flags |= CONFIG_WATCH_STATUSBAR;
+            if (events[i].fflags & (NOTE_DELETE | NOTE_RENAME | NOTE_REVOKE)) refresh = true;
+        }
+    }
+    if (refresh) {
+        if (watch->directory >= 0) watch_files(watch);
+        else {
+            for (i = 0; i < 2; ++i) {
+                if (watch->files[i] >= 0) close(watch->files[i]);
+                watch->files[i] = -1;
+            }
+        }
+    }
+    return flags;
+}
+
+void config_watch_stop(ConfigWatch *watch)
+{
+    int i;
+    if (!watch) return;
+    for (i = 0; i < 2; ++i) if (watch->files[i] >= 0) close(watch->files[i]);
+    if (watch->directory >= 0) close(watch->directory);
+    close(watch->queue);
     free(watch);
 }
 #else
