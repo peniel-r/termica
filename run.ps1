@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Run termica.exe from PowerShell 7 / WezTerm.
+    Run termica on Windows or inside WSL.
 
 .DESCRIPTION
     Launches the program in the current terminal, so its stdout (renderer
@@ -14,6 +14,10 @@
     With -SelfTest the terminal half is checked without opening a window
     (this is the documented libghostty-vt flow, see README).
 
+    -Wsl launches a Linux build through WSLg. It defaults to
+    build/native/termica and uses the default WSL distribution. Build the
+    Linux binary first using the instructions in README.md.
+
 .PARAMETER Font
     Optional font file or installed family name. Overrides `[font] face`
     for this run.
@@ -22,27 +26,111 @@
     Optional point size. Overrides `[font] size` for this run.
 
 .PARAMETER Preset
-    Which build/ subdirectory to run from. Default llvm-mingw.
+    Which build/ subdirectory to run from. Defaults to llvm-mingw on Windows
+    and native with -Wsl.
 
 .PARAMETER SelfTest
     Run "termica --selftest" instead of the GUI.
+
+.PARAMETER Wsl
+    Run the Linux binary using WSL and WSLg instead of the Windows executable.
+
+.PARAMETER WslDistribution
+    Optional WSL distribution name. Defaults to the system's default distro.
+
+.PARAMETER WslBinary
+    Optional Linux path to a termica executable, for builds outside build/.
+    Cannot be combined with -Preset.
 
 .EXAMPLE
     pwsh -File ./run.ps1
     pwsh -File ./run.ps1 -Font C:\Windows\Fonts\consola.ttf -Size 18
     pwsh -File ./run.ps1 -SelfTest
+    pwsh -File ./run.ps1 -Wsl
+    pwsh -File ./run.ps1 -Wsl -WslDistribution Ubuntu -SelfTest
+    pwsh -File ./run.ps1 -Wsl -WslBinary /home/user/termica/build/native/termica
 #>
 [CmdletBinding()]
 param(
     [string] $Font,
     [string] $Size,
     [string] $Preset = 'llvm-mingw',
-    [switch] $SelfTest
+    [switch] $SelfTest,
+    [switch] $Wsl,
+    [string] $WslDistribution,
+    [string] $WslBinary
 )
 
 $ErrorActionPreference = 'Stop'
 $project = $PSScriptRoot
 Set-Location $project
+
+if (-not $Wsl -and ($PSBoundParameters.ContainsKey('WslDistribution') -or
+                    $PSBoundParameters.ContainsKey('WslBinary'))) {
+    throw '-WslDistribution and -WslBinary require -Wsl.'
+}
+
+if ($Wsl) {
+    if ($PSBoundParameters.ContainsKey('WslBinary') -and
+        $PSBoundParameters.ContainsKey('Preset')) {
+        throw '-WslBinary cannot be combined with -Preset.'
+    }
+    if ($PSBoundParameters.ContainsKey('WslDistribution') -and -not $WslDistribution) {
+        throw '-WslDistribution must not be empty.'
+    }
+    if ($PSBoundParameters.ContainsKey('WslBinary') -and -not $WslBinary) {
+        throw '-WslBinary must not be empty.'
+    }
+    $wslCommand = Get-Command wsl.exe -ErrorAction Stop
+    if (-not $WslBinary) {
+        if (-not $PSBoundParameters.ContainsKey('Preset')) { $Preset = 'native' }
+        $WslBinary = "./build/$Preset/termica"
+    }
+    $wslArgs = @('--cd', $project)
+    if ($WslDistribution) { $wslArgs += @('--distribution', $WslDistribution) }
+    $wslArgs += @('--exec', $WslBinary)
+    if ($SelfTest) {
+        $wslArgs += '--selftest'
+    } else {
+        if ($Font) { $wslArgs += $Font }
+        if ($Size) { $wslArgs += $Size }
+    }
+    # ProcessStartInfo uses an explicit Windows command line so PowerShell
+    # 5.1 preserves literal quotes as well as spaces in Linux arguments.
+    function ConvertTo-WindowsArgument([string] $argument) {
+        # wsl.exe recognizes switches only when they are not quoted.
+        if ($argument -and $argument -notmatch '[\s"]') {
+            return $argument
+        }
+        $result = [System.Text.StringBuilder]::new()
+        [void] $result.Append('"')
+        $slashes = 0
+        foreach ($character in $argument.ToCharArray()) {
+            if ($character -eq '\') {
+                $slashes++
+            } elseif ($character -eq '"') {
+                [void] $result.Append(('\' * (2 * $slashes + 1)))
+                [void] $result.Append('"')
+                $slashes = 0
+            } else {
+                [void] $result.Append(('\' * $slashes))
+                [void] $result.Append($character)
+                $slashes = 0
+            }
+        }
+        [void] $result.Append(('\' * (2 * $slashes)))
+        [void] $result.Append('"')
+        return $result.ToString()
+    }
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $wslCommand.Source
+    $startInfo.Arguments = (($wslArgs | ForEach-Object { ConvertTo-WindowsArgument $_ }) -join ' ')
+    $startInfo.UseShellExecute = $false
+    $startInfo.WorkingDirectory = $project
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    $process.WaitForExit()
+    exit $process.ExitCode
+}
 
 $exe = Join-Path $project "build\$Preset\termica.exe"
 if (-not (Test-Path $exe)) {

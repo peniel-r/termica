@@ -119,6 +119,19 @@ libpng and build the app bundle; notifications may require OS permission.
 An installed libghostty-vt can instead be selected with
 `-DCMAKE_PREFIX_PATH=/path/to/prefix`.
 
+From Windows PowerShell, launch a Linux build through WSLg with:
+
+```powershell
+pwsh -File ./run.ps1 -Wsl
+pwsh -File ./run.ps1 -Wsl -WslDistribution Ubuntu -SelfTest
+```
+
+Build `build/native/termica` in the selected WSL distribution first. The
+launcher uses the default distribution unless `-WslDistribution` is given.
+Use `-Preset` to select another `build/` subdirectory, or `-WslBinary` to
+run a Linux executable outside the checkout. `-Font` in WSL mode takes a
+Linux font path or installed family name.
+
 ### Command line
 
 ```text
@@ -129,7 +142,8 @@ termica.exe --selftest               # headless test suite; exit code = failures
 termica.exe --version                # build revision and loaded libghostty version
 ```
 
-`run.ps1` accepts `-Font`, `-Size`, `-Preset` and `-SelfTest`.
+`run.ps1` accepts `-Font`, `-Size`, `-Preset`, `-SelfTest`, `-Wsl`,
+`-WslDistribution` and `-WslBinary`.
 
 ## Key bindings
 
