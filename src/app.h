@@ -123,6 +123,7 @@ typedef struct App {
 
     bool             running;
     bool             needs_redraw;
+    bool             swallow_text;    /* key encoder already sent this key  */
     bool             cursor_lit;      /* blink phase                       */
     bool             cursor_blinks;   /* the terminal asked for a blink    */
     uint64_t         bell_flash_until_ms; /* visual bell end tick, or 0    */

@@ -406,7 +406,49 @@ static void test_key_encoding(void)
                                  sizeof buffer);
     check(byte_count == 0, "a plain letter produces no bytes");
 
+    /* Kitty keyboard mode makes the same plain letter an escape sequence.
+     * The input layer must therefore leave text keys to SDL_EVENT_TEXT_INPUT
+     * instead of sending both. */
+    term_write(&term, "\033[>1u", 5);
+    byte_count = term_encode_key(&term, GHOSTTY_KEY_ACTION_PRESS,
+                                 GHOSTTY_KEY_A, 0, 'a', buffer,
+                                 sizeof buffer);
+    check(byte_count == 5 && buffer[0] == 0x1b && buffer[1] == '[' &&
+          buffer[2] == '9' && buffer[3] == '7' && buffer[4] == 'u',
+          "kitty mode encodes a plain letter as CSI 97 u");
+
     term_free(&term);
+}
+
+/* SDL text input and the key encoder must never both send the same key. */
+static void test_key_text_policy(void)
+{
+    SDL_KeyboardEvent key = { 0 };
+
+    key.key = 'a';
+    check(input_key_is_text(&key), "a plain letter is text input");
+
+    key.mod = SDL_KMOD_SHIFT;
+    check(input_key_is_text(&key), "a shifted letter is text input");
+
+    key.mod = SDL_KMOD_CTRL;
+    check(!input_key_is_text(&key), "ctrl+letter is an escape sequence");
+
+    key.mod = SDL_KMOD_ALT;
+    check(!input_key_is_text(&key), "alt+letter is an escape sequence");
+
+    key.mod = SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_MODE;
+    check(input_key_is_text(&key), "AltGr-composed text stays text input");
+
+    key.mod = 0;
+    key.key = SDLK_ESCAPE;
+    check(!input_key_is_text(&key), "escape is an escape sequence");
+    key.key = SDLK_RETURN;
+    check(!input_key_is_text(&key), "enter is an escape sequence");
+    key.key = SDLK_TAB;
+    check(!input_key_is_text(&key), "tab is an escape sequence");
+    key.key = SDLK_UP;
+    check(!input_key_is_text(&key), "arrows are escape sequences");
 }
 
 /* Resizing the terminal changes the grid. */
@@ -2417,6 +2459,7 @@ int term_selftest(void)
     test_cursor_and_erase();
     test_wide_character();
     test_key_encoding();
+    test_key_text_policy();
     test_resize();
     test_title();
     test_scrollback();

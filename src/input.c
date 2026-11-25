@@ -217,9 +217,32 @@ TermClipboardResult input_handle_clipboard_write(void *userdata,
     return TERM_CLIPBOARD_ALLOWED;
 }
 
+/* A printable keycode, independent of modifiers. */
+static bool key_is_printable(SDL_Keycode key)
+{
+    return key != SDLK_UNKNOWN && !(key & SDLK_SCANCODE_MASK) &&
+           key >= 0x20 && key != 0x7F;
+}
+
+bool input_key_is_text(const SDL_KeyboardEvent *event)
+{
+    SDL_Keymod mods;
+
+    if (!event || !key_is_printable(event->key))
+        return false;
+    mods = event->mod;
+    /* AltGr and level-5 shift compose text even though they often carry
+     * Ctrl and Alt bits in SDL's modifier state. */
+    if ((mods & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_GUI)) &&
+        !(mods & (SDL_KMOD_MODE | SDL_KMOD_LEVEL5)))
+        return false;
+    return true;
+}
+
 /* Encode one key event and write it to the program. The bytes are exactly
- * what the terminal modes ask for; the program echoes them back. */
-static void write_key(App *app, const SDL_KeyboardEvent *event)
+ * what the terminal modes ask for; the program echoes them back. Returns
+ * the number of bytes written. */
+static size_t write_key(App *app, const SDL_KeyboardEvent *event)
 {
     Session *s = app_active_session(app);
     uint8_t encoded[64];
@@ -228,7 +251,7 @@ static void write_key(App *app, const SDL_KeyboardEvent *event)
     SDL_Keycode unshifted;
 
     if (!s || key == GHOSTTY_KEY_UNIDENTIFIED)
-        return;
+        return 0;
 
     /* The unshifted codepoint (layout dependent, e.g. 'a' for the A key)
      * is what makes Ctrl+letter encode as 0x01-0x1a. */
@@ -242,7 +265,7 @@ static void write_key(App *app, const SDL_KeyboardEvent *event)
                                  key, ghostty_modifiers_for(event->mod),
                                  (uint32_t)unshifted, encoded, sizeof encoded);
     if (byte_count == 0)
-        return;
+        return 0;
     session_jump_to_bottom(s);
     session_send(s, encoded, byte_count);
     /* Some shell integrations report B and D but omit C. Record the last
@@ -256,6 +279,7 @@ static void write_key(App *app, const SDL_KeyboardEvent *event)
         s->term.command_started_at = SDL_GetTicks();
         s->term.command_start_pending = true;
     }
+    return byte_count;
 }
 
 /* A focused find bar owns text and editing keys, but tab/window bindings
@@ -328,6 +352,7 @@ void input_handle_key_down(App *app, const SDL_KeyboardEvent *event)
     KeyAction action = keys_lookup(&app->settings.keys, event->scancode,
                                    event->mod);
 
+    app->swallow_text = false;
     if (!s)
         return;
     if (action == KEY_ACTION_SEARCH) {
@@ -445,7 +470,16 @@ void input_handle_key_down(App *app, const SDL_KeyboardEvent *event)
     default:
         break;
     }
-    write_key(app, event);
+    if (input_key_is_text(event)) {
+        /* SDL_EVENT_TEXT_INPUT carries the character. Sending it through the
+         * encoder as well is what duplicates every key in Kitty keyboard
+         * modes, where a plain letter encodes as CSI-u. */
+        app->swallow_text = false;
+    } else {
+        /* A shortcut or special key that also produced text (Alt+letter,
+         * keypad digits) must not deliver that text twice. */
+        app->swallow_text = write_key(app, event) > 0;
+    }
 }
 
 /* Layout text (letters, digits, punctuation, IME output). SDL delivers it
@@ -471,7 +505,13 @@ void input_handle_text_input(App *app, const SDL_TextInputEvent *event)
         if (search_insert(&s->search, text))
             search_navigate(&s->search, &s->term, 0);
         session_clear_composing(s);
+        app->swallow_text = false;
         app->needs_redraw = true;
+        return;
+    }
+    if (app->swallow_text) {
+        app->swallow_text = false;
+        session_clear_composing(s);
         return;
     }
     session_send_text(s, event->text);
@@ -488,6 +528,7 @@ void input_handle_text_editing(App *app, const SDL_TextEditingEvent *event)
 
     if (!s)
         return;
+    app->swallow_text = false;
     session_set_composing(s, event->text);
     app->needs_redraw = true;
 }
@@ -1026,6 +1067,7 @@ void input_handle_focus(App *app, bool gained)
     uint8_t encoded[32];
     size_t bytes;
 
+    app->swallow_text = false;
     if (!s || !term_focus_reporting(&s->term))
         return;
     bytes = term_encode_focus(&s->term, gained, encoded, sizeof encoded);

@@ -9,6 +9,11 @@
 void input_handle_key_down(App *app, const SDL_KeyboardEvent *event);
 void input_handle_text_input(App *app, const SDL_TextInputEvent *event);
 void input_handle_text_editing(App *app, const SDL_TextEditingEvent *event);
+
+/* True when SDL will deliver this key as text input rather than as an
+ * escape sequence. Ctrl, Alt and Super make a shortcut; AltGr/level 5
+ * compose text and are allowed. Exposed for the self test. */
+bool input_key_is_text(const SDL_KeyboardEvent *event);
 void input_handle_mouse_button(App *app, const SDL_MouseButtonEvent *event);
 void input_handle_mouse_motion(App *app, const SDL_MouseMotionEvent *event);
 void input_handle_mouse_wheel(App *app, const SDL_MouseWheelEvent *event);

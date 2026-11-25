@@ -192,10 +192,19 @@ flowchart TD
     bind -- no --> paste{"Ctrl+V or Ctrl+Shift+V?"}
     paste -- yes --> gp["ghostty_terminal_paste: bracketed, unsafe check"]
     gp -- unsafe --> ask["confirm dialog"]
-    paste -- no --> enc["ghostty key encoder, Alt passed through"]
+    paste -- no --> txt{"SDL text key?"}
+    txt -- yes --> ti["SDL text input -> pty"]
+    txt -- no --> enc["ghostty key encoder, Alt passed through"]
     enc --> bottom["jump viewport to bottom"] --> w["pty_write"]
+    ti --> w
     gp --> w
 ```
+
+Text keys bypass the encoder because SDL delivers their character separately as
+`SDL_EVENT_TEXT_INPUT`. Sending both is not merely redundant: in Kitty keyboard
+modes the encoder turns an ordinary letter into a CSI-u sequence, so the program
+would receive the character twice. Shortcut keys still use the encoder, and any
+text SDL produces for one of those is dropped.
 
 ### Pointer
 
