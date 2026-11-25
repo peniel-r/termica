@@ -77,7 +77,7 @@ It never reimplements an escape sequence.
 | `chrome.{h,c}` | Frame geometry, tab strip, search overlay and status bar | `app` |
 | `term.{h,c}` | Terminal state, encoders, selection and OSC callbacks | libghostty-vt |
 | `pty.{h,c}` | Pipes, `CreatePseudoConsole`, child process, job object, reader thread, ring buffer, resize, ordered close | Win32 only, **no SDL** |
-| `glyph.{h,c}` | Fonts, bounded glyph atlases, fallback and drawing | SDL3_ttf, `embed`, `font_lookup` |
+| `glyph.{h,c}` | Fonts, bounded glyph atlases, HarfBuzz-shaped runs, fallback and drawing | SDL3_ttf, `embed`, `font_lookup` |
 | `style.{h,c}` | Turns a cell style into colours and decorations | pure |
 | `geometry.{h,c}` | Squircle math shared by the panel and the window region | pure |
 | `panel.{h,c}` | Translucent panel fill and border, antialiased corner masks | SDL renderer |
@@ -235,6 +235,9 @@ retained across terminal mutations.
    direct rendering in the same order.
 6. Glyphs share bounded texture atlas pages, with separate style and colour
    entries and whole-page eviction. Oversized glyphs use a temporary texture.
+   Adjacent printable-ASCII cells with the same style and colour are shaped
+   as one HarfBuzz run, so ligatures stay whole; every glyph is still drawn
+   at its own cell's x, so the grid never drifts.
 7. Decorations: the five underline kinds, strikethrough, overline.
 8. Cursor (block, hollow, bar or underline, with a blink phase) and the IME
    preedit.
@@ -636,8 +639,9 @@ otherwise.
   renderer repaints damaged rows, then composites all layers over the fresh
   panel. Premultiplied alpha preserves translucent backgrounds and a direct
   drawing fallback is used if render targets or blending are unavailable.
-  Glyphs and text clusters share bounded atlas pages; eviction invalidates
-  entries through generation counters. Device reset discards both caches.
+  Glyphs, text clusters and shaped glyph indices share bounded atlas pages;
+  eviction invalidates entries through generation counters. Device reset
+  discards both caches.
 - **Consequences:** Chrome and overlays remain fresh without rerasterizing
   unchanged grid rows. Render-target memory scales with the viewport, and
   unsupported graphics backends still draw complete frames correctly.
@@ -684,3 +688,29 @@ otherwise.
   Image textures are an extra memory cost on top of terminal storage, and a
   program that scrolls through large screenshots pays texture uploads until
   the cache evicts them. Sixel users need another terminal.
+
+### ADR-021: Ligatures come from shaped ASCII runs, not per-cell glyphs
+
+- **Context:** Programming fonts draw `->`, `=>`, `===` and similar sequences
+  as one glyph spanning several cells. Per-cell drawing cannot see across
+  the cell boundary, so those glyphs never appear. SDL_ttf already shapes
+  text with HarfBuzz internally but does not expose the shaped glyphs; it
+  does expose text layout operations and `TTF_GetGlyphImageForIndex()`.
+- **Decision:** Group adjacent cells that are single printable-ASCII
+  characters with the same face, bold/italic state, foreground colour,
+  decorations and hyperlink state. Lay the group out as one `TTF_Text` with
+  no drawing engine, then read its copy operations. A one-cell cluster is
+  positioned from its own bearing, so the grid never accumulates font-advance
+  drift; a multi-cell cluster is re-shaped on its own and drawn at the first
+  cell. Shaped glyph indices use a separate face/index cache and the same
+  bounded atlas as ordinary glyphs. Cursors, wide cells, fallback faces,
+  combining clusters and control characters keep the per-cell path. If
+  shaping cannot be initialised, the terminal silently falls back to
+  per-cell drawing.
+- **Consequences:** Fonts with programming ligatures render them without
+  changing cell geometry, selection or cursor behaviour. Colour changes,
+  cursors and fallback cells split a run, so a ligature can disappear when
+  its cells are styled differently. Layout costs one shape per styled run in
+  a damaged row, and a few hundred bytes for the run buffer. The
+  implementation depends on SDL_ttf's public text-layout operation
+  structure, which is pinned with the dependency.

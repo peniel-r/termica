@@ -29,6 +29,33 @@ static SDL_Surface *draw_snapshot(Glyphs *glyphs, SDL_Surface *frame,
     return SDL_DuplicateSurface(frame);
 }
 
+static SDL_Surface *run_snapshot(Glyphs *glyphs, SDL_Surface *frame,
+                                 const char *text, size_t length,
+                                 bool bold, bool italic, SDL_Color color)
+{
+    clear_frame(glyphs->renderer);
+    if (!glyphs_draw_run(glyphs, text, length, 8.0f, 8.0f, bold, italic,
+                         color))
+        return NULL;
+    SDL_RenderPresent(glyphs->renderer);
+    return SDL_DuplicateSurface(frame);
+}
+
+static SDL_Surface *cells_snapshot(Glyphs *glyphs, SDL_Surface *frame,
+                                   const char *text, size_t length,
+                                   bool bold, bool italic, SDL_Color color)
+{
+    size_t i;
+
+    clear_frame(glyphs->renderer);
+    for (i = 0; i < length; i++)
+        glyphs_draw_text(glyphs, text + i, 1,
+                         8.0f + (float)i * (float)glyphs->cell_width, 8.0f,
+                         bold, italic, color);
+    SDL_RenderPresent(glyphs->renderer);
+    return SDL_DuplicateSurface(frame);
+}
+
 static bool same_pixels(const SDL_Surface *a, const SDL_Surface *b)
 {
     int y;
@@ -58,6 +85,31 @@ static bool has_ink(const SDL_Surface *surface)
         }
     }
     return false;
+}
+
+/* Count strongly different colour channels, ignoring the one-level
+ * antialiasing difference between two rasterisation paths. */
+static int strong_difference(const SDL_Surface *a, const SDL_Surface *b)
+{
+    int x, y, count = 0;
+
+    if (!a || !b || a->w != b->w || a->h != b->h)
+        return 0;
+    for (y = 0; y < a->h; y++) {
+        const Uint8 *arow = (const Uint8 *)a->pixels + (size_t)y * a->pitch;
+        const Uint8 *brow = (const Uint8 *)b->pixels + (size_t)y * b->pitch;
+        for (x = 0; x < a->w; x++) {
+            int k;
+            for (k = 0; k < 3; k++) {
+                int delta = (int)arow[x * 4 + k] - (int)brow[x * 4 + k];
+                if (delta < 0)
+                    delta = -delta;
+                if (delta > 16)
+                    count++;
+            }
+        }
+    }
+    return count;
 }
 
 static bool matches_reference(Glyphs *glyphs, SDL_Surface *frame, TTF_Font *font,
@@ -272,6 +324,75 @@ int glyph_atlas_selftest(void)
           "oversized glyph uses a temporary texture without disappearing");
     check(color_modulation(&glyphs, frame),
           "color glyphs ignore foreground tint but retain alpha blending");
+
+    /* Runs of plain ASCII must line up exactly with the per-cell path.
+     * Then a programming ligature has to change the glyphs, and a three-cell
+     * ligature has to fit in its three cells. */
+    {
+        SDL_Color white = {255, 255, 255, 255};
+        SDL_Surface *run = NULL, *cells = NULL, *again = NULL;
+
+        run = run_snapshot(&glyphs, frame, "ab", 2, false, false, white);
+        cells = cells_snapshot(&glyphs, frame, "ab", 2, false, false, white);
+        check(run && cells && same_pixels(run, cells),
+              "shaped runs keep per-cell positions when no ligature applies");
+        SDL_DestroySurface(run);
+        SDL_DestroySurface(cells);
+
+        if (glyphs.bold && glyphs.italic) {
+            run = run_snapshot(&glyphs, frame, "ab", 2, true, false, white);
+            cells = cells_snapshot(&glyphs, frame, "ab", 2, true, false,
+                                   white);
+            check(run && cells && same_pixels(run, cells),
+                  "bold shaped runs keep per-cell positions");
+            SDL_DestroySurface(run);
+            SDL_DestroySurface(cells);
+
+            run = run_snapshot(&glyphs, frame, "ab", 2, false, true, white);
+            cells = cells_snapshot(&glyphs, frame, "ab", 2, false, true,
+                                   white);
+            check(run && cells && same_pixels(run, cells),
+                  "italic shaped runs keep per-cell positions");
+            SDL_DestroySurface(run);
+            SDL_DestroySurface(cells);
+        }
+
+        run = run_snapshot(&glyphs, frame, "->", 2, false, false, white);
+        cells = cells_snapshot(&glyphs, frame, "->", 2, false, false, white);
+        check(run && cells && strong_difference(run, cells) > 100,
+              "a shaped run applies the font's -> ligature");
+        SDL_DestroySurface(run);
+        SDL_DestroySurface(cells);
+
+        run = run_snapshot(&glyphs, frame, "===", 3, false, false, white);
+        cells = cells_snapshot(&glyphs, frame, "===", 3, false, false, white);
+        check(run && cells && strong_difference(run, cells) > 100,
+              "a three-cell ligature is shaped as one run");
+        SDL_DestroySurface(run);
+        SDL_DestroySurface(cells);
+
+        run = run_snapshot(&glyphs, frame, "->", 2, true, false, white);
+        cells = cells_snapshot(&glyphs, frame, "->", 2, true, false, white);
+        check(run && cells && strong_difference(run, cells) > 100,
+              "a bold shaped run keeps its ligature");
+        SDL_DestroySurface(run);
+        SDL_DestroySurface(cells);
+
+        check(glyphs_can_join_run(&glyphs, "A", 1, false, false) &&
+              glyphs_can_join_run(&glyphs, " ", 1, false, false),
+              "plain ASCII cells can join a shaped run");
+        check(!glyphs_can_join_run(&glyphs, cluster, sizeof cluster - 1,
+                                   false, false),
+              "combining clusters stay on the per-cell path");
+
+        run = run_snapshot(&glyphs, frame, "->", 2, false, false, white);
+        glyphs_reset(&glyphs);
+        again = run_snapshot(&glyphs, frame, "->", 2, false, false, white);
+        check(run && again && same_pixels(run, again),
+              "device reset rerasterises ligature glyphs consistently");
+        SDL_DestroySurface(run);
+        SDL_DestroySurface(again);
+    }
 
 cleanup:
     SDL_DestroySurface(before);

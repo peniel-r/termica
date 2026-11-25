@@ -4,10 +4,13 @@
 
 #include "glyph.h"
 
+#include <SDL3_ttf/SDL_textengine.h>
+
 #include "embed.h"
 #include "font_lookup.h"
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -49,6 +52,36 @@ static TTF_Font *font_for_slot(const Glyphs *glyphs, int slot)
     case GLYPH_STYLE_BOLD_ITALIC: return glyphs->bold_italic;
     default:                      return glyphs->regular;
     }
+}
+
+/* SDL_ttf lays a text object out even without a drawing engine, which is
+ * exactly what shaping needs: the copy operations carry glyph indices and
+ * positions, and glyph.c draws them into its own atlas. */
+static void shaping_destroy(Glyphs *glyphs)
+{
+    if (glyphs->text_cluster)
+        TTF_DestroyText(glyphs->text_cluster);
+    if (glyphs->text_scratch)
+        TTF_DestroyText(glyphs->text_scratch);
+    glyphs->text_cluster = NULL;
+    glyphs->text_scratch = NULL;
+}
+
+/* Shaping is an enhancement, so a failure here only disables ligatures; the
+ * per-cell path keeps working. */
+static bool shaping_create(Glyphs *glyphs)
+{
+    if (!glyphs->regular)
+        return false;
+    glyphs->text_scratch = TTF_CreateText(NULL, glyphs->regular, "", 0);
+    glyphs->text_cluster = TTF_CreateText(NULL, glyphs->regular, "", 0);
+    if (!glyphs->text_scratch || !glyphs->text_cluster) {
+        shaping_destroy(glyphs);
+        return false;
+    }
+    TTF_SetTextDirection(glyphs->text_scratch, TTF_DIRECTION_LTR);
+    TTF_SetTextDirection(glyphs->text_cluster, TTF_DIRECTION_LTR);
+    return true;
 }
 
 /* A one-pixel extruded gutter preserves texture-edge sampling when scaled
@@ -480,7 +513,10 @@ bool glyphs_open_ex(Glyphs *glyphs, SDL_Renderer *renderer,
                                                     sizeof(GlyphExtraEntry));
     glyphs->clusters = (GlyphClusterEntry *)calloc(GLYPH_CLUSTER_BUCKETS,
                                                    sizeof(GlyphClusterEntry));
-    if (!glyphs->cache || !glyphs->extra_cache || !glyphs->clusters) {
+    glyphs->shaped_cache = (ShapedGlyphEntry *)calloc(GLYPH_SHAPED_BUCKETS,
+                                                      sizeof(ShapedGlyphEntry));
+    if (!glyphs->cache || !glyphs->extra_cache || !glyphs->clusters ||
+        !glyphs->shaped_cache) {
         glyphs_close(glyphs);
         return false;
     }
@@ -562,6 +598,7 @@ bool glyphs_open_ex(Glyphs *glyphs, SDL_Renderer *renderer,
     glyphs->cell_height = TTF_GetFontHeight(glyphs->regular);
     if (glyphs->cell_height <= 0)
         glyphs->cell_height = height > 0 ? height : 16;
+    (void)shaping_create(glyphs);
     return true;
 }
 
@@ -586,6 +623,7 @@ static void atlas_destroy(Glyphs *glyphs)
 
 void glyphs_reset(Glyphs *glyphs)
 {
+    shaping_destroy(glyphs);
     atlas_destroy(glyphs);
     if (glyphs->cache)
         memset(glyphs->cache, 0, (size_t)GLYPH_STYLE_COUNT *
@@ -596,16 +634,22 @@ void glyphs_reset(Glyphs *glyphs)
     if (glyphs->clusters)
         memset(glyphs->clusters, 0,
                GLYPH_CLUSTER_BUCKETS * sizeof *glyphs->clusters);
+    if (glyphs->shaped_cache)
+        memset(glyphs->shaped_cache, 0,
+               GLYPH_SHAPED_BUCKETS * sizeof *glyphs->shaped_cache);
+    (void)shaping_create(glyphs);
 }
 
 void glyphs_close(Glyphs *glyphs)
 {
     int i;
 
+    shaping_destroy(glyphs);
     atlas_destroy(glyphs);
     free(glyphs->cache);
     free(glyphs->extra_cache);
     free(glyphs->clusters);
+    free(glyphs->shaped_cache);
     for (i = 0; i < glyphs->user_fallback_count; i++) {
         if (glyphs->user_fallbacks[i])
             TTF_CloseFont(glyphs->user_fallbacks[i]);
@@ -717,4 +761,262 @@ void glyphs_draw_text(Glyphs *glyphs, const char *text, size_t length,
 {
     glyphs_draw_text_scaled(glyphs, text, length, x, y, bold, italic, color,
                             1.0f);
+}
+
+/* Runs are already positioned in glyph pixels, so they bypass the per-cell
+ * texture fit/centre rules. */
+static void draw_shaped_texture(Glyphs *glyphs, SDL_Texture *texture,
+                                const SDL_FRect *source, float x, float y,
+                                float width, float height, SDL_Color color,
+                                bool is_color)
+{
+    SDL_FRect destination;
+
+    destination.x = x;
+    destination.y = y;
+    destination.w = width;
+    destination.h = height;
+    if (is_color) {
+        SDL_SetTextureColorMod(texture, 255, 255, 255);
+        SDL_SetTextureAlphaMod(texture, color.a);
+    } else {
+        SDL_SetTextureColorMod(texture, color.r, color.g, color.b);
+        SDL_SetTextureAlphaMod(texture, color.a);
+    }
+    (void)SDL_RenderTexture(glyphs->renderer, texture, source, &destination);
+}
+
+/* Shaped runs produce glyph indices, not codepoints, so ligature and
+ * contextual-alternate glyphs get their own face/index cache. */
+static Glyph *shaped_lookup(Glyphs *glyphs, TTF_Font *font,
+                            uint32_t glyph_index)
+{
+    uint32_t hash, mask, probe;
+    ShapedGlyphEntry *entry;
+
+    if (!glyphs->shaped_cache || !font || glyph_index == 0)
+        return NULL;
+    hash = (glyph_index * 2654435761u) ^
+           (uint32_t)(((uintptr_t)font >> 4) & 0xFFFFFFFFu);
+    mask = GLYPH_SHAPED_BUCKETS - 1;
+    for (probe = 0; probe < GLYPH_SHAPED_BUCKETS; probe++) {
+        entry = &glyphs->shaped_cache[(hash + probe) & mask];
+        if (entry->font == font && entry->glyph_index == glyph_index)
+            return &entry->glyph;
+        if (!entry->font) {
+            memset(&entry->glyph, 0, sizeof entry->glyph);
+            entry->font = font;
+            entry->glyph_index = glyph_index;
+            return &entry->glyph;
+        }
+    }
+    entry = &glyphs->shaped_cache[hash & mask];
+    memset(entry, 0, sizeof *entry);
+    entry->font = font;
+    entry->glyph_index = glyph_index;
+    return &entry->glyph;
+}
+
+static void draw_shaped_glyph(Glyphs *glyphs, TTF_Font *font,
+                              uint32_t glyph_index,
+                              const SDL_Rect *source_rect, float x, float y,
+                              SDL_Color color, bool bold)
+{
+    Glyph *glyph;
+    GlyphAtlasPage *page;
+    TTF_ImageType type = TTF_IMAGE_INVALID;
+    SDL_Surface *surface;
+    SDL_Texture *texture;
+    SDL_FRect source;
+    bool is_color;
+    float width;
+    float height;
+
+    if (!source_rect || source_rect->w <= 0 || source_rect->h <= 0)
+        return;
+    glyph = shaped_lookup(glyphs, font, glyph_index);
+    if (!glyph)
+        return;
+    if (glyph->tried && glyph->page == 0)
+        return;
+    width = (float)source_rect->w;
+    height = (float)source_rect->h;
+
+    if (glyph->page) {
+        page = &glyphs->atlas[glyph->page - 1];
+        if (page->texture && page->generation == glyph->generation) {
+            source.x = glyph->source.x + (float)source_rect->x;
+            source.y = glyph->source.y + (float)source_rect->y;
+            source.w = width;
+            source.h = height;
+            page->last_used = ++glyphs->atlas_clock;
+            draw_shaped_texture(glyphs, page->texture, &source, x, y, width,
+                                height, color, glyph->is_color);
+            if (bold && !glyphs->bold && !glyph->is_color)
+                draw_shaped_texture(glyphs, page->texture, &source, x + 1.0f,
+                                    y, width, height, color, false);
+            return;
+        }
+    }
+
+    glyph->page = 0;
+    glyph->tried = false;
+    surface = TTF_GetGlyphImageForIndex(font, glyph_index, &type);
+    if (!surface) {
+        glyph->tried = true;
+        return;
+    }
+    is_color = type == TTF_IMAGE_COLOR;
+    glyph->is_color = is_color;
+    source.x = (float)source_rect->x;
+    source.y = (float)source_rect->y;
+    source.w = width;
+    source.h = height;
+
+    if (atlas_store(glyphs, surface, glyph)) {
+        SDL_DestroySurface(surface);
+        page = &glyphs->atlas[glyph->page - 1];
+        page->last_used = ++glyphs->atlas_clock;
+        source.x = glyph->source.x + (float)source_rect->x;
+        source.y = glyph->source.y + (float)source_rect->y;
+        draw_shaped_texture(glyphs, page->texture, &source, x, y, width,
+                            height, color, is_color);
+        if (bold && !glyphs->bold && !is_color)
+            draw_shaped_texture(glyphs, page->texture, &source, x + 1.0f, y,
+                                width, height, color, false);
+        return;
+    }
+
+    /* Oversized or atlas-hostile glyphs still draw, just without caching. */
+    texture = SDL_CreateTextureFromSurface(glyphs->renderer, surface);
+    if (texture) {
+        SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+        draw_shaped_texture(glyphs, texture, &source, x, y, width, height,
+                            color, is_color);
+        if (bold && !glyphs->bold && !is_color)
+            draw_shaped_texture(glyphs, texture, &source, x + 1.0f, y, width,
+                                height, color, false);
+        SDL_DestroyTexture(texture);
+    }
+    SDL_DestroySurface(surface);
+}
+
+bool glyphs_can_join_run(const Glyphs *glyphs, const char *text, size_t length,
+                         bool bold, bool italic)
+{
+    TTF_Font *font;
+    unsigned char codepoint;
+
+    if (!glyphs || !glyphs->text_scratch || !glyphs->text_cluster || !text ||
+        length != 1)
+        return false;
+    codepoint = (unsigned char)text[0];
+    /* Printable ASCII only. Control characters, wide characters, emoji and
+     * combining clusters keep the per-cell path and its fallback chain. */
+    if (codepoint < 0x20 || codepoint > 0x7E)
+        return false;
+    font = font_for_slot(glyphs, style_slot(glyphs, bold, italic));
+    return font && TTF_FontHasGlyph(font, (Uint32)codepoint);
+}
+
+bool glyphs_draw_run(Glyphs *glyphs, const char *text, size_t length,
+                     float x, float y, bool bold, bool italic,
+                     SDL_Color color)
+{
+    TTF_Font *font;
+    TTF_TextData *data;
+    int i;
+
+    if (!glyphs || !glyphs->text_scratch || !glyphs->text_cluster || !text ||
+        length == 0)
+        return false;
+    font = font_for_slot(glyphs, style_slot(glyphs, bold, italic));
+    if (!font)
+        return false;
+    if (!TTF_SetTextFont(glyphs->text_scratch, font) ||
+        !TTF_SetTextString(glyphs->text_scratch, text, length) ||
+        !TTF_UpdateText(glyphs->text_scratch))
+        return false;
+    data = glyphs->text_scratch->internal;
+    if (!data)
+        return false;
+
+    for (i = 0; i < data->num_ops; i++) {
+        const TTF_CopyOperation *op;
+        size_t offset, end;
+        int next, same;
+
+        if (data->ops[i].cmd != TTF_DRAW_COMMAND_COPY)
+            continue;
+        op = &data->ops[i].copy;
+        offset = (size_t)op->text_offset;
+        if (offset >= length)
+            continue;
+
+        /* A cluster runs until the next copy operation with a different
+         * source offset. Multiple glyphs can share one offset. */
+        next = i + 1;
+        same = 1;
+        while (next < data->num_ops) {
+            if (data->ops[next].cmd == TTF_DRAW_COMMAND_COPY &&
+                (size_t)data->ops[next].copy.text_offset != offset)
+                break;
+            if (data->ops[next].cmd == TTF_DRAW_COMMAND_COPY)
+                same++;
+            next++;
+        }
+        end = next < data->num_ops
+                  ? (size_t)data->ops[next].copy.text_offset : length;
+        if (end <= offset || end > length)
+            end = length;
+
+        if (end - offset == 1 && same == 1) {
+            TTF_Font *glyph_font = op->glyph_font ? op->glyph_font : font;
+            int minx, maxx, miny, maxy, advance;
+
+            /* One cell: place the glyph from its own bearing, not from the
+             * run's accumulated font advances, so cells never drift. */
+            if (TTF_GetGlyphMetrics(glyph_font,
+                    (Uint32)(unsigned char)text[offset], &minx, &maxx,
+                    &miny, &maxy, &advance)) {
+                draw_shaped_glyph(glyphs, glyph_font, op->glyph_index,
+                                  &op->src,
+                                  x + (float)offset * (float)glyphs->cell_width
+                                    + (float)minx,
+                                  y + (float)op->dst.y, color, bold);
+            }
+        } else {
+            /* A ligature or other multi-cell cluster: shape just this
+             * substring so its operations are relative to the cluster's
+             * own origin. */
+            float cluster_x = x + (float)offset * (float)glyphs->cell_width;
+
+            if (TTF_SetTextFont(glyphs->text_cluster, font) &&
+                TTF_SetTextString(glyphs->text_cluster, text + offset,
+                                  end - offset) &&
+                TTF_UpdateText(glyphs->text_cluster)) {
+                TTF_TextData *cluster = glyphs->text_cluster->internal;
+                int k;
+
+                for (k = 0; cluster && k < cluster->num_ops; k++) {
+                    const TTF_CopyOperation *cluster_op;
+
+                    if (cluster->ops[k].cmd != TTF_DRAW_COMMAND_COPY)
+                        continue;
+                    cluster_op = &cluster->ops[k].copy;
+                    draw_shaped_glyph(glyphs,
+                                      cluster_op->glyph_font ? cluster_op->glyph_font
+                                                             : font,
+                                      cluster_op->glyph_index,
+                                      &cluster_op->src,
+                                      cluster_x + (float)cluster_op->dst.x,
+                                      y + (float)cluster_op->dst.y, color,
+                                      bold);
+                }
+            }
+        }
+
+        i = next - 1;
+    }
+    return true;
 }

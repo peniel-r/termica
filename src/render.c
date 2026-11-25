@@ -214,33 +214,30 @@ static void draw_cell_background(const FrameContext *frame,
         chrome_fill_rect(app->renderer, x, y, width, height, style.background);
 }
 
-static void draw_cell_text(const FrameContext *frame, const CellPaint *cell)
+static void draw_cell_decorations(const FrameContext *frame,
+                                  const CellPaint *cell,
+                                  const CellStyle *style)
 {
     App *app = frame->app;
-    CellStyle style;
     float x = cell_x(app, cell->column);
     float y = cell_y(app, cell->row) - frame->row_offset;
     float width = (float)app->glyphs.cell_width * (cell->wide ? 2.0f : 1.0f);
     float height = (float)app->glyphs.cell_height;
 
-    resolve_cell_style(frame, cell, &style);
-
-    draw_cell_glyph(frame, cell, &style, false);
-
-    if (style.underline)
-        draw_underline(app, x, y + height - 2.0f, width, style.decoration,
-                       style.underline_style);
+    if (style->underline)
+        draw_underline(app, x, y + height - 2.0f, width, style->decoration,
+                       style->underline_style);
     else if (cell->hyperlink)
         chrome_fill_rect(app->renderer, x, y + height - 2.0f, width, 1.0f,
-                         style.foreground);
-    if (style.strikethrough)
+                         style->foreground);
+    if (style->strikethrough)
         chrome_fill_rect(app->renderer, x, y + height / 2.0f, width, 1.0f,
-                         style.decoration);
-    if (style.overline)
-        chrome_fill_rect(app->renderer, x, y, width, 1.0f, style.decoration);
+                         style->decoration);
+    if (style->overline)
+        chrome_fill_rect(app->renderer, x, y, width, 1.0f, style->decoration);
 
     if (cell->at_cursor)
-        draw_cell_cursor(frame, cell, &style);
+        draw_cell_cursor(frame, cell, style);
 }
 
 /* Where the IME should put its candidate window: the cell the terminal
@@ -415,6 +412,91 @@ typedef enum DrawPhase {
     DRAW_TEXT
 } DrawPhase;
 
+/* A run of adjacent cells shaped as one string, so ligatures survive cell
+ * boundaries. The cap keeps the buffer small; a longer row is split, which
+ * can only cut a ligature at the seam. */
+#define TEXT_RUN_BYTES 512
+
+typedef struct TextRun {
+    char      text[TEXT_RUN_BYTES];
+    int       length;
+    int       column;
+    CellStyle style;
+    bool      hyperlink;
+} TextRun;
+
+/* Only plain narrow ASCII leaves the per-cell path: fallbacks, wide cells,
+ * combining clusters and the cursor need their own drawing rules. */
+static bool run_can_hold(const Glyphs *glyphs, const CellPaint *cell,
+                         const CellStyle *style)
+{
+    return !cell->wide && !cell->at_cursor && !style->hidden &&
+           cell->text_length == 1 &&
+           glyphs_can_join_run(glyphs, (const char *)cell->text,
+                               cell->text_length, style->bold, style->italic);
+}
+
+/* A run's look has to stay identical, otherwise a ligature would be tinted
+ * or underlined as one cell. Background and selection stay per cell, so
+ * they do not split a run. */
+static bool run_matches(const TextRun *run, const CellPaint *cell,
+                        const CellStyle *style)
+{
+    return run->style.bold == style->bold &&
+           run->style.italic == style->italic &&
+           run->style.foreground.r == style->foreground.r &&
+           run->style.foreground.g == style->foreground.g &&
+           run->style.foreground.b == style->foreground.b &&
+           run->style.foreground.a == style->foreground.a &&
+           run->style.underline_style == style->underline_style &&
+           run->style.decoration.r == style->decoration.r &&
+           run->style.decoration.g == style->decoration.g &&
+           run->style.decoration.b == style->decoration.b &&
+           run->style.decoration.a == style->decoration.a &&
+           run->style.strikethrough == style->strikethrough &&
+           run->style.overline == style->overline &&
+           run->hyperlink == cell->hyperlink;
+}
+
+/* Draw the shaped text once, then the per-cell decorations that belong to
+ * it. If shaping fails, the same bytes fall back to one cell at a time. */
+static void run_flush(const FrameContext *frame, const TextRun *run,
+                      int row_position)
+{
+    App *app = frame->app;
+    float x = cell_x(app, run->column);
+    float y = cell_y(app, row_position) - frame->row_offset;
+    float width = (float)app->glyphs.cell_width;
+    float height = (float)app->glyphs.cell_height;
+    bool shaped;
+    int i;
+
+    shaped = glyphs_draw_run(&app->glyphs, run->text, (size_t)run->length, x,
+                             y, run->style.bold, run->style.italic,
+                             run->style.foreground);
+    for (i = 0; i < run->length; i++) {
+        float cell_x_pos = x + (float)i * (float)app->glyphs.cell_width;
+
+        if (!shaped)
+            glyphs_draw_text(&app->glyphs, &run->text[i], 1, cell_x_pos, y,
+                             run->style.bold, run->style.italic,
+                             run->style.foreground);
+        if (run->style.underline)
+            draw_underline(app, cell_x_pos, y + height - 2.0f, width,
+                           run->style.decoration,
+                           run->style.underline_style);
+        else if (run->hyperlink)
+            chrome_fill_rect(app->renderer, cell_x_pos, y + height - 2.0f,
+                             width, 1.0f, run->style.foreground);
+        if (run->style.strikethrough)
+            chrome_fill_rect(app->renderer, cell_x_pos, y + height / 2.0f,
+                             width, 1.0f, run->style.decoration);
+        if (run->style.overline)
+            chrome_fill_rect(app->renderer, cell_x_pos, y, width, 1.0f,
+                             run->style.decoration);
+    }
+}
+
 /* Paint one row with the same cell order as the direct renderer. */
 static void paint_row(FrameContext *frame, Session *session, int row_position,
                       int selection_start, int selection_end,
@@ -422,7 +504,12 @@ static void paint_row(FrameContext *frame, Session *session, int row_position,
                       uint64_t search_offset, DrawPhase phase)
 {
     Term *term = &session->term;
+    App *app = frame->app;
+    TextRun run;
+    bool run_active = false;
     int column = 0;
+
+    memset(&run, 0, sizeof run);
     while (ghostty_render_state_row_cells_next(term->cell_iterator)) {
         CellPaint cell;
         GhosttyCell raw_cell = 0;
@@ -458,12 +545,38 @@ static void paint_row(FrameContext *frame, Session *session, int row_position,
                 search_offset + (uint64_t)row_position, (unsigned)column);
         cell.hyperlink = frame->hovered_link &&
             hyperlink_contains(frame->hovered_link, column, row_position);
-        if (phase == DRAW_BACKGROUND)
+        if (phase == DRAW_BACKGROUND) {
             draw_cell_background(frame, &cell);
-        else
-            draw_cell_text(frame, &cell);
+        } else {
+            CellStyle style;
+            bool can_hold;
+
+            resolve_cell_style(frame, &cell, &style);
+            can_hold = run_can_hold(&app->glyphs, &cell, &style);
+            if (run_active &&
+                (run.length >= TEXT_RUN_BYTES || !can_hold ||
+                 !run_matches(&run, &cell, &style))) {
+                run_flush(frame, &run, row_position);
+                run_active = false;
+            }
+            if (can_hold) {
+                if (!run_active) {
+                    run.column = column;
+                    run.style = style;
+                    run.hyperlink = cell.hyperlink;
+                    run.length = 0;
+                    run_active = true;
+                }
+                run.text[run.length++] = (char)cell.text[0];
+            } else {
+                draw_cell_glyph(frame, &cell, &style, false);
+                draw_cell_decorations(frame, &cell, &style);
+            }
+        }
         column++;
     }
+    if (phase == DRAW_TEXT && run_active)
+        run_flush(frame, &run, row_position);
 }
 
 static SDL_Texture *cache_texture(App *app, const struct RenderCache *cache)

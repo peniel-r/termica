@@ -15,6 +15,10 @@
  * consolab.ttf, "... Nerd Font.ttf" -> "... Nerd Font Bold.ttf"); when
  * there is no bold face the glyph is simply drawn twice, one pixel apart.
  *
+ * Adjacent printable-ASCII cells with the same style are shaped as one run
+ * with SDL_ttf's HarfBuzz-backed text object, so programming ligatures like
+ * "->" stay whole. Everything else keeps the per-cell path.
+ *
  * Strict C99.
  */
 
@@ -75,6 +79,16 @@ typedef struct GlyphClusterEntry {
     Glyph glyph;
 } GlyphClusterEntry;
 
+/* Shaped runs end up with glyph indices, not codepoints, so ligature and
+ * contextual-alternate glyphs need their own cache keyed by face + index. */
+#define GLYPH_SHAPED_BUCKETS 2048
+
+typedef struct ShapedGlyphEntry {
+    TTF_Font *font;             /* NULL = empty bucket */
+    uint32_t  glyph_index;
+    Glyph     glyph;
+} ShapedGlyphEntry;
+
 typedef struct Glyphs {
     SDL_Renderer *renderer;
     TTF_Font *regular;
@@ -116,6 +130,13 @@ typedef struct Glyphs {
     uint64_t atlas_clock;
     GlyphClusterEntry *clusters;
 
+    /* SDL_ttf's HarfBuzz shaping, driven through text objects with no
+     * drawing engine: they only lay a run out so glyph.c can read its glyph
+     * indices and positions. NULL when shaping could not be initialised. */
+    TTF_Text *text_scratch;       /* the whole run */
+    TTF_Text *text_cluster;       /* one multi-cell cluster */
+    ShapedGlyphEntry *shaped_cache;
+
     /* One cell of the grid, from the font metrics. */
     int cell_width;
     int cell_height;
@@ -148,6 +169,19 @@ void glyphs_reset(Glyphs *glyphs);
 void glyphs_draw_text(Glyphs *glyphs, const char *text, size_t length,
                       float x, float y, bool bold, bool italic,
                       SDL_Color color);
+
+/* Can this one cell join a shaped run? Only a single printable ASCII
+ * character that the primary face carries qualifies: fallbacks, wide cells
+ * and grapheme clusters keep the per-cell path. */
+bool glyphs_can_join_run(const Glyphs *glyphs, const char *text, size_t length,
+                         bool bold, bool italic);
+
+/* Draw one shaped run of printable ASCII at (x, y). All cells share the same
+ * style and colour, so HarfBuzz can substitute ligature glyphs across them.
+ * False means the caller should draw the run one cell at a time. */
+bool glyphs_draw_run(Glyphs *glyphs, const char *text, size_t length,
+                     float x, float y, bool bold, bool italic,
+                     SDL_Color color);
 
 /* The same, with the glyph's ink scaled about its centre. A `scale` of 1
  * draws exactly like glyphs_draw_text; a larger value enlarges the glyph

@@ -32,7 +32,7 @@
 | Area | What works today |
 |---|---|
 | **Shell** | `pwsh` → `powershell` → `cmd` auto-detection, UTF-8 end to end, resize and per-tab process-tree cleanup; closing the last tab closes the window |
-| **Rendering** | 24-bit colour, bold, italic, dim, inverse, strikethrough and overline, five underline kinds (single, double, curly, dotted, dashed), all cursor styles plus blinking, wide characters |
+| **Rendering** | 24-bit colour, bold, italic, dim, inverse, strikethrough and overline, five underline kinds (single, double, curly, dotted, dashed), all cursor styles plus blinking, wide characters, and programming ligatures through HarfBuzz-shaped runs |
 | **Images** | Kitty graphics parsing, storage and drawing (raw/PNG, three layers, z-order, animations) are implemented and self-tested, but Windows ConPTY consumes the APC escape codes programs use to send images. See limitations |
 | **Scrollback** | Mouse wheel, keyboard scrolling, a draggable scrollbar, configurable history, and search with case and regex toggles |
 | **Selection** | Cell, word, line and block (Alt) selection. The selection follows its text through output and reflow, autoscrolls at the edges, and can copy on select |
