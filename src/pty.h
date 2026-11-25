@@ -26,19 +26,19 @@
 
 typedef struct Pty Pty;
 
-/* One key/value environment override passed to pty_spawn_ex. */
+/* One UTF-8 key/value environment override passed when spawning a child. */
 typedef struct PtyEnvEntry {
     const char *key;
     const char *value;
 } PtyEnvEntry;
 
-/* Called from the reader thread when output is waiting or the program's
- * output ended. It must be thread-safe and must not block for long. */
+/* Called from a background thread when output is waiting or the program
+ * exits. It must be thread-safe and must not block for long. */
 typedef void (*PtyNotifyFn)(void *userdata);
 
+#ifdef _WIN32
 /* The command line of the shell to start: pwsh.exe, else powershell.exe,
- * else cmd.exe. Returns a malloc'd string the caller frees, or NULL if
- * none of them could be found. Windows only; NULL elsewhere. */
+ * else cmd.exe. Returns a malloc'd string, or NULL if none was found. */
 wchar_t *pty_default_shell(void);
 
 /* Which shell to start when the user said. `which` is a SettingsShell
@@ -71,6 +71,24 @@ Pty *pty_spawn_ex(const wchar_t *command_line, const char *cwd_utf8,
 Pty *pty_spawn(const wchar_t *command_line, uint16_t columns, uint16_t rows,
                PtyNotifyFn notify, void *notify_userdata,
                char *error, size_t error_size);
+#else
+/* Spawn a POSIX program with its exact UTF-8 argv; no shell interpretation.
+ * argc includes argv[0]. A command without '/' is looked up in the child
+ * environment's PATH, after applying the environment overrides. */
+Pty *pty_spawn_posix(const char *const *argv, int argc, const char *cwd_utf8,
+                     const PtyEnvEntry *env, int env_count,
+                     uint16_t columns, uint16_t rows,
+                     PtyNotifyFn notify, void *notify_userdata,
+                     char *error, size_t error_size);
+
+/* A usable absolute $SHELL, or /bin/sh if it is missing or unusable.
+ * The returned string is owned by the caller. */
+char *pty_default_shell_posix(void);
+
+/* True when all output available after child exit has been drained, even
+ * if a background job still has the slave open. */
+bool pty_output_drained(Pty *pty);
+#endif
 
 /* Change the console size. False when the pseudoconsole refused it. */
 bool pty_resize(Pty *pty, uint16_t columns, uint16_t rows);
@@ -82,20 +100,20 @@ size_t pty_read(Pty *pty, void *buffer, size_t capacity);
 /* Number of bytes buffered for the owner thread; never blocks. */
 size_t pty_pending(Pty *pty);
 
-/* Send bytes (keys, pastes, encoded replies) to the program. Blocks while
- * the input pipe is full, which only happens if the program stopped
- * reading. False once the pipe is gone. */
+/* Queue an entire write without waiting for the child. Writes are FIFO;
+ * false means the pipe is gone, the queue is full, or allocation failed. */
 bool pty_write(Pty *pty, const void *data, size_t length);
 
-/* Wait until output is buffered, the output ended, or timeout_ms elapsed.
- * For embedders without an event loop (the self test). */
+/* Wait until output is buffered, output ends, or timeout_ms elapses. POSIX
+ * may also wake for child exit. For embedders without an event loop. */
 bool pty_wait(Pty *pty, uint32_t timeout_ms);
 
-/* True once the direct child has exited; fills its exit code. */
+/* True once the direct child has exited; fills its exit code. POSIX signal
+ * termination is represented as 128 plus the signal number. */
 bool pty_exit_code(Pty *pty, uint32_t *code);
 
-/* Terminate what is left of the process tree, close the pseudoconsole,
- * join the reader and free everything. Safe on NULL. */
+/* Terminate remaining jobs, close the pseudoconsole, join its I/O threads,
+ * and free everything. Safe on NULL. */
 void pty_close(Pty *pty);
 
 #endif /* TERMICA_PTY_H */

@@ -55,12 +55,19 @@ void session_spawn_shell(Session *s, const Settings *settings, uint16_t columns,
                          uint16_t rows, PtyNotifyFn on_output,
                          void *output_userdata)
 {
+#ifdef _WIN32
     wchar_t *command = NULL;
+#else
+    const char *arguments[SETTINGS_MAX_ARGS];
+    char *default_shell = NULL;
+    int argc = 0;
+#endif
     PtyEnvEntry env_entries[SETTINGS_MAX_ENV];
     const char *cwd_opt = NULL;
     char error[256];
     int i;
 
+#ifdef _WIN32
     if (settings && settings->command_argc > 0) {
         const char *argv[SETTINGS_MAX_ARGS];
 
@@ -89,22 +96,64 @@ void session_spawn_shell(Session *s, const Settings *settings, uint16_t columns,
                                      "is not installed\x1b[0m\r\n");
         }
     }
+#else
+    if (settings && settings->command_argc > 0 &&
+        settings->command_argc <= SETTINGS_MAX_ARGS) {
+        argc = settings->command_argc;
+        for (i = 0; i < argc; i++)
+            arguments[i] = settings->command[i];
+    } else if (settings && settings->command_argc > SETTINGS_MAX_ARGS) {
+        session_show_message(s, "\x1b[31minvalid [terminal] command in "
+                                "settings\x1b[0m\r\n");
+    } else if (settings && settings->shell != SETTINGS_SHELL_AUTO) {
+        switch (settings->shell) {
+        case SETTINGS_SHELL_PWSH: arguments[0] = "pwsh"; break;
+        case SETTINGS_SHELL_WINDOWS_POWERSHELL: arguments[0] = "powershell"; break;
+        case SETTINGS_SHELL_CMD: arguments[0] = "cmd"; break;
+        default: arguments[0] = NULL; break;
+        }
+        if (arguments[0])
+            argc = 1;
+        else
+            session_show_message(s, "\x1b[31minvalid shell setting\x1b[0m\r\n");
+    } else {
+        default_shell = pty_default_shell_posix();
+        if (default_shell) {
+            arguments[0] = default_shell;
+            argc = 1;
+        } else {
+            session_show_message(s, "\x1b[31mcould not select a shell\x1b[0m\r\n");
+        }
+    }
+#endif
 
     if (settings && settings->cwd[0])
         cwd_opt = settings->cwd;
 
+#ifdef _WIN32
     if (command) {
+#else
+    if (argc > 0) {
+#endif
         int env_count = settings ? settings->env_count : 0;
 
         for (i = 0; i < env_count; i++) {
             env_entries[i].key = settings->env[i].key;
             env_entries[i].value = settings->env[i].value;
         }
+#ifdef _WIN32
         s->pty = pty_spawn_ex(command, cwd_opt,
                               env_count > 0 ? env_entries : NULL, env_count,
                               columns, rows, on_output, output_userdata,
                               error, sizeof error);
         free(command);
+#else
+        s->pty = pty_spawn_posix(arguments, argc, cwd_opt,
+                                 env_count > 0 ? env_entries : NULL, env_count,
+                                 columns, rows, on_output, output_userdata,
+                                 error, sizeof error);
+        free(default_shell);
+#endif
         if (!s->pty) {
             char message[400];
 
@@ -188,13 +237,23 @@ bool session_pump(Session *s, bool *exited_now, bool *more)
     }
     if (more && !drained)
         *more = pty_pending(s->pty) > 0;
+#ifndef _WIN32
+    /* A final batch can end exactly at the budget, with no later wake to
+     * prompt an empty read. The POSIX reader knows when the exit tail is in. */
+    if (!drained && pty_output_drained(s->pty))
+        drained = true;
+#endif
     if (parsed)
         search_output_changed(&s->search, &s->term);
 
     if (drained && !s->shell_exited) {
         uint32_t code = 0;
 
+#ifdef _WIN32
         if (pty_exit_code(s->pty, &code)) {
+#else
+        if (pty_output_drained(s->pty) && pty_exit_code(s->pty, &code)) {
+#endif
             s->shell_exited = true;
             if (exited_now)
                 *exited_now = true;
