@@ -87,12 +87,87 @@ enum {
     TT_DWMSBT_TABBEDWINDOW = 4     /* Mica Alt             */
 };
 
+/* Live clear behind-window blur for Liquid Glass via user32's composition
+ * policy: blurs live windows and wallpaper behind us without Acrylic's heavy
+ * matte tint or grain, and stays translucent when unfocused. */
+enum {
+    TT_WCA_ACCENT_POLICY = 19,
+    TT_ACCENT_DISABLED = 0,
+    TT_ACCENT_ENABLE_BLURBEHIND = 3
+};
+
+typedef struct {
+    int AccentState;
+    int AccentFlags;
+    DWORD GradientColor;
+    int AnimationId;
+} TtAccentPolicy;
+
+typedef struct {
+    DWORD Attrib;
+    PVOID pvData;
+    SIZE_T cbData;
+} TtWindowCompositionAttribData;
+
+typedef BOOL (WINAPI *TtSetWindowCompositionAttributeFn)(
+    HWND, TtWindowCompositionAttribData *);
+
 /* What is currently applied, so a resize does not redo the frame work. */
 static WindowBackdrop applied_backdrop;
 static bool applied_backdrop_valid;
+static bool applied_accent_blur;
 static int region_radius;         /* 0 when the window has no region */
 static int region_width;
 static int region_height;
+
+static bool set_accent_blur(HWND handle, bool enable)
+{
+    static TtSetWindowCompositionAttributeFn fn;
+    static bool resolved;
+    TtAccentPolicy policy;
+    TtWindowCompositionAttribData data;
+
+    if (!resolved) {
+        HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        if (user32) {
+            union {
+                FARPROC proc;
+                TtSetWindowCompositionAttributeFn typed;
+            } cast;
+            cast.proc = GetProcAddress(user32, "SetWindowCompositionAttribute");
+            fn = cast.typed;
+        }
+        resolved = true;
+    }
+    if (!fn)
+        return false;
+
+    ZeroMemory(&policy, sizeof policy);
+    policy.AccentState = enable ? TT_ACCENT_ENABLE_BLURBEHIND
+                                : TT_ACCENT_DISABLED;
+    data.Attrib = TT_WCA_ACCENT_POLICY;
+    data.pvData = &policy;
+    data.cbData = sizeof policy;
+    if (!fn(handle, &data))
+        return false;
+
+    /* Disabling the accent policy also clears the empty blur-behind region
+     * SDL3 installed for per-pixel swapchain alpha; restore it so `panel`
+     * mode keeps its transparent background. */
+    if (!enable) {
+        HRGN empty_rgn = CreateRectRgn(-1, -1, 0, 0);
+        if (empty_rgn) {
+            DWM_BLURBEHIND bb;
+            ZeroMemory(&bb, sizeof bb);
+            bb.dwFlags = DWM_BB_ENABLE | DWM_BB_BLURREGION;
+            bb.fEnable = TRUE;
+            bb.hRgnBlur = empty_rgn;
+            DwmEnableBlurBehindWindow(handle, &bb);
+            DeleteObject(empty_rgn);
+        }
+    }
+    return true;
+}
 
 static HWND window_handle(SDL_Window *window)
 {
@@ -126,7 +201,8 @@ static void set_caption_styles(HWND handle, WindowBackdrop backdrop,
     LONG_PTR style = GetWindowLongPtr(handle, GWL_STYLE);
 
     if (!native && (backdrop == WINDOW_BACKDROP_MICA ||
-                    backdrop == WINDOW_BACKDROP_MICA_ALT))
+                    backdrop == WINDOW_BACKDROP_MICA_ALT ||
+                    window_backdrop_is_glass(backdrop)))
         style &= ~(WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
     else
         style |= WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
@@ -151,6 +227,32 @@ static bool apply_backdrop(SDL_Window *window, WindowBackdrop backdrop,
         return false;
     if (applied_backdrop_valid && applied_backdrop == backdrop)
         return true;
+
+    if (applied_accent_blur && !window_backdrop_is_glass(backdrop)) {
+        set_accent_blur(handle, false);
+        applied_accent_blur = false;
+    }
+
+    if (window_backdrop_is_glass(backdrop)) {
+        MARGINS no_margins = { 0, 0, 0, 0 };
+        int none = TT_DWMSBT_NONE;
+
+        if (!applied_accent_blur) {
+            DwmExtendFrameIntoClientArea(handle, &no_margins);
+            DwmSetWindowAttribute(handle, TT_DWMWA_SYSTEMBACKDROP_TYPE,
+                                  &none, sizeof none);
+            applied_accent_blur = set_accent_blur(handle, true);
+            if (!applied_accent_blur) {
+                int transient = TT_DWMSBT_TRANSIENTWINDOW;
+                DwmSetWindowAttribute(handle, TT_DWMWA_SYSTEMBACKDROP_TYPE,
+                                      &transient, sizeof transient);
+            }
+        }
+        applied_backdrop = backdrop;
+        applied_backdrop_valid = true;
+        set_caption_styles(handle, backdrop, native);
+        return true;
+    }
 
     switch (backdrop) {
     case WINDOW_BACKDROP_MICA:
@@ -292,7 +394,8 @@ static bool apply_backdrop(SDL_Window *window, WindowBackdrop backdrop,
 {
     (void)window;
     (void)native;
-    return backdrop == WINDOW_BACKDROP_PANEL;
+    return backdrop == WINDOW_BACKDROP_PANEL ||
+           window_backdrop_is_glass(backdrop);
 }
 static void apply_region(SDL_Window *window, int corner_radius)
 {
@@ -368,7 +471,8 @@ WindowBackdrop window_sync_chrome(SDL_Window *window, WindowBackdrop backdrop,
     bool native = decoration == WINDOW_DECORATION_NATIVE;
     bool rounded_by_backdrop = !native &&
                                (backdrop == WINDOW_BACKDROP_MICA ||
-                                backdrop == WINDOW_BACKDROP_MICA_ALT);
+                                backdrop == WINDOW_BACKDROP_MICA_ALT ||
+                                window_backdrop_is_glass(backdrop));
 
     if (decoration == WINDOW_DECORATION_SQUARE || native)
         corner_radius = 0;

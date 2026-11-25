@@ -910,12 +910,22 @@ void render_frame(App *app)
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
     SDL_RenderClear(renderer);
 
-    /* 2. The panel: our rounded fill, or a tint over a DWM backdrop. This is
-     * the terminal's default background, so image layers below the cell
-     * backgrounds go over it. */
-    panel_draw(&app->panel, renderer, pixel_width, pixel_height,
-               chrome_corner_radius(app), chrome_panel_fill_color(app),
-               CHROME_PANEL_BORDER);
+    /* 2. The panel: our rounded fill, Liquid Glass optics, or a tint over a
+     * DWM backdrop. This is the terminal's default background, so image
+     * layers below the cell backgrounds go over it. */
+    if (window_backdrop_is_glass(app->backdrop)) {
+        glass_draw(&app->glass, renderer, pixel_width, pixel_height,
+                   chrome_corner_radius(app), frame.default_background,
+                   app->panel_opacity,
+                   app->backdrop == WINDOW_BACKDROP_GLASS_DARK,
+                   app->link_pointer_valid,
+                   app->link_pointer_x * app->display_scale,
+                   app->link_pointer_y * app->display_scale);
+    } else {
+        panel_draw(&app->panel, renderer, pixel_width, pixel_height,
+                   chrome_corner_radius(app), chrome_panel_fill_color(app),
+                   CHROME_PANEL_BORDER);
+    }
     chrome_draw_title_bar(app, pixel_width, pixel_height);
 
     /* 3. Images below the cell backgrounds, above the panel fill. */
@@ -966,9 +976,19 @@ void render_frame(App *app)
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
         SDL_RenderClear(renderer);
-        panel_draw(&app->panel, renderer, pixel_width, pixel_height,
-                   chrome_corner_radius(app), chrome_panel_fill_color(app),
-                   CHROME_PANEL_BORDER);
+        if (window_backdrop_is_glass(app->backdrop)) {
+            glass_draw(&app->glass, renderer, pixel_width, pixel_height,
+                       chrome_corner_radius(app), frame.default_background,
+                       app->panel_opacity,
+                       app->backdrop == WINDOW_BACKDROP_GLASS_DARK,
+                       app->link_pointer_valid,
+                       app->link_pointer_x * app->display_scale,
+                       app->link_pointer_y * app->display_scale);
+        } else {
+            panel_draw(&app->panel, renderer, pixel_width, pixel_height,
+                       chrome_corner_radius(app), chrome_panel_fill_color(app),
+                       CHROME_PANEL_BORDER);
+        }
         chrome_draw_title_bar(app, pixel_width, pixel_height);
         draw_image_layer(app, session, GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND);
         grid_painted = grid_direct(&frame, session, DRAW_BACKGROUND,

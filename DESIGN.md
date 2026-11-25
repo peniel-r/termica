@@ -79,9 +79,10 @@ It never reimplements an escape sequence.
 | `pty.{h,c}` | Pipes, `CreatePseudoConsole`, child process, job object, reader thread, ring buffer, resize, ordered close | Win32 only, **no SDL** |
 | `glyph.{h,c}` | Fonts, bounded glyph atlases, HarfBuzz-shaped runs, fallback and drawing | SDL3_ttf, `embed`, `font_lookup` |
 | `style.{h,c}` | Turns a cell style into colours and decorations | pure |
-| `geometry.{h,c}` | Squircle math shared by the panel and the window region | pure |
+| `geometry.{h,c}` | Squircle math shared by the panel, Liquid Glass SDF and the window region | pure |
 | `panel.{h,c}` | Translucent panel fill and border, antialiased corner masks | SDL renderer |
-| `window.{h,c}` | Window creation, decoration presets, hit test, DWM backdrop, `SetWindowRgn` | SDL, DWM |
+| `glass.{h,c}` | Liquid Glass surface optics (squircle SDF, convex rim refraction, RGB dispersion, Dual Kawase wallpaper blur, opposing-light specular contours and glass capsules) | SDL renderer, `geometry`, WIC (Win32) |
+| `window.{h,c}` | Window creation, decoration presets, hit test, DWM/composition backdrop, `SetWindowRgn` | SDL, DWM |
 | `settings.{h,c}`, `statusbar.{h,c}` | Validated TOML settings and transactional reload | tomlc17 |
 | `config_watch.{h,c}`, `ui_settings.{h,c}` | Windows file watch and comment-preserving UI edits | Win32, SDL, tomlc17 |
 | `search.{h,c}` | Incremental scrollback search and match navigation | libghostty-vt, PCRE2 |
@@ -725,3 +726,34 @@ otherwise.
   a damaged row, and a few hundred bytes for the run buffer. The
   implementation depends on SDL_ttf's public text-layout operation
   structure, which is pinned with the dependency.
+
+### ADR-022: Liquid Glass backdrops (`glass` and `glass_dark`)
+
+- **Context:** Windows 11's built-in Mica only blurs the desktop wallpaper and
+  System Acrylic enforces a heavy matte tint with coarse grain that turns
+  opaque when unfocused. Users want Apple Tahoe-style Liquid Glass materials:
+  both an airy clear variant and a deeper smoked/obscure variant (like Tahoe's
+  dark Clipboard / Golden Gate cards) that preserves effortless text contrast
+  over bright, colourful wallpapers.
+- **Decision:** Add `WINDOW_BACKDROP_GLASS` (`backdrop = "glass"`, aliased as
+  `"liquid_glass"` / `"liquid-glass"`) and `WINDOW_BACKDROP_GLASS_DARK`
+  (`backdrop = "glass_dark"`, aliased as `"glass_alt"`, `"glass_obscure"`, etc.).
+  On Windows, `window.c` enables clear, grain-free live behind-window blur via
+  `SetWindowCompositionAttribute` (`ACCENT_ENABLE_BLURBEHIND`), restoring SDL's
+  empty `DwmEnableBlurBehindWindow` region when switching back to `panel` so
+  per-pixel alpha survives mode changes. Over that live blur, `glass.c`
+  synthesizes a cached low-resolution optical body texture (3-stop
+  cubic-smoothstep vertical glass veil, screen-space convex circular-cap rim
+  refraction and RGB chromatic dispersion sampled from a hexagonal-Kawase-filtered
+  WIC desktop wallpaper buffer, adaptive luminance hotspot suppression in
+  `glass_dark` so bright yellow/white wallpaper stripes never wash out glyphs,
+  and inward exponential specular sheen) paired with a full-resolution
+  4×4-supersampled corner seam atlas, dual-contour opposing-light specular rims
+  with pointer-proximity highlights, and shared rounded glass capsules for tabs,
+  search and toasts.
+- **Consequences:** Live windows behind the terminal blur cleanly even when
+  unfocused and remain visible in screenshots (no `WDA_EXCLUDEFROMCAPTURE`
+  visibility loss). Screen-space rim refraction couples to the desktop
+  wallpaper rather than arbitrary mid-stack windows, keeping frame cost near
+  zero when cached and avoiding self-capture feedback loops. All optical math
+  and software-rendered pixels are verified headlessly in `--selftest`.

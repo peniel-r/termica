@@ -85,6 +85,22 @@ int config_test(void)
     settings_format(&settings, out, sizeof out);
     config_check(strstr(out, "ligatures = false") != NULL,
                  "disabled ligatures format", &failures);
+    text = "[window]\nbackdrop = \"glass\"\n";
+    config_check(settings_reload_text(&settings, text, strlen(text), &diff,
+                                      error, sizeof error) &&
+                 (diff & SETTINGS_DIFF_WINDOW) != 0 && settings.backdrop == 4,
+                 "glass backdrop live reload reports window diff", &failures);
+    settings_format(&settings, out, sizeof out);
+    config_check(strstr(out, "backdrop = \"glass\"") != NULL,
+                 "glass backdrop formats canonically", &failures);
+    text = "[window]\nbackdrop = \"glass_dark\"\n";
+    config_check(settings_reload_text(&settings, text, strlen(text), &diff,
+                                      error, sizeof error) &&
+                 (diff & SETTINGS_DIFF_WINDOW) != 0 && settings.backdrop == 5,
+                 "glass_dark backdrop live reload reports window diff", &failures);
+    settings_format(&settings, out, sizeof out);
+    config_check(strstr(out, "backdrop = \"glass_dark\"") != NULL,
+                 "glass_dark backdrop formats canonically", &failures);
 
     statusbar_default(&statusbar);
     text = "[font]\nsize = 16\n[directory]\ntruncation_length = 2\n";

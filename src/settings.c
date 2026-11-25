@@ -206,6 +206,23 @@ static bool apply_window(Settings *settings, toml_datum_t table)
             } else if (strcmp(value.u.s, "acrylic") == 0) {
                 settings->backdrop = 3;
                 changed = true;
+            } else if (strcmp(value.u.s, "glass") == 0 ||
+                       strcmp(value.u.s, "liquid_glass") == 0 ||
+                       strcmp(value.u.s, "liquid-glass") == 0) {
+                settings->backdrop = 4;
+                changed = true;
+            } else if (strcmp(value.u.s, "glass_dark") == 0 ||
+                       strcmp(value.u.s, "glass-dark") == 0 ||
+                       strcmp(value.u.s, "glass_alt") == 0 ||
+                       strcmp(value.u.s, "glass-alt") == 0 ||
+                       strcmp(value.u.s, "glass_obscure") == 0 ||
+                       strcmp(value.u.s, "glass-obscure") == 0 ||
+                       strcmp(value.u.s, "obscure_glass") == 0 ||
+                       strcmp(value.u.s, "obscure-glass") == 0 ||
+                       strcmp(value.u.s, "liquid_glass_dark") == 0 ||
+                       strcmp(value.u.s, "liquid-glass-dark") == 0) {
+                settings->backdrop = 5;
+                changed = true;
             }
         } else if (key_is(key, "decoration") && value.type == TOML_STRING) {
             if (strcmp(value.u.s, "rounded") == 0) {
@@ -869,6 +886,8 @@ void settings_format(const Settings *settings, char *out, size_t capacity)
     case 1: backdrop = "mica"; break;
     case 2: backdrop = "mica_alt"; break;
     case 3: backdrop = "acrylic"; break;
+    case 4: backdrop = "glass"; break;
+    case 5: backdrop = "glass_dark"; break;
     default: break;
     }
     switch (settings->decoration) {

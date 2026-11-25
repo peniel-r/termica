@@ -21,8 +21,9 @@
   scrollback, reflow, key and mouse encoding all come from libghostty-vt,
   the same VT core that Ghostty uses.
 - **A real Windows citizen.** It runs your shell in a ConPTY, uses Mica,
-  Mica Alt and Acrylic backdrops, has rounded squircle corners or the native
-  frame, and ships as a GUI-subsystem executable with no console flash.
+  Mica Alt, Acrylic and Liquid Glass backdrops, has rounded squircle corners or
+  the native frame, and ships as a GUI-subsystem executable with no console
+  flash.
 - **Works out of the box.** Maple Mono NF and Symbols Nerd Font faces are
   built in, so prompt glyphs and icons render without installing fonts.
 - **Small and readable.** Strict C99 with a headless self-test suite.
@@ -39,7 +40,7 @@
 | **Mouse** | Mouse reporting (modes 9/1000/1002/1003, SGR/UTF-8/urxvt/pixel formats), Shift to take the pointer back, OSC 22 pointer shape |
 | **Clipboard** | Bracketed paste, unsafe-paste confirmation, and OSC 52 reads and writes with an `ask`/`allow`/`deny` policy (default `deny`) |
 | **Input** | Alt keys reach the shell outside search, focus reporting (mode 1004), IME preedit drawn at the cursor |
-| **Window** | `rounded`, `square`, `compact` and `native` frames, an optional drawn title bar, Mica/Mica Alt/Acrylic backdrops, adjustable opacity |
+| **Window** | `rounded`, `square`, `compact` and `native` frames, an optional drawn title bar, Mica/Mica Alt/Acrylic/Liquid Glass backdrops, adjustable opacity |
 | **Tabs** | Multiple independent sessions, a tab strip and keyboard and mouse controls |
 | **Links** | OSC 8 and detected URLs, underlined on hover and opened with Ctrl+click for allowed schemes |
 | **Desktop** | Policy-gated OSC notifications and taskbar progress |
@@ -131,7 +132,7 @@ zoom also have the shortcuts below.
 | `Ctrl+Shift+Up` / `Down` | Scroll one row |
 | `Ctrl+Shift+Home` / `End` | Scroll to the top / back to the live view |
 | `Ctrl+Shift+=` / `Ctrl+Shift+-` | Panel opacity up / down |
-| `Ctrl+Shift+B` | Cycle the backdrop: panel → Mica → Mica Alt → Acrylic |
+| `Ctrl+Shift+B` | Cycle the backdrop: panel → Mica → Mica Alt → Acrylic → Glass → Glass Dark |
 | `Ctrl+Shift+Q` | Quit |
 
 Bindings are configurable in `[keys]` inside `termica.toml` (for example,
@@ -163,7 +164,7 @@ ligatures = true       # shape adjacent ASCII cells with the font's ligatures
 
 [window]
 opacity = 1.0          # 0..1
-backdrop = "mica"      # panel | mica | mica_alt | acrylic
+backdrop = "mica"      # panel | mica | mica_alt | acrylic | glass | glass_dark
 decoration = "native"  # rounded | square | compact | native
 title_bar = true       # drawn title bar (ignored with "native")
 

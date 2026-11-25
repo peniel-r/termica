@@ -85,9 +85,12 @@ static void fit_grid(App *app)
                            (uint32_t)app->glyphs.cell_height);
         }
     }
-    /* The window region and clickable tab region follow the window size. */
+    /* The window region, Liquid Glass screen coordinates and clickable tab
+     * region follow the window size. */
     window_sync_chrome(app->window, app->backdrop, app->decoration,
                        chrome_corner_radius(app));
+    if (window_backdrop_is_glass(app->backdrop))
+        glass_sync_window_rect(&app->glass, app->window);
     chrome_sync_tab_hit_region(app);
 
     grid_right = app->grid_left + app->columns * app->glyphs.cell_width;
@@ -158,6 +161,14 @@ static void handle_display_scale_changed(App *app)
     if (panel_init(&next_panel, app->renderer, new_scale)) {
         panel_free(&app->panel);
         app->panel = next_panel;
+    }
+    {
+        Glass next_glass;
+        if (glass_init(&next_glass, app->renderer, new_scale)) {
+            glass_free(&app->glass);
+            app->glass = next_glass;
+            glass_sync_window_rect(&app->glass, app->window);
+        }
     }
     glyphs_close(&app->statusbar_glyphs);
     open_statusbar_font(app, path);
@@ -506,6 +517,8 @@ static void reload_files(App *app, unsigned changes, const char *font_override,
                     app->backdrop = window_sync_chrome(app->window,
                         (WindowBackdrop)next.backdrop, app->decoration,
                         chrome_corner_radius(app));
+                    if (window_backdrop_is_glass(app->backdrop))
+                        glass_sync_window_rect(&app->glass, app->window);
                     refit = true;
                 }
                 app->needs_redraw = true;
@@ -592,6 +605,11 @@ static void dispatch_event(App *app, const SDL_Event *event)
     case SDL_EVENT_WINDOW_FOCUS_LOST:
         input_handle_focus(app, false);
         break;
+    case SDL_EVENT_WINDOW_MOVED:
+        if (window_backdrop_is_glass(app->backdrop) &&
+            glass_sync_window_rect(&app->glass, app->window))
+            app->needs_redraw = true;
+        break;
     case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
         fit_grid(app);
         break;
@@ -600,6 +618,7 @@ static void dispatch_event(App *app, const SDL_Event *event)
         break;
     case SDL_EVENT_RENDER_TARGETS_RESET:
         render_invalidate(app);
+        glass_invalidate(&app->glass);
         app->needs_redraw = true;
         break;
     case SDL_EVENT_RENDER_DEVICE_RESET:
@@ -607,9 +626,14 @@ static void dispatch_event(App *app, const SDL_Event *event)
         glyphs_reset(&app->glyphs);
         glyphs_reset(&app->statusbar_glyphs);
         panel_free(&app->panel);
+        glass_free(&app->glass);
         images_free(&app->images);
         if (!panel_init(&app->panel, app->renderer, app->display_scale))
             fprintf(stderr, "panel reset: %s\n", SDL_GetError());
+        if (!glass_init(&app->glass, app->renderer, app->display_scale))
+            fprintf(stderr, "glass reset: %s\n", SDL_GetError());
+        else
+            glass_sync_window_rect(&app->glass, app->window);
         app->needs_redraw = true;
         break;
     default:
@@ -882,6 +906,12 @@ int main(int argc, char **argv)
         diagnostics_log("startup.panel_failed", 0);
         goto cleanup;
     }
+    if (!glass_init(&app.glass, app.renderer, app.display_scale)) {
+        fprintf(stderr, "glass_init: %s\n", SDL_GetError());
+        diagnostics_log("startup.glass_failed", 0);
+        goto cleanup;
+    }
+    glass_sync_window_rect(&app.glass, app.window);
 
     open_statusbar_font(&app, font_path);
 
@@ -972,6 +1002,7 @@ cleanup:
     app.session_count = 0;
     render_free(&app);
     images_free(&app.images);
+    glass_free(&app.glass);
     panel_free(&app.panel);
     glyphs_close(&app.glyphs);
     glyphs_close(&app.statusbar_glyphs);

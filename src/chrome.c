@@ -45,7 +45,11 @@ SDL_Color chrome_panel_fill_color(const App *app)
     color.r = app->settings.colors.background.r;
     color.g = app->settings.colors.background.g;
     color.b = app->settings.colors.background.b;
-    if (app->backdrop != WINDOW_BACKDROP_PANEL)
+    if (app->backdrop == WINDOW_BACKDROP_GLASS)
+        opacity *= GLASS_BACKDROP_TINT;
+    else if (app->backdrop == WINDOW_BACKDROP_GLASS_DARK)
+        opacity *= 0.78f;
+    else if (app->backdrop != WINDOW_BACKDROP_PANEL)
         opacity *= BACKDROP_TINT;
     color.a = (Uint8)(opacity * 255.0f + 0.5f);
     return color;
@@ -407,6 +411,10 @@ static void draw_tab_strip_items(App *app, const TabLayout *layout)
     int new_w = (int)(TAB_NEW_WIDTH * s + 0.5f);
     int close_w = (int)(TAB_CLOSE_WIDTH * s + 0.5f);
     int pad_x = (int)(8.0f * s + 0.5f);
+    bool glass_mode = window_backdrop_is_glass(app->backdrop);
+    bool light_bg = ((int)app->settings.colors.background.r +
+                     (int)app->settings.colors.background.g +
+                     (int)app->settings.colors.background.b) > 384;
     int i;
 
     for (i = 0; i < app->session_count; i++) {
@@ -422,11 +430,29 @@ static void draw_tab_strip_items(App *app, const TabLayout *layout)
         int text_y = (strip_h - app->glyphs.cell_height) / 2;
         int col = 0;
 
-        chrome_fill_rect(renderer, (float)tx + 1.0f, 2.0f, (float)tab_w - 2.0f,
-                         (float)strip_h - 3.0f, bg);
-        if (active)
-            chrome_fill_rect(renderer, (float)tx + 1.0f, (float)strip_h - 3.0f,
-                             (float)tab_w - 2.0f, 2.0f, accent);
+        if (glass_mode && light_bg) {
+            fg = active ? (SDL_Color){ 24, 30, 38, 255 }
+                        : (SDL_Color){ 88, 98, 112, 255 };
+        }
+        if (glass_mode) {
+            if (active || hovered) {
+                SDL_Color pill_bg = light_bg
+                    ? (SDL_Color){ 255, 255, 255, active ? 138 : 76 }
+                    : (SDL_Color){ 235, 244, 255, active ? 44 : 22 };
+                glass_draw_capsule(&app->glass, renderer,
+                                   (float)tx + 2.0f * s, 3.0f * s,
+                                   (float)tab_w - 4.0f * s,
+                                   (float)strip_h - 6.0f * s,
+                                   7.0f * s, pill_bg, light_bg,
+                                   active ? 0.78f : 0.36f);
+            }
+        } else {
+            chrome_fill_rect(renderer, (float)tx + 1.0f, 2.0f, (float)tab_w - 2.0f,
+                             (float)strip_h - 3.0f, bg);
+            if (active)
+                chrome_fill_rect(renderer, (float)tx + 1.0f, (float)strip_h - 3.0f,
+                                 (float)tab_w - 2.0f, 2.0f, accent);
+        }
 
         chrome_tab_label(app->sessions[i], i, label, sizeof label);
         if (text_y < 0)
@@ -476,12 +502,26 @@ static void draw_tab_strip_items(App *app, const TabLayout *layout)
         float r = 4.0f * s;
 
         if (app->tab_new_hover) {
-            SDL_Color hover = { 255, 255, 255, 24 };
-            chrome_fill_rect(renderer, (float)nx + 1.0f, 2.0f,
-                             (float)new_w - 2.0f, (float)strip_h - 3.0f, hover);
+            if (glass_mode) {
+                SDL_Color pill_hover = light_bg
+                    ? (SDL_Color){ 255, 255, 255, 110 }
+                    : (SDL_Color){ 235, 244, 255, 34 };
+                glass_draw_capsule(&app->glass, renderer,
+                                   (float)nx + 2.0f * s, 3.0f * s,
+                                   (float)new_w - 4.0f * s,
+                                   (float)strip_h - 6.0f * s,
+                                   7.0f * s, pill_hover, light_bg, 0.55f);
+            } else {
+                SDL_Color hover = { 255, 255, 255, 24 };
+                chrome_fill_rect(renderer, (float)nx + 1.0f, 2.0f,
+                                 (float)new_w - 2.0f, (float)strip_h - 3.0f, hover);
+            }
         }
-        SDL_SetRenderDrawColor(renderer, CHROME_TITLE_TEXT.r,
-                               CHROME_TITLE_TEXT.g, CHROME_TITLE_TEXT.b, 200);
+        if (glass_mode && light_bg)
+            SDL_SetRenderDrawColor(renderer, 36, 44, 54, 210);
+        else
+            SDL_SetRenderDrawColor(renderer, CHROME_TITLE_TEXT.r,
+                                   CHROME_TITLE_TEXT.g, CHROME_TITLE_TEXT.b, 200);
         SDL_RenderLine(renderer, cx - r, cy, cx + r, cy);
         SDL_RenderLine(renderer, cx, cy - r, cx, cy + r);
     }
@@ -546,7 +586,7 @@ void chrome_update_title_hover(App *app, float x, float y)
 }
 
 static void draw_title_symbol(App *app, int index, const SDL_FRect *area,
-                              bool maximized)
+                              bool maximized, SDL_Color symbol_fg)
 {
     float centre_x = area->x + area->w * 0.5f;
     float centre_y = area->y + area->h * 0.5f;
@@ -554,8 +594,8 @@ static void draw_title_symbol(App *app, int index, const SDL_FRect *area,
     float offset = 2.0f * app->display_scale;
     SDL_Renderer *renderer = app->renderer;
 
-    SDL_SetRenderDrawColor(renderer, CHROME_TITLE_TEXT.r, CHROME_TITLE_TEXT.g,
-                           CHROME_TITLE_TEXT.b, CHROME_TITLE_TEXT.a);
+    SDL_SetRenderDrawColor(renderer, symbol_fg.r, symbol_fg.g,
+                           symbol_fg.b, symbol_fg.a);
     if (index == 0) {
         SDL_RenderLine(renderer, centre_x - size, centre_y, centre_x + size,
                        centre_y);
@@ -587,8 +627,21 @@ void chrome_draw_title_bar(App *app, int pixel_width, int pixel_height)
     int button_width = (int)(WINDOW_TITLE_BAR_BUTTON_WIDTH *
                              app->display_scale + 0.5f);
     int buttons_left = pixel_width - WINDOW_TITLE_BAR_BUTTONS * button_width;
-    SDL_Color tint = { 255, 255, 255, 16 };
-    SDL_Color separator = { 90, 100, 112, 90 };
+    bool glass_mode = window_backdrop_is_glass(app->backdrop);
+    bool light_bg = ((int)app->settings.colors.background.r +
+                     (int)app->settings.colors.background.g +
+                     (int)app->settings.colors.background.b) > 384;
+    SDL_Color tint = glass_mode
+        ? (light_bg ? (SDL_Color){ 255, 255, 255, 36 }
+                    : (SDL_Color){ 230, 242, 255, 12 })
+        : (SDL_Color){ 255, 255, 255, 16 };
+    SDL_Color separator = glass_mode
+        ? (light_bg ? (SDL_Color){ 255, 255, 255, 120 }
+                    : (SDL_Color){ 220, 236, 255, 34 })
+        : (SDL_Color){ 90, 100, 112, 90 };
+    SDL_Color title_fg = (glass_mode && light_bg)
+        ? (SDL_Color){ 28, 34, 42, 255 }
+        : CHROME_TITLE_TEXT;
     const char *title = APP_TITLE;
     bool maximized = (SDL_GetWindowFlags(app->window) &
                       SDL_WINDOW_MAXIMIZED) != 0;
@@ -616,7 +669,8 @@ void chrome_draw_title_bar(App *app, int pixel_width, int pixel_height)
     }
 
     /* The tint follows the panel's rounded top corners instead of painting
-     * a square band over them. */
+     * a square band over them. In Liquid Glass mode, inset the hairline so it
+     * floats cleanly inside the specular outer rim. */
     {
         SDL_Color no_border = { 0, 0, 0, 0 };
         SDL_Rect band = { 0, 0, pixel_width, height };
@@ -626,8 +680,16 @@ void chrome_draw_title_bar(App *app, int pixel_width, int pixel_height)
                    chrome_corner_radius(app), tint, no_border);
         SDL_SetRenderClipRect(renderer, NULL);
     }
-    chrome_fill_rect(renderer, 0.0f, (float)height - 1.0f, (float)pixel_width,
-                     1.0f, separator);
+    if (glass_mode) {
+        float inset_x = (float)chrome_padding(app);
+        if ((float)pixel_width > 2.0f * inset_x)
+            chrome_fill_rect(renderer, inset_x, (float)height - 1.0f,
+                             (float)pixel_width - 2.0f * inset_x, 1.0f,
+                             separator);
+    } else {
+        chrome_fill_rect(renderer, 0.0f, (float)height - 1.0f,
+                         (float)pixel_width, 1.0f, separator);
+    }
 
     for (index = 0; index < WINDOW_TITLE_BAR_BUTTONS; index++) {
         SDL_FRect area;
@@ -651,7 +713,18 @@ void chrome_draw_title_bar(App *app, int pixel_width, int pixel_height)
                 hover.b = 255;
                 hover.a = 26;
             }
-            if (index == WINDOW_TITLE_BAR_BUTTONS - 1 && radius > 0) {
+            if (glass_mode) {
+                float pad = 3.0f * app->display_scale;
+                SDL_Color pill_col = (index == WINDOW_TITLE_BAR_BUTTONS - 1)
+                    ? (SDL_Color){ 214, 58, 66, 210 }
+                    : (light_bg ? (SDL_Color){ 255, 255, 255, 130 }
+                                : (SDL_Color){ 235, 244, 255, 38 });
+                glass_draw_capsule(&app->glass, renderer,
+                                   area.x + pad, area.y + pad,
+                                   area.w - 2.0f * pad, area.h - 2.0f * pad,
+                                   6.0f * app->display_scale, pill_col,
+                                   light_bg, 0.65f);
+            } else if (index == WINDOW_TITLE_BAR_BUTTONS - 1 && radius > 0) {
                 /* Paint the close button through the panel's own shape, so
                  * its hover follows the top-right squircle instead of
                  * leaving a square notch beside the curve. */
@@ -671,7 +744,12 @@ void chrome_draw_title_bar(App *app, int pixel_width, int pixel_height)
                                  hover);
             }
         }
-        draw_title_symbol(app, index, &area, maximized);
+        draw_title_symbol(
+            app, index, &area, maximized,
+            (app->title_hover == WINDOW_TITLE_BAR_BUTTONS - 1 &&
+             index == WINDOW_TITLE_BAR_BUTTONS - 1)
+                ? (SDL_Color){ 255, 255, 255, 255 }
+                : title_fg);
     }
 
     if (has_tabs) {
@@ -703,7 +781,7 @@ void chrome_draw_title_bar(App *app, int pixel_width, int pixel_height)
         *end = '\0';
         glyphs_draw_text(&app->glyphs, utf8, (size_t)(end - utf8),
                          (float)(text_x + column * app->glyphs.cell_width),
-                         (float)text_y, false, false, CHROME_TITLE_TEXT);
+                         (float)text_y, false, false, title_fg);
         column++;
     }
     SDL_SetRenderClipRect(renderer, NULL);
@@ -1037,6 +1115,10 @@ void chrome_draw_search(App *app)
     SDL_FRect r;
     SDL_Rect clip, area;
     float pad, x, y, caret_x, shift = 0.0f, button_width;
+    bool glass_mode = window_backdrop_is_glass(app->backdrop);
+    bool light_bg = ((int)app->settings.colors.background.r +
+                     (int)app->settings.colors.background.g +
+                     (int)app->settings.colors.background.b) > 384;
     SDL_Color bg = { 32, 36, 44, 255 };
     SDL_Color button_bg = { 66, 75, 90, 255 };
     SDL_Color active_bg = { 66, 115, 145, 255 };
@@ -1051,8 +1133,20 @@ void chrome_draw_search(App *app)
     r = search_rect(app);
     pad = 4.0f * app->display_scale;
     button_width = (float)(4 * app->glyphs.cell_width);
-    chrome_fill_rect(app->renderer, r.x, r.y, r.w, r.h, bg);
-    chrome_fill_rect(app->renderer, r.x, r.y + r.h - 1.0f, r.w, 1.0f, accent);
+    if (glass_mode) {
+        SDL_Color cap_fill = light_bg
+            ? (SDL_Color){ 246, 249, 254, 198 }
+            : (SDL_Color){  18,  24,  33, 188 };
+        if (light_bg) {
+            fg = (SDL_Color){ 24, 30, 38, 255 };
+            accent = (SDL_Color){ 24, 116, 178, 255 };
+        }
+        glass_draw_capsule(&app->glass, app->renderer, r.x, r.y, r.w, r.h,
+                           10.0f * app->display_scale, cap_fill, light_bg, 0.9f);
+    } else {
+        chrome_fill_rect(app->renderer, r.x, r.y, r.w, r.h, bg);
+        chrome_fill_rect(app->renderer, r.x, r.y + r.h - 1.0f, r.w, 1.0f, accent);
+    }
     clip.x = (int)(r.x + pad);
     clip.y = (int)(r.y + pad);
     clip.w = (int)(r.w - 2.0f * pad);
@@ -1092,9 +1186,21 @@ void chrome_draw_search(App *app)
         bool active = (i == 0 && search->case_sensitive) ||
                       (i == 1 && search->regex);
         x = r.x + pad + (float)i * button_width;
-        chrome_fill_rect(app->renderer, x, (float)clip.y,
-                         button_width - 2.0f, (float)clip.h,
-                         active ? active_bg : button_bg);
+        if (glass_mode) {
+            SDL_Color pill_col = light_bg
+                ? (active ? (SDL_Color){ 64, 145, 215, 160 }
+                          : (SDL_Color){ 255, 255, 255, 145 })
+                : (active ? (SDL_Color){ 88, 172, 224, 112 }
+                          : (SDL_Color){ 235, 244, 255, 34 });
+            glass_draw_capsule(&app->glass, app->renderer, x, (float)clip.y,
+                               button_width - 2.0f, (float)clip.h,
+                               5.0f * app->display_scale, pill_col, light_bg,
+                               active ? 0.75f : 0.40f);
+        } else {
+            chrome_fill_rect(app->renderer, x, (float)clip.y,
+                             button_width - 2.0f, (float)clip.h,
+                             active ? active_bg : button_bg);
+        }
         search_draw_text(app, labels[i], strlen(labels[i]),
                          x + (float)app->glyphs.cell_width, (float)clip.y, fg);
     }

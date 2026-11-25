@@ -25,12 +25,20 @@
 #include <stdbool.h>
 
 typedef enum {
-    WINDOW_BACKDROP_PANEL = 0,   /* our own translucent panel       */
-    WINDOW_BACKDROP_MICA,        /* Windows 11 Mica                 */
-    WINDOW_BACKDROP_MICA_ALT,    /* Windows 11 Mica Alt             */
-    WINDOW_BACKDROP_ACRYLIC,     /* Windows 11 Acrylic              */
+    WINDOW_BACKDROP_PANEL = 0,      /* our own translucent panel          */
+    WINDOW_BACKDROP_MICA,           /* Windows 11 Mica                    */
+    WINDOW_BACKDROP_MICA_ALT,       /* Windows 11 Mica Alt                */
+    WINDOW_BACKDROP_ACRYLIC,        /* Windows 11 Acrylic                 */
+    WINDOW_BACKDROP_GLASS,          /* Liquid Glass (clear)               */
+    WINDOW_BACKDROP_GLASS_DARK,     /* Liquid Glass (obscure / smoked)    */
     WINDOW_BACKDROP_COUNT
 } WindowBackdrop;
+
+static inline bool window_backdrop_is_glass(WindowBackdrop backdrop)
+{
+    return backdrop == WINDOW_BACKDROP_GLASS ||
+           backdrop == WINDOW_BACKDROP_GLASS_DARK;
+}
 
 typedef enum {
     WINDOW_DECORATION_ROUNDED = 0,  /* custom frame, rounded panel   */

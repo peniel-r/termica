@@ -13,6 +13,7 @@
 #include <stdint.h>
 
 #include "git.h"
+#include "glass.h"
 #include "glyph.h"
 #include "panel.h"
 #include "session.h"
@@ -21,8 +22,10 @@
 #include "window.h"
 
 /* Over a DWM backdrop the panel is only a light tint: the material is the
- * background, the tint just keeps the text readable. */
+ * background, the tint just keeps the text readable. Liquid Glass uses a
+ * clearer base veil because its own 3-stop gradient and bevel supply depth. */
 #define BACKDROP_TINT 0.24f
+#define GLASS_BACKDROP_TINT 0.18f
 
 /* The name shown in the title bar, both custom-drawn and OS-managed. */
 #define APP_TITLE "Termica"
@@ -60,6 +63,7 @@ typedef struct App {
     SDL_Renderer    *renderer;
     Glyphs           glyphs;
     Panel            panel;
+    Glass            glass;
     struct RenderCache *render_cache; /* private to render.c               */
     struct ImageCache  *images;       /* private to image.c                */
 

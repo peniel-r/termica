@@ -78,7 +78,7 @@ def settings_reference(settings, header):
         'font.ligatures': ('ligatures', "Boolean; shape adjacent ASCII cells so the font's programming ligatures render."),
         'font.fallback': (None, 'Array of up to SETTINGS_MAX_FALLBACKS nonempty font families or paths; then OS and Symbols Nerd Font fallback.'),
         'window.opacity': ('panel_opacity', 'Number from 0 to 1.'),
-        'window.backdrop': ('backdrop', '`panel`, `mica`, `mica_alt` (also `mica-alt`), or `acrylic`.'),
+        'window.backdrop': ('backdrop', '`panel`, `mica`, `mica_alt` (also `mica-alt`), `acrylic`, `glass` (also `liquid_glass`, `liquid-glass`), or `glass_dark` (smoked/obscure variant; also `glass-dark`, `glass_alt`, `glass-alt`, `glass_obscure`).'),
         'window.decoration': ('decoration', '`rounded`, `square`, `compact`, or `native`.'),
         'window.title_bar': ('title_bar', 'Boolean; ignored for the native frame.'),
         'terminal.copy_on_select': ('copy_on_select', 'Boolean; copy selected text automatically.'),

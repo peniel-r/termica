@@ -164,6 +164,8 @@ add_executable(termica
     src/glyph_atlas_test.c
     src/git.c
     src/style.c
+    src/glass.c
+    src/glass_test.c
     src/panel.c
     src/geometry.c
     src/window.c
@@ -192,6 +194,7 @@ add_executable(termica
     src/glyph.h
     src/git.h
     src/style.h
+    src/glass.h
     src/panel.h
     src/geometry.h
     src/window.h)

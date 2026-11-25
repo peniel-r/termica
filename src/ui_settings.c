@@ -8,7 +8,8 @@
 void ui_settings_save(App *app, const char *key)
 {
     static const char *const backdrops[] = {
-        "\"panel\"", "\"mica\"", "\"mica_alt\"", "\"acrylic\""
+        "\"panel\"", "\"mica\"", "\"mica_alt\"", "\"acrylic\"",
+        "\"glass\"", "\"glass_dark\""
     };
     char path[512];
     char value[32];

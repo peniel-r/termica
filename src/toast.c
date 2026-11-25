@@ -50,10 +50,23 @@ void toast_render(App *app)
     y = (float)(height - chrome_statusbar_height(app) - app->glyphs.cell_height - 18);
     if (y < app->grid_top)
         y = (float)app->grid_top;
-    chrome_fill_rect(app->renderer, x, y, box_width,
-                     (float)app->glyphs.cell_height + 12, border);
-    chrome_fill_rect(app->renderer, x + 1, y + 1, box_width - 2,
-                     (float)app->glyphs.cell_height + 10, bg);
+    if (window_backdrop_is_glass(app->backdrop)) {
+        bool light_bg = ((int)app->settings.colors.background.r +
+                         (int)app->settings.colors.background.g +
+                         (int)app->settings.colors.background.b) > 384;
+        SDL_Color glass_bg = light_bg ? (SDL_Color){ 245, 240, 242, 200 }
+                                      : (SDL_Color){  34,  24,  28, 196 };
+        if (light_bg)
+            fg = (SDL_Color){ 28, 24, 26, 255 };
+        glass_draw_capsule(&app->glass, app->renderer, x, y, box_width,
+                           (float)app->glyphs.cell_height + 12.0f,
+                           8.0f * app->display_scale, glass_bg, light_bg, 0.9f);
+    } else {
+        chrome_fill_rect(app->renderer, x, y, box_width,
+                         (float)app->glyphs.cell_height + 12, border);
+        chrome_fill_rect(app->renderer, x + 1, y + 1, box_width - 2,
+                         (float)app->glyphs.cell_height + 10, bg);
+    }
     p = toast_message;
     x += 8;
     for (int i = 0; i < count && p < end; i++) {

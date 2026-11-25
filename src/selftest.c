@@ -1017,11 +1017,41 @@ static void test_settings(void)
                               strlen("[window]\nbackdrop = \"mica_alt\"\n")),
           "mica_alt parses");
     check(settings.backdrop == 2, "mica_alt stored");
+    check(settings_parse_toml(&settings,
+                              "[window]\nbackdrop = \"glass\"\n",
+                              strlen("[window]\nbackdrop = \"glass\"\n")),
+          "glass backdrop parses");
+    check(settings.backdrop == 4, "glass backdrop stored");
+    check(settings_parse_toml(&settings,
+                              "[window]\nbackdrop = \"liquid_glass\"\n",
+                              strlen("[window]\nbackdrop = \"liquid_glass\"\n")),
+          "liquid_glass alias parses");
+    check(settings.backdrop == 4, "liquid_glass alias maps to glass");
+    check(settings_parse_toml(&settings,
+                              "[window]\nbackdrop = \"liquid-glass\"\n",
+                              strlen("[window]\nbackdrop = \"liquid-glass\"\n")),
+          "liquid-glass alias parses");
+    check(settings.backdrop == 4, "liquid-glass alias maps to glass");
+    check(settings_parse_toml(&settings,
+                              "[window]\nbackdrop = \"glass_dark\"\n",
+                              strlen("[window]\nbackdrop = \"glass_dark\"\n")),
+          "glass_dark backdrop parses");
+    check(settings.backdrop == 5, "glass_dark backdrop stored");
+    check(settings_parse_toml(&settings,
+                              "[window]\nbackdrop = \"glass_alt\"\n",
+                              strlen("[window]\nbackdrop = \"glass_alt\"\n")),
+          "glass_alt alias parses");
+    check(settings.backdrop == 5, "glass_alt alias maps to glass_dark");
+    check(settings_parse_toml(&settings,
+                              "[window]\nbackdrop = \"glass-obscure\"\n",
+                              strlen("[window]\nbackdrop = \"glass-obscure\"\n")),
+          "glass-obscure alias parses");
+    check(settings.backdrop == 5, "glass-obscure alias maps to glass_dark");
     check(!settings_parse_toml(&settings,
                                "[window]\nbackdrop = \"bogus\"\n",
                                strlen("[window]\nbackdrop = \"bogus\"\n")),
           "an unknown backdrop is refused");
-    check(settings.backdrop == 2, "a refused backdrop left it alone");
+    check(settings.backdrop == 5, "a refused backdrop left it alone");
 
     check(settings_parse_toml(&settings, "[window]\ndecoration = \"square\"\n",
                               strlen("[window]\ndecoration = \"square\"\n")),
@@ -1112,7 +1142,7 @@ static void test_settings(void)
     settings_default(&settings);
     settings.point_size = 13.5f;
     settings.panel_opacity = 0.85f;
-    settings.backdrop = 3;
+    settings.backdrop = 5;
     settings.decoration = SETTINGS_DECORATION_SQUARE;
     settings.title_bar = true;
     settings.copy_on_select = true;
@@ -2491,6 +2521,7 @@ int term_selftest(void)
     failure_count += search_selftest();
     failure_count += diagnostics_selftest();
     failure_count += glyph_atlas_selftest();
+    failure_count += glass_selftest();
 #ifdef _WIN32
     test_pty();
     test_pty_writer_queue();

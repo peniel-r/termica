@@ -443,13 +443,24 @@ void input_handle_key_down(App *app, const SDL_KeyboardEvent *event)
     case KEY_ACTION_CYCLE_BACKDROP:
         if (!event->repeat) {
             WindowBackdrop old = app->backdrop;
-            WindowBackdrop next =
-                (WindowBackdrop)((app->backdrop + 1) % WINDOW_BACKDROP_COUNT);
-            /* The OS may not know the material; the window says so and the
-             * app keeps the mode that is really in effect. */
-            app->backdrop = window_sync_chrome(app->window, next,
-                                               app->decoration,
-                                               chrome_corner_radius(app));
+            int step;
+
+            /* Step through candidates until the OS accepts one, so systems
+             * without Win11 Mica still reach Liquid Glass instead of stalling
+             * on `panel`. */
+            for (step = 1; step <= WINDOW_BACKDROP_COUNT; step++) {
+                WindowBackdrop candidate =
+                    (WindowBackdrop)((old + step) % WINDOW_BACKDROP_COUNT);
+                WindowBackdrop applied = window_sync_chrome(
+                    app->window, candidate, app->decoration,
+                    chrome_corner_radius(app));
+                if (applied == candidate) {
+                    app->backdrop = applied;
+                    break;
+                }
+            }
+            if (window_backdrop_is_glass(app->backdrop))
+                glass_sync_window_rect(&app->glass, app->window);
             app->settings.backdrop = (int)app->backdrop;
             if (app->backdrop != old)
                 ui_settings_save(app, "backdrop");
@@ -954,6 +965,20 @@ void input_handle_mouse_motion(App *app, const SDL_MouseMotionEvent *event)
         if (old_inside != new_inside || old_x != new_x || old_y != new_y ||
             old_hit != new_hit)
             app->needs_redraw = true;
+        else if (window_backdrop_is_glass(app->backdrop) &&
+                 app->link_pointer_valid) {
+            /* Update the fluid pointer-proximity rim highlight when moving
+             * near the window edges, quantized to 4 logical px. */
+            int win_w = 0, win_h = 0;
+            SDL_GetWindowSize(app->window, &win_w, &win_h);
+            if ((event->x < 96.0f || event->y < 96.0f ||
+                 event->x > (float)win_w - 96.0f ||
+                 event->y > (float)win_h - 96.0f) &&
+                (((int)event->x >> 2) != ((int)app->link_pointer_x >> 2) ||
+                 ((int)event->y >> 2) != ((int)app->link_pointer_y >> 2))) {
+                app->needs_redraw = true;
+            }
+        }
         app->link_pointer_x = event->x;
         app->link_pointer_y = event->y;
         app->link_pointer_valid = true;
