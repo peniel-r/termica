@@ -20,6 +20,7 @@
 #include "diagnostics.h"
 #include "hyperlink.h"
 #include "glyph.h"
+#include "image.h"
 #include "input.h"
 #include "keys.h"
 #include "settings.h"
@@ -1239,6 +1240,252 @@ static void test_terminal_effects(void)
     term_free(&term);
 }
 
+/* Kitty graphics: the library parses the protocol, stores the pixels and
+ * reports where to draw them. This checks the path the app depends on,
+ * including the PNG decoder that term_init installs. */
+static void test_kitty_graphics(void)
+{
+    Term term;
+    GhosttyKittyGraphics graphics = NULL;
+    GhosttyKittyGraphicsImage image;
+    GhosttyKittyImageFormat format = GHOSTTY_KITTY_IMAGE_FORMAT_RGB;
+    GhosttyString pixels = { 0 };
+    GhosttyImageProtocol protocol = GHOSTTY_IMAGE_PROTOCOL_KITTY;
+    uint32_t width = 0, height = 0, image_id = 0;
+    uint64_t generation = 0, next_ms = 0;
+    bool placed = false;
+
+    if (!term_init(&term, 20, 5)) {
+        check(false, "initialize terminal for kitty graphics");
+        return;
+    }
+    term_resize(&term, 20, 5, 8, 16);
+
+    /* A 2x2 RGBA image, transmitted in one chunk and displayed at the
+     * cursor. */
+    term_write_text(&term,
+        "\033_Ga=T,f=32,s=2,v=2,i=7;/wAA/wD/AP8AAP///////w==\033\\");
+    check(ghostty_terminal_get(term.handle, GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS,
+                               &graphics) == GHOSTTY_SUCCESS && graphics,
+          "kitty graphics storage is available");
+    image = graphics ? ghostty_kitty_graphics_image(graphics, 7) : NULL;
+    check(image != NULL, "raw RGBA image is stored");
+    if (image &&
+        ghostty_kitty_graphics_image_get(image,
+            GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_WIDTH, &width) == GHOSTTY_SUCCESS &&
+        ghostty_kitty_graphics_image_get(image,
+            GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_HEIGHT, &height) == GHOSTTY_SUCCESS &&
+        ghostty_kitty_graphics_image_get(image,
+            GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_FORMAT, &format) == GHOSTTY_SUCCESS &&
+        ghostty_kitty_graphics_image_get(image,
+            GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_PIXELS, &pixels) == GHOSTTY_SUCCESS &&
+        width == 2 && height == 2 && format == GHOSTTY_KITTY_IMAGE_FORMAT_RGBA &&
+        pixels.ptr && pixels.len >= 16)
+        check(true, "stored image is 2x2 RGBA with readable pixels");
+    else
+        check(false, "stored image is 2x2 RGBA with readable pixels");
+
+    /* The same path with a PNG payload, which only decodes because term_init
+     * installed SDL's decoder with ghostty_sys_set. */
+    term_write_text(&term,
+        "\033_Ga=T,f=100,i=8;"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/"
+        "iZk9HQAAAABJRU5ErkJggg==\033\\");
+    image = graphics ? ghostty_kitty_graphics_image(graphics, 8) : NULL;
+    check(image != NULL, "PNG payload decodes through the installed decoder");
+    if (image &&
+        ghostty_kitty_graphics_image_get(image,
+            GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_WIDTH, &width) == GHOSTTY_SUCCESS &&
+        ghostty_kitty_graphics_image_get(image,
+            GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_HEIGHT, &height) == GHOSTTY_SUCCESS &&
+        width == 1 && height == 1)
+        check(true, "decoded PNG is 1x1 pixels");
+    else
+        check(false, "decoded PNG is 1x1 pixels");
+
+    /* The render state is where the placement geometry comes from. */
+    if (ghostty_render_state_update(term.render_state, term.handle) ==
+            GHOSTTY_SUCCESS &&
+        ghostty_render_state_get(term.render_state,
+            GHOSTTY_RENDER_STATE_DATA_IMAGE_ITERATOR,
+            &term.image_iterator) == GHOSTTY_SUCCESS) {
+        while (ghostty_render_state_image_iterator_next(term.image_iterator)) {
+            if (ghostty_render_state_image_get(term.image_iterator,
+                    GHOSTTY_RENDER_STATE_IMAGE_DATA_PROTOCOL, &protocol) !=
+                    GHOSTTY_SUCCESS ||
+                ghostty_render_state_image_get(term.image_iterator,
+                    GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_ID, &image_id) !=
+                    GHOSTTY_SUCCESS ||
+                ghostty_render_state_image_get(term.image_iterator,
+                    GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_GENERATION,
+                    &generation) != GHOSTTY_SUCCESS)
+                continue;
+            if (protocol == GHOSTTY_IMAGE_PROTOCOL_KITTY && image_id == 7 &&
+                generation > 0) {
+                placed = true;
+                break;
+            }
+        }
+    }
+    check(placed, "render state reports the Kitty placement and generation");
+
+    check(!term_animation_tick(&term, 0, &next_ms),
+          "a static image asks for no animation frame");
+
+    /* Give the image a second frame and gaps, then start the loop. The tick
+     * has a deadline to report from then on. */
+    term_write_text(&term,
+        "\033_Ga=f,i=7,f=32,s=2,v=2,z=50;/wAA/wD/AP8AAP///////w==\033\\");
+    term_write_text(&term, "\033_Ga=a,i=7,r=1,z=50\033\\");
+    term_write_text(&term, "\033_Ga=a,i=7,s=3\033\\");
+    check(term_animation_tick(&term, 1000, &next_ms) && next_ms >= 1000,
+          "a playing animation asks for a deadline");
+
+    /* Deleting the placements and the now-unused image frees the storage
+     * entry (uppercase delete removes the data too). */
+    term_write_text(&term, "\033_Ga=d,d=I,i=7\033\\");
+    check(!graphics || !ghostty_kitty_graphics_image(graphics, 7),
+          "deleting an image removes it from storage");
+
+    term_free(&term);
+}
+
+/* Read one pixel from a surface, as R, G, B bytes. */
+static void surface_pixel(const SDL_Surface *surface, int x, int y,
+                          Uint8 out[4])
+{
+    const Uint8 *pixels = (const Uint8 *)surface->pixels;
+    size_t offset = (size_t)y * (size_t)surface->pitch + (size_t)x * 4;
+
+    memcpy(out, pixels + offset, 4);
+}
+
+/* Snapshot the renderer into RGBA32 so the test can inspect pixels. */
+static SDL_Surface *read_surface(SDL_Renderer *renderer)
+{
+    SDL_Surface *shot = SDL_RenderReadPixels(renderer, NULL);
+    SDL_Surface *rgba;
+
+    if (!shot)
+        return NULL;
+    rgba = SDL_ConvertSurface(shot, SDL_PIXELFORMAT_RGBA32);
+    SDL_DestroySurface(shot);
+    return rgba;
+}
+
+/* Check whether the pixel at (x, y) is the test image's opaque red or the
+ * black background. */
+static void check_pixel(const SDL_Surface *surface, int x, int y, bool red,
+                        const char *description)
+{
+    Uint8 pixel[4];
+
+    surface_pixel(surface, x, y, pixel);
+    check(red ? pixel[0] == 255 && pixel[1] == 0 && pixel[2] == 0
+              : pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0,
+          description);
+}
+
+/* Clear to black and draw one image layer. */
+static void draw_layer(ImageCache **cache, SDL_Renderer *renderer, Term *term,
+                       GhosttyImageLayer layer)
+{
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+    SDL_RenderClear(renderer);
+    images_draw(cache, renderer, term, layer, 0, 0, 160, 80);
+}
+
+/* Draw real textures through a software renderer. This covers the parts the
+ * placement test cannot see: RGBA upload, cell geometry, clipping to the
+ * grid and the three image layers. */
+static void test_image_draw(void)
+{
+    Term term;
+    SDL_Surface *surface;
+    SDL_Surface *shot;
+    SDL_Renderer *renderer;
+    ImageCache *cache = NULL;
+
+    if (!term_init(&term, 20, 5)) {
+        check(false, "initialize terminal for image drawing");
+        return;
+    }
+    term_resize(&term, 20, 5, 8, 16);
+
+    /* Three one-pixel images, one per image layer. Kitty's z-index picks the
+     * layer: 0 is above the text, a small negative value is below the text
+     * and below INT32_MIN / 2 is below the cell background. */
+    term_write_text(&term, "\033[3;4H");
+    term_write_text(&term, "\033_Ga=T,f=32,s=1,v=1,i=9,z=0;/wAA/w==\033\\");
+    term_write_text(&term, "\033[1;11H");
+    term_write_text(&term, "\033_Ga=T,f=32,s=1,v=1,i=10,z=-1;/wAA/w==\033\\");
+    term_write_text(&term, "\033[5;16H");
+    term_write_text(&term,
+                    "\033_Ga=T,f=32,s=1,v=1,i=11,z=-2000000000;/wAA/w==\033\\");
+
+    if (ghostty_render_state_update(term.render_state, term.handle) !=
+            GHOSTTY_SUCCESS)
+        check(false, "render state updates for image drawing");
+    surface = SDL_CreateSurface(160, 80, SDL_PIXELFORMAT_RGBA32);
+    renderer = surface ? SDL_CreateSoftwareRenderer(surface) : NULL;
+    if (!renderer) {
+        check(false, "software renderer for image drawing");
+        SDL_DestroySurface(surface);
+        term_free(&term);
+        return;
+    }
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
+    draw_layer(&cache, renderer, &term, GHOSTTY_IMAGE_LAYER_ABOVE_TEXT);
+    shot = read_surface(renderer);
+    if (shot) {
+        check_pixel(shot, 3 * 8, 2 * 16, true,
+                    "above-text image draws at its cell");
+        check_pixel(shot, 10 * 8, 0, false,
+                    "a below-text image is not drawn in the above-text layer");
+        check_pixel(shot, 15 * 8, 4 * 16, false,
+                    "a below-background image is not drawn above the text");
+        check_pixel(shot, 0, 0, false,
+                    "image drawing leaves other pixels alone");
+        SDL_DestroySurface(shot);
+    } else {
+        check(false, "read the software renderer for image drawing");
+    }
+
+    draw_layer(&cache, renderer, &term, GHOSTTY_IMAGE_LAYER_BELOW_TEXT);
+    shot = read_surface(renderer);
+    if (shot) {
+        check_pixel(shot, 10 * 8, 0, true,
+                    "z = -1 image draws in the below-text layer");
+        check_pixel(shot, 3 * 8, 2 * 16, false,
+                    "an above-text image is not drawn below the text");
+        check_pixel(shot, 15 * 8, 4 * 16, false,
+                    "a below-background image is not drawn below the text");
+        SDL_DestroySurface(shot);
+    } else {
+        check(false, "read the software renderer for the below-text layer");
+    }
+
+    draw_layer(&cache, renderer, &term, GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND);
+    shot = read_surface(renderer);
+    if (shot) {
+        check_pixel(shot, 15 * 8, 4 * 16, true,
+                    "z below INT32_MIN / 2 draws below cell backgrounds");
+        check_pixel(shot, 3 * 8, 2 * 16, false,
+                    "an above-text image is not drawn below the background");
+        check_pixel(shot, 10 * 8, 0, false,
+                    "a below-text image is not drawn below the background");
+        SDL_DestroySurface(shot);
+    } else {
+        check(false, "read the software renderer for the background layer");
+    }
+
+    images_free(&cache);
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroySurface(surface);
+    term_free(&term);
+}
+
 #ifdef _WIN32
 /* The same path, but with the bytes coming from a real ConPTY child rather
  * than from a string in this test: a program asking for the clipboard over
@@ -1280,6 +1527,37 @@ static void test_clipboard_write_conpty(void)
                (int)clipboard_calls);
 
     term_free(&term);
+}
+
+/* The image path through a real ConPTY child: what matters is whether the
+ * pseudoconsole forwards the APC payload to us at all. ConPTY consumes APC
+ * sequences on every current Windows version, so this check only asserts the
+ * text that surrounds the image. It is a canary: if a future ConPTY starts
+ * forwarding APC, this starts observing the image and the assertion needs to
+ * flip. */
+static void test_kitty_graphics_conpty(void)
+{
+    char output[8192] = "";
+    char error[256] = "";
+    bool ran;
+
+    ran = pty_run(L"powershell.exe -NoProfile -Command "
+                  L"\"[Console]::Write('before|'); "
+                  L"[Console]::Write([string][char]27 + "
+                  L"'_Ga=T,f=32,s=1,v=1,i=77;/wAA/w==' + "
+                  L"[string][char]27 + '\\'); "
+                  L"[Console]::Write('|after')\"",
+                  output, sizeof output, NULL, error, sizeof error);
+    if (!ran) {
+        check(false, "the Kitty graphics child started");
+        printf("      %s\n", error);
+        return;
+    }
+
+    check(strstr(output, "before|") && strstr(output, "|after"),
+          "ConPTY forwards the text around an APC image payload");
+    check(!strstr(output, "_G") && !strstr(output, "/wAA/w=="),
+          "ConPTY consumes APC image payloads (known Windows limit)");
 }
 #endif /* _WIN32 */
 
@@ -2162,6 +2440,8 @@ int term_selftest(void)
     test_font_lookup();
     test_clipboard_write();
     test_terminal_effects();
+    test_kitty_graphics();
+    test_image_draw();
     failure_count += config_test();
     failure_count += desktop_signal_selftest();
     failure_count += hyperlink_selftest();
@@ -2173,6 +2453,7 @@ int term_selftest(void)
     test_pty_writer_queue();
     test_session_pump_continuation();
     test_clipboard_write_conpty();
+    test_kitty_graphics_conpty();
 #endif
 
     printf("\n%s (%d failure%s)\n", failure_count ? "FAILED" : "OK",

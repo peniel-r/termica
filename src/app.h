@@ -34,6 +34,9 @@
  * cadence of the spinner and clock. */
 #define STATUSBAR_VPAD 4
 #define STATUSBAR_TIMER_MS 100
+/* Never wake twice for the same animation frame sooner than a 120 Hz
+ * display could show it. */
+#define IMAGE_MIN_FRAME_MS 8
 #define GIT_REFRESH_MS 500
 #define STATUSBAR_MAX_FRAMES 16
 #define STATUSBAR_LINE_BYTES 4096
@@ -48,7 +51,8 @@ enum {
     APP_EVENT_PTY        = 2,
     APP_EVENT_AUTOSCROLL = 3,
     APP_EVENT_STATUSBAR  = 4,
-    APP_EVENT_SEARCH     = 5
+    APP_EVENT_SEARCH     = 5,
+    APP_EVENT_IMAGE      = 6
 };
 
 typedef struct App {
@@ -57,6 +61,7 @@ typedef struct App {
     Glyphs           glyphs;
     Panel            panel;
     struct RenderCache *render_cache; /* private to render.c               */
+    struct ImageCache  *images;       /* private to image.c                */
 
     Session         *sessions[APP_MAX_TABS];
     int              session_count;
@@ -113,6 +118,8 @@ typedef struct App {
     SDL_TimerID      autoscroll_timer;
     SDL_TimerID      blink_timer;
     SDL_TimerID      statusbar_timer;
+    SDL_TimerID      image_timer;     /* one-shot for an animation frame   */
+    uint64_t         image_next_ms;   /* 0 when no animation is playing    */
 
     bool             running;
     bool             needs_redraw;

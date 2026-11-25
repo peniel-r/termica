@@ -33,6 +33,7 @@
 |---|---|
 | **Shell** | `pwsh` → `powershell` → `cmd` auto-detection, UTF-8 end to end, resize and per-tab process-tree cleanup; closing the last tab closes the window |
 | **Rendering** | 24-bit colour, bold, italic, dim, inverse, strikethrough and overline, five underline kinds (single, double, curly, dotted, dashed), all cursor styles plus blinking, wide characters |
+| **Images** | Kitty graphics parsing, storage and drawing (raw/PNG, three layers, z-order, animations) are implemented and self-tested, but Windows ConPTY consumes the APC escape codes programs use to send images. See limitations |
 | **Scrollback** | Mouse wheel, keyboard scrolling, a draggable scrollbar, configurable history, and search with case and regex toggles |
 | **Selection** | Cell, word, line and block (Alt) selection. The selection follows its text through output and reflow, autoscrolls at the edges, and can copy on select |
 | **Mouse** | Mouse reporting (modes 9/1000/1002/1003, SGR/UTF-8/urxvt/pixel formats), Shift to take the pointer back, OSC 22 pointer shape |
@@ -251,7 +252,12 @@ duration is hidden rather than reused from a previous command.
 
 ## Known limitations
 
-- Native splits, session restoration and graphics protocols are not implemented.
+- Native splits and session restoration are not implemented.
+- Image delivery is blocked on Windows: ConPTY consumes APC sequences, which
+  is how the Kitty graphics protocol transports images. termica parses, stores
+  and draws Kitty images (covered by `--selftest`), but a program running in a
+  tab cannot get an image through the pty until the transport forwards APC.
+  Sixel is not supported either.
 - Windows may suppress notifications according to its notification settings
   or Focus Assist.
 - Windows minidumps can contain private terminal text, process memory and paths.

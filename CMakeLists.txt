@@ -135,6 +135,7 @@ add_executable(termica
     src/session.c
     src/input.c
     src/render.c
+    src/image.c
     src/chrome.c
     src/colors.c
     src/keys.c

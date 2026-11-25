@@ -37,6 +37,7 @@
 #include "embed.h"
 #include "font_lookup.h"
 #include "input.h"
+#include "image.h"
 #include "render.h"
 
 #include <math.h>
@@ -331,6 +332,23 @@ static Uint32 SDLCALL on_statusbar_timer(void *userdata, SDL_TimerID timer_id,
     return interval;
 }
 
+/* Kitty graphics animations ask for one redraw at a time. The frame computes
+ * the next deadline, and the loop arms this timer for it. */
+static Uint32 SDLCALL on_image_timer(void *userdata, SDL_TimerID timer_id,
+                                     Uint32 interval)
+{
+    SDL_Event event;
+
+    (void)userdata;
+    (void)timer_id;
+    (void)interval;
+    SDL_zero(event);
+    event.type = SDL_EVENT_USER;
+    event.user.code = APP_EVENT_IMAGE;
+    SDL_PushEvent(&event);
+    return 0;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Startup helpers                                                            */
 /* ------------------------------------------------------------------------- */
@@ -531,6 +549,8 @@ static void dispatch_event(App *app, const SDL_Event *event)
             Session *s = app_active_session(app);
             if (s && search_pending(&s->search))
                 app->needs_redraw = true;
+        } else if (event->user.code == APP_EVENT_IMAGE) {
+            app->needs_redraw = true;
         }
         break;
     case SDL_EVENT_KEY_DOWN:
@@ -581,6 +601,7 @@ static void dispatch_event(App *app, const SDL_Event *event)
         glyphs_reset(&app->glyphs);
         glyphs_reset(&app->statusbar_glyphs);
         panel_free(&app->panel);
+        images_free(&app->images);
         if (!panel_init(&app->panel, app->renderer, app->display_scale))
             fprintf(stderr, "panel reset: %s\n", SDL_GetError());
         app->needs_redraw = true;
@@ -904,6 +925,21 @@ int main(int argc, char **argv)
         if (app.running && app.needs_redraw) {
             render_frame(&app);
             app.needs_redraw = false;
+
+            /* Arm one redraw for the next animation frame, if any. */
+            if (app.image_timer) {
+                SDL_RemoveTimer(app.image_timer);
+                app.image_timer = 0;
+            }
+            if (app.image_next_ms) {
+                uint64_t now = SDL_GetTicks();
+                Uint32 delay = app.image_next_ms > now
+                    ? (Uint32)(app.image_next_ms - now) : 1;
+
+                if (delay < IMAGE_MIN_FRAME_MS)
+                    delay = IMAGE_MIN_FRAME_MS;
+                app.image_timer = SDL_AddTimer(delay, on_image_timer, &app);
+            }
         }
     }
     exit_code = 0;
@@ -917,6 +953,8 @@ cleanup:
         SDL_RemoveTimer(app.blink_timer);
     if (app.autoscroll_timer)
         SDL_RemoveTimer(app.autoscroll_timer);
+    if (app.image_timer)
+        SDL_RemoveTimer(app.image_timer);
     if (app.cursor)
         SDL_DestroyCursor(app.cursor);
     git_close(app.git);
@@ -927,6 +965,7 @@ cleanup:
     }
     app.session_count = 0;
     render_free(&app);
+    images_free(&app.images);
     panel_free(&app.panel);
     glyphs_close(&app.glyphs);
     glyphs_close(&app.statusbar_glyphs);

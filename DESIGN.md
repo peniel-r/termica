@@ -223,17 +223,23 @@ retained across terminal mutations.
 1. Panel: either the translucent fill with squircle masks, or a light tint
    over the DWM backdrop.
 2. Title bar, when enabled for a custom frame.
-3. Cell backgrounds and glyphs are cached as premultiplied transparent row
-   layers. Only damaged rows are repainted; all row layers are composited
+3. Images in the **below-background** layer, over the panel fill but under
+   every cell background.
+4. Cell backgrounds, then images in the **below-text** layer, then glyphs and
+   decorations, then images in the **above-text** layer. Within a layer,
+   placements are sorted by z-index and then by image id, and every image
+   layer is clipped to the cell grid.
+5. Backgrounds and text are cached as two premultiplied transparent row layers
+   per row. Only damaged rows are repainted; all row layers are composited
    onto each fresh window frame. Unsupported render targets fall back to
-   direct rendering.
-4. Glyphs share bounded texture atlas pages, with separate style and colour
+   direct rendering in the same order.
+6. Glyphs share bounded texture atlas pages, with separate style and colour
    entries and whole-page eviction. Oversized glyphs use a temporary texture.
-5. Decorations: the five underline kinds, strikethrough, overline.
-6. Cursor (block, hollow, bar or underline, with a blink phase) and the IME
+7. Decorations: the five underline kinds, strikethrough, overline.
+8. Cursor (block, hollow, bar or underline, with a blink phase) and the IME
    preedit.
-7. Status bar: a second `Glyphs` instance with its own font.
-8. Scrollbar thumb.
+9. Status bar: a second `Glyphs` instance with its own font.
+10. Scrollbar thumb.
 
 ### Font resolution
 
@@ -647,3 +653,34 @@ otherwise.
   reports must not be published without review. Authenticode signing is a
   separate fail-closed step requiring a provisioned trusted certificate and
   timestamp service, and does not guarantee SmartScreen reputation.
+
+### ADR-020: Images come from libghostty, sixel is not reimplemented
+
+- **Context:** Programs draw pictures with the Kitty graphics protocol and,
+  historically, sixel. ADR-001 makes libghostty-vt the only parser of escape
+  sequences, so termica may draw images but must not grow a competing one.
+  libghostty-vt 1.0.1 parses Kitty graphics and exposes storage, pixels and
+  render-state placements; it does not parse sixel. Kitty graphics travel in
+  APC sequences, and ADR-004's ConPTY transport consumes APC on every current
+  Windows version, so a program in a tab cannot deliver an image yet.
+- **Decision:** Add `image.c` as a texture cache and pasteboard, not a parser.
+  `term.c` keeps a bounded 32 MiB Kitty storage, leaves the file and
+  shared-memory media disabled so only in-band payloads are accepted,
+  installs SDL's PNG decoder with `ghostty_sys_set` before the first terminal
+  exists, and the renderer reads placements from
+  `GHOSTTY_RENDER_STATE_DATA_IMAGE_ITERATOR`. Textures are keyed by image id
+  and image generation, capped at 32 entries and 64 MiB with
+  least-recently-used eviction, and drawn in the below-background, below-text
+  and above-text layers sorted by z. Animation ticks run once per frame and
+  schedule a single redraw no sooner than 8 ms. Sixel is documented as
+  unsupported until upstream parses it; termica adds no second protocol
+  parser.
+- **Consequences:** Image correctness, protocol quirks and animation timing
+  follow the library. The renderer is exercised by `--selftest` and by
+  synthetic input fed straight into the terminal; a real program inside a
+  termica tab still cannot display an image until the ConPTY limitation is
+  solved. Supporting sixel later needs a protocol value in the render state
+  and a matching branch in `image.c`, but still no escape-code parser here.
+  Image textures are an extra memory cost on top of terminal storage, and a
+  program that scrolls through large screenshots pays texture uploads until
+  the cache evicts them. Sixel users need another terminal.

@@ -124,6 +124,7 @@ codebase that can grow.
 | 3.3 | **Packaging** | Versioned release zips. A Scoop manifest and a winget manifest. An app icon and version resource. An Explorer "Open termica here" entry, opt-in. |
 | 3.5 | **Crash diagnostics** (done) | A log file in `%LOCALAPPDATA%\termica\logs`, a minidump on unhandled exceptions, and a `--version` output to paste into bug reports. |
 | 3.6 | **User docs** (done) | A configuration reference generated from the settings tables, a key binding reference, troubleshooting, and issue templates. |
+| 3.7 | **Images** (blocked on transport) | Kitty graphics parsing, storage, layers, clipping and animations work through libghostty-vt and are covered by `--selftest`. Windows ConPTY consumes APC sequences, so no program can deliver an image through the pty yet; the item stays blocked until the transport forwards APC. Sixel is documented as unsupported because the library does not parse it. |
 
 ### Exit criteria
 
@@ -144,7 +145,10 @@ update it and uninstall it, with no manual steps.
 
 ## Backlog (not scheduled)
 
-- Kitty graphics protocol and sixel (this needs an image store in the renderer)
+- A pty transport that forwards APC sequences, so Kitty graphics can reach
+  the parser (ConPTY consumes them today)
+- Sixel graphics (blocked on libghostty-vt parsing it; ADR-020 rules out a
+  second parser)
 - Native splits
 - Quake-style drop-down mode with a global hotkey
 - Ligatures (HarfBuzz shaping runs instead of per-cell glyphs)

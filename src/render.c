@@ -6,6 +6,7 @@
 
 #include "chrome.h"
 #include "hyperlink.h"
+#include "image.h"
 #include "style.h"
 #include "toast.h"
 
@@ -156,7 +157,50 @@ static void draw_underline(App *app, float x, float base, float width,
     }
 }
 
-static void draw_cell(const FrameContext *frame, const CellPaint *cell)
+/* Resolve a cell's colours and decorations. Both drawing passes call this,
+ * because the background texture and the text texture are built separately:
+ * that split is what lets an image sit between a cell's background and its
+ * glyph. */
+static void resolve_cell_style(const FrameContext *frame, const CellPaint *cell,
+                               CellStyle *style)
+{
+    App *app = frame->app;
+    const ColorScheme *scheme = &app->settings.colors;
+    bool custom_sel = cell->selected &&
+                      (scheme->has_selection_bg || scheme->has_selection_fg);
+
+    style_resolve(style, &cell->style,
+                  cell->has_foreground, cell->foreground,
+                  cell->has_background, cell->background,
+                  &frame->colors, frame->default_foreground,
+                  frame->default_background, app->panel_opacity,
+                  cell->selected && !custom_sel);
+    if (custom_sel) {
+        if (scheme->has_selection_bg) {
+            style->background.r = scheme->selection_bg.r;
+            style->background.g = scheme->selection_bg.g;
+            style->background.b = scheme->selection_bg.b;
+            style->background.a = 255;
+            style->has_background = true;
+        }
+        if (scheme->has_selection_fg) {
+            style->foreground.r = scheme->selection_fg.r;
+            style->foreground.g = scheme->selection_fg.g;
+            style->foreground.b = scheme->selection_fg.b;
+            style->foreground.a = 255;
+        }
+    }
+    if (cell->search_match && !cell->selected) {
+        style->background = cell->search_match == 2
+            ? (SDL_Color){ 255, 164, 64, 255 }
+            : (SDL_Color){ 235, 213, 94, 255 };
+        style->foreground = (SDL_Color){ 24, 24, 24, 255 };
+        style->has_background = true;
+    }
+}
+
+static void draw_cell_background(const FrameContext *frame,
+                                 const CellPaint *cell)
 {
     App *app = frame->app;
     CellStyle style;
@@ -165,41 +209,21 @@ static void draw_cell(const FrameContext *frame, const CellPaint *cell)
     float width = (float)app->glyphs.cell_width * (cell->wide ? 2.0f : 1.0f);
     float height = (float)app->glyphs.cell_height;
 
-    const ColorScheme *scheme = &app->settings.colors;
-    bool custom_sel = cell->selected &&
-                      (scheme->has_selection_bg || scheme->has_selection_fg);
-
-    style_resolve(&style, &cell->style,
-                  cell->has_foreground, cell->foreground,
-                  cell->has_background, cell->background,
-                  &frame->colors, frame->default_foreground,
-                  frame->default_background, app->panel_opacity,
-                  cell->selected && !custom_sel);
-    if (custom_sel) {
-        if (scheme->has_selection_bg) {
-            style.background.r = scheme->selection_bg.r;
-            style.background.g = scheme->selection_bg.g;
-            style.background.b = scheme->selection_bg.b;
-            style.background.a = 255;
-            style.has_background = true;
-        }
-        if (scheme->has_selection_fg) {
-            style.foreground.r = scheme->selection_fg.r;
-            style.foreground.g = scheme->selection_fg.g;
-            style.foreground.b = scheme->selection_fg.b;
-            style.foreground.a = 255;
-        }
-    }
-    if (cell->search_match && !cell->selected) {
-        style.background = cell->search_match == 2
-            ? (SDL_Color){ 255, 164, 64, 255 }
-            : (SDL_Color){ 235, 213, 94, 255 };
-        style.foreground = (SDL_Color){ 24, 24, 24, 255 };
-        style.has_background = true;
-    }
-
+    resolve_cell_style(frame, cell, &style);
     if (style.has_background)
         chrome_fill_rect(app->renderer, x, y, width, height, style.background);
+}
+
+static void draw_cell_text(const FrameContext *frame, const CellPaint *cell)
+{
+    App *app = frame->app;
+    CellStyle style;
+    float x = cell_x(app, cell->column);
+    float y = cell_y(app, cell->row) - frame->row_offset;
+    float width = (float)app->glyphs.cell_width * (cell->wide ? 2.0f : 1.0f);
+    float height = (float)app->glyphs.cell_height;
+
+    resolve_cell_style(frame, cell, &style);
 
     draw_cell_glyph(frame, cell, &style, false);
 
@@ -275,11 +299,15 @@ static void draw_composition(App *app, int cursor_column, int cursor_row)
     }
 }
 
-/* A row has its own transparent layer: ink may extend into the next row,
- * and compositing layers in order preserves that overlap. The pixels are
- * premultiplied by SDL's normal blend into a transparent target. */
+/* A row has two transparent layers. The background layer holds cell
+ * backgrounds, so an image below the text can be composited between it and
+ * the glyphs. The text layer holds glyphs and decorations; ink may extend
+ * into the next row, and compositing layers in order preserves that overlap.
+ * The pixels are premultiplied by SDL's normal blend into transparent
+ * targets. */
 typedef struct CachedRow {
-    SDL_Texture *texture;
+    SDL_Texture *background;
+    SDL_Texture *text;
     GhosttyRenderStateRowId id;
     bool valid;
     int selection_start, selection_end;
@@ -304,8 +332,10 @@ static void cache_release_rows(struct RenderCache *cache)
     int i;
     if (cache->row) {
         for (i = 0; i < cache->rows; i++) {
-            if (cache->row[i].texture)
-                SDL_DestroyTexture(cache->row[i].texture);
+            if (cache->row[i].background)
+                SDL_DestroyTexture(cache->row[i].background);
+            if (cache->row[i].text)
+                SDL_DestroyTexture(cache->row[i].text);
         }
     }
     SDL_free(cache->row);
@@ -377,11 +407,19 @@ static struct RenderCache *cache_prepare(App *app, int width, int height)
     return cache;
 }
 
+/* The grid is painted in two passes. Between them, image placements in the
+ * below-text layer are drawn, which is exactly the order the Kitty protocol
+ * asks for. */
+typedef enum DrawPhase {
+    DRAW_BACKGROUND,
+    DRAW_TEXT
+} DrawPhase;
+
 /* Paint one row with the same cell order as the direct renderer. */
 static void paint_row(FrameContext *frame, Session *session, int row_position,
                       int selection_start, int selection_end,
                       bool cursor_drawn, int cursor_column, int cursor_row,
-                      uint64_t search_offset)
+                      uint64_t search_offset, DrawPhase phase)
 {
     Term *term = &session->term;
     int column = 0;
@@ -420,63 +458,103 @@ static void paint_row(FrameContext *frame, Session *session, int row_position,
                 search_offset + (uint64_t)row_position, (unsigned)column);
         cell.hyperlink = frame->hovered_link &&
             hyperlink_contains(frame->hovered_link, column, row_position);
-        draw_cell(frame, &cell);
+        if (phase == DRAW_BACKGROUND)
+            draw_cell_background(frame, &cell);
+        else
+            draw_cell_text(frame, &cell);
         column++;
     }
 }
 
-/* A failed target or premultiplied blend falls back to the direct renderer. */
-static bool paint_grid(FrameContext *frame, Session *session,
+static SDL_Texture *cache_texture(App *app, const struct RenderCache *cache)
+{
+    SDL_Texture *texture = SDL_CreateTexture(app->renderer,
+        SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET, cache->width,
+        cache->cell_height * 2);
+
+    if (texture &&
+        !SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND_PREMULTIPLIED)) {
+        SDL_DestroyTexture(texture);
+        texture = NULL;
+    }
+    return texture;
+}
+
+/* Read one row's selection, hover and cursor state. */
+static void row_geometry(const FrameContext *frame, App *app,
+                         GhosttyRenderStateRowIterator iterator, int32_t y,
+                         bool cursor_drawn, int cursor_column, int cursor_row,
+                         int *selection_start, int *selection_end,
+                         int *hover_start, int *hover_end, int *cursor)
+{
+    GhosttyRenderStateRowSelection selection =
+        GHOSTTY_INIT_SIZED(GhosttyRenderStateRowSelection);
+
+    *selection_start = -1;
+    *selection_end = -1;
+    *hover_start = -1;
+    *hover_end = -1;
+    *cursor = -1;
+    if (ghostty_render_state_row_get(iterator,
+            GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION, &selection) == GHOSTTY_SUCCESS) {
+        *selection_start = selection.start_x;
+        *selection_end = selection.end_x;
+    }
+    if (frame->hovered_link && y >= frame->hovered_link->start_y &&
+        y <= frame->hovered_link->end_y) {
+        *hover_start = y == frame->hovered_link->start_y
+                           ? frame->hovered_link->start_x : 0;
+        *hover_end = y == frame->hovered_link->end_y
+                         ? frame->hovered_link->end_x : app->columns - 1;
+    }
+    if (cursor_drawn && y == cursor_row)
+        *cursor = cursor_column;
+}
+
+/* Rebuild only the damaged row textures. Both layers are rendered here, but
+ * they are composited separately in render_frame, with the image layers in
+ * between. */
+static bool grid_build(FrameContext *frame, Session *session,
                        struct RenderCache *cache, bool cursor_drawn,
-                       int cursor_column, int cursor_row, uint64_t search_offset)
+                       int cursor_column, int cursor_row, uint64_t search_offset,
+                       bool *out_full)
 {
     App *app = frame->app;
     Term *term = &session->term;
     GhosttyRenderStateDirty damage = GHOSTTY_RENDER_STATE_DIRTY_FULL;
-    bool full = !cache || !cache->valid;
+    bool full = !cache->valid;
     int i;
 
-    if (cache && (ghostty_render_state_get(term->render_state,
+    if (ghostty_render_state_get(term->render_state,
             GHOSTTY_RENDER_STATE_DATA_DIRTY, &damage) != GHOSTTY_SUCCESS ||
         damage == GHOSTTY_RENDER_STATE_DIRTY_FULL || cache->session != session ||
         memcmp(&cache->colors, &frame->colors, sizeof cache->colors) != 0 ||
         memcmp(&cache->scheme, &app->settings.colors, sizeof cache->scheme) != 0 ||
-        cache->opacity != app->panel_opacity))
+        cache->opacity != app->panel_opacity)
         full = true;
     if (ghostty_render_state_get(term->render_state,
             GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &term->row_iterator) != GHOSTTY_SUCCESS)
         return false;
     while (ghostty_render_state_row_iterator_next(term->row_iterator)) {
         int32_t y = 0;
-        int selection_start = -1, selection_end = -1;
-        int hover_start = -1, hover_end = -1;
-        int cursor = -1;
+        int selection_start, selection_end, hover_start, hover_end, cursor;
         bool dirty = true;
         GhosttyRenderStateRowId id = {0};
-        GhosttyRenderStateRowSelection selection = GHOSTTY_INIT_SIZED(GhosttyRenderStateRowSelection);
-        CachedRow *row = NULL;
+        CachedRow *row;
 
         if (ghostty_render_state_row_get(term->row_iterator,
                 GHOSTTY_RENDER_STATE_ROW_DATA_VIEWPORT_Y, &y) != GHOSTTY_SUCCESS ||
             y < 0 || y >= app->rows)
             continue;
-        if (ghostty_render_state_row_get(term->row_iterator,
-                GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION, &selection) == GHOSTTY_SUCCESS) {
-            selection_start = selection.start_x;
-            selection_end = selection.end_x;
-        }
-        if (frame->hovered_link && y >= frame->hovered_link->start_y &&
-            y <= frame->hovered_link->end_y) {
-            hover_start = y == frame->hovered_link->start_y ? frame->hovered_link->start_x : 0;
-            hover_end = y == frame->hovered_link->end_y ? frame->hovered_link->end_x : app->columns - 1;
-        }
-        if (cursor_drawn && y == cursor_row)
-            cursor = cursor_column;
+        row_geometry(frame, app, term->row_iterator, y, cursor_drawn,
+                     cursor_column, cursor_row, &selection_start, &selection_end,
+                     &hover_start, &hover_end, &cursor);
 
-        if (cache) {
+        {
             bool row_dirty = true;
             bool id_valid;
-            uint8_t *search = cache->search_cells + (size_t)y * (size_t)app->columns;
+            uint8_t *search = cache->search_cells +
+                              (size_t)y * (size_t)app->columns;
             row = &cache->row[y];
             id_valid = ghostty_render_state_row_get(term->row_iterator,
                 GHOSTTY_RENDER_STATE_ROW_DATA_ID, &id) == GHOSTTY_SUCCESS;
@@ -485,7 +563,8 @@ static bool paint_grid(FrameContext *frame, Session *session,
                 row_dirty = true;
             dirty = full || !row->valid || row_dirty || !id_valid ||
                 id.bits[0] != row->id.bits[0] || id.bits[1] != row->id.bits[1] ||
-                selection_start != row->selection_start || selection_end != row->selection_end ||
+                selection_start != row->selection_start ||
+                selection_end != row->selection_end ||
                 hover_start != row->hover_start || hover_end != row->hover_end ||
                 cursor != row->cursor_column ||
                 (cursor >= 0 && frame->cursor_style != row->cursor_style);
@@ -499,61 +578,119 @@ static bool paint_grid(FrameContext *frame, Session *session,
                     }
                 }
             }
-            if (!dirty)
-                continue;
-            if (!row->texture) {
-                row->texture = SDL_CreateTexture(app->renderer, SDL_PIXELFORMAT_RGBA8888,
-                    SDL_TEXTUREACCESS_TARGET, cache->width, cache->cell_height * 2);
-                if (!row->texture || !SDL_SetTextureBlendMode(row->texture,
-                        SDL_BLENDMODE_BLEND_PREMULTIPLIED))
-                    return false;
-            }
-            if (!SDL_SetRenderTarget(app->renderer, row->texture))
+        }
+        if (!dirty)
+            continue;
+        if (!row->background) {
+            row->background = cache_texture(app, cache);
+            if (!row->background)
                 return false;
-            if (!SDL_SetRenderDrawColor(app->renderer, 0, 0, 0, 0) ||
+        }
+        if (!row->text) {
+            row->text = cache_texture(app, cache);
+            if (!row->text)
+                return false;
+        }
+        frame->row_offset = app->grid_top + y * app->glyphs.cell_height;
+        for (i = 0; i < 2; i++) {
+            SDL_Texture *target = i == 0 ? row->background : row->text;
+
+            if (!SDL_SetRenderTarget(app->renderer, target) ||
+                !SDL_SetRenderDrawColor(app->renderer, 0, 0, 0, 0) ||
                 !SDL_RenderClear(app->renderer) ||
                 !SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND))
                 return false;
-            frame->row_offset = app->grid_top + y * app->glyphs.cell_height;
+            if (ghostty_render_state_row_get(term->row_iterator,
+                    GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
+                    &term->cell_iterator) != GHOSTTY_SUCCESS)
+                return false;
+            paint_row(frame, session, y, selection_start, selection_end,
+                      cursor_drawn, cursor_column, cursor_row, search_offset,
+                      i == 0 ? DRAW_BACKGROUND : DRAW_TEXT);
         }
-        if (ghostty_render_state_row_get(term->row_iterator,
-                GHOSTTY_RENDER_STATE_ROW_DATA_CELLS, &term->cell_iterator) != GHOSTTY_SUCCESS)
-            return false;
-        paint_row(frame, session, y, selection_start, selection_end,
-                  cursor_drawn, cursor_column, cursor_row, search_offset);
-        if (row) {
-            row->id = id;
-            row->selection_start = selection_start;
-            row->selection_end = selection_end;
-            row->hover_start = hover_start;
-            row->hover_end = hover_end;
-            row->cursor_column = cursor;
-            row->cursor_style = frame->cursor_style;
-            row->valid = true;
-        }
+        row->id = id;
+        row->selection_start = selection_start;
+        row->selection_end = selection_end;
+        row->hover_start = hover_start;
+        row->hover_end = hover_end;
+        row->cursor_column = cursor;
+        row->cursor_style = frame->cursor_style;
+        row->valid = true;
     }
     frame->row_offset = 0;
-    if (!cache)
-        return true;
     if (!SDL_SetRenderTarget(app->renderer, NULL))
         return false;
+    *out_full = full;
+    return true;
+}
+
+/* Composite one layer of every cached row. Transparent pixels leave whatever
+ * was drawn underneath alone, which is what keeps image layers visible. */
+static bool grid_composite(App *app, struct RenderCache *cache, DrawPhase phase)
+{
+    int i;
+
     for (i = 0; i < cache->rows; i++) {
+        SDL_Texture *texture;
         SDL_FRect destination = { 0.0f,
             (float)(app->grid_top + i * app->glyphs.cell_height),
             (float)cache->width, (float)(cache->cell_height * 2) };
-        if (!cache->row[i].valid || !cache->row[i].texture ||
-            !SDL_RenderTexture(app->renderer, cache->row[i].texture, NULL, &destination))
+
+        if (!cache->row[i].valid)
+            continue;
+        texture = phase == DRAW_BACKGROUND ? cache->row[i].background
+                                           : cache->row[i].text;
+        if (!texture || !SDL_RenderTexture(app->renderer, texture, NULL,
+                                           &destination))
             return false;
     }
-    cache->valid = true;
-    if (full) {
-        cache->session = session;
-        cache->colors = frame->colors;
-        cache->scheme = app->settings.colors;
-        cache->opacity = app->panel_opacity;
-    }
-    cache->search_open = session->search.open;
     return true;
+}
+
+/* Paint the grid directly, when a render target is unavailable. The caller
+ * runs both phases so the image layers still land in the right order. */
+static bool grid_direct(FrameContext *frame, Session *session, DrawPhase phase,
+                        bool cursor_drawn, int cursor_column, int cursor_row,
+                        uint64_t search_offset)
+{
+    App *app = frame->app;
+    Term *term = &session->term;
+
+    if (ghostty_render_state_get(term->render_state,
+            GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
+            &term->row_iterator) != GHOSTTY_SUCCESS)
+        return false;
+    while (ghostty_render_state_row_iterator_next(term->row_iterator)) {
+        int32_t y = 0;
+        int selection_start, selection_end, hover_start, hover_end, cursor;
+
+        if (ghostty_render_state_row_get(term->row_iterator,
+                GHOSTTY_RENDER_STATE_ROW_DATA_VIEWPORT_Y, &y) != GHOSTTY_SUCCESS ||
+            y < 0 || y >= app->rows)
+            continue;
+        row_geometry(frame, app, term->row_iterator, y, cursor_drawn,
+                     cursor_column, cursor_row, &selection_start, &selection_end,
+                     &hover_start, &hover_end, &cursor);
+        frame->row_offset = app->grid_top + y * app->glyphs.cell_height;
+        if (ghostty_render_state_row_get(term->row_iterator,
+                GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
+                &term->cell_iterator) != GHOSTTY_SUCCESS)
+            return false;
+        paint_row(frame, session, y, selection_start, selection_end,
+                  cursor_drawn, cursor_column, cursor_row, search_offset,
+                  phase);
+    }
+    frame->row_offset = 0;
+    return true;
+}
+
+/* Draw one image layer, clipped to the cell grid. */
+static void draw_image_layer(App *app, Session *session, GhosttyImageLayer layer)
+{
+    images_draw(&app->images, app->renderer, &session->term, layer,
+                app->grid_left, app->grid_top,
+                app->columns * app->glyphs.cell_width,
+                app->rows * app->glyphs.cell_height);
 }
 
 void render_frame(App *app)
@@ -577,6 +714,7 @@ void render_frame(App *app)
     bool cursor_drawn = false;
     bool cursor_valid = false;
     bool grid_painted;
+    bool full = false;
 
     if (!term)
         return;
@@ -601,26 +739,26 @@ void render_frame(App *app)
 
     SDL_GetWindowSizeInPixels(app->window, &pixel_width, &pixel_height);
 
-    /* 1. Clear to fully transparent; everything below blends over this. */
-    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
-    frame.hovered_link = have_hovered_link ? &hovered_link : NULL;
-    frame.row_offset = 0;
-    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
-    SDL_RenderClear(renderer);
+    /* Animations advance before the render state is captured, so the frame
+     * we draw is the one the clock asked for. The tick invalidates image
+     * handles; nothing below holds one across it. */
+    {
+        uint64_t now_ms = SDL_GetTicks();
+        uint64_t next_ms = 0;
 
-    /* 2. The panel: our rounded fill, or a tint over a DWM backdrop. */
-    panel_draw(&app->panel, renderer, pixel_width, pixel_height,
-               chrome_corner_radius(app), chrome_panel_fill_color(app),
-               CHROME_PANEL_BORDER);
-    chrome_draw_title_bar(app, pixel_width, pixel_height);
+        if (term_animation_tick(term, now_ms, &next_ms))
+            app->image_next_ms = next_ms ? next_ms : now_ms + IMAGE_MIN_FRAME_MS;
+        else
+            app->image_next_ms = 0;
+    }
 
-    /* 3. Capture the frame after search and hover have read the grid. */
+    /* Capture the frame after search and hover have read the grid. */
     if (ghostty_render_state_update(term->render_state, term->handle) != GHOSTTY_SUCCESS) {
         render_invalidate(app);
         return;
     }
 
-    /* 4. Defaults and cursor, before walking the rows. */
+    /* Defaults and cursor, before walking the rows. */
     ghostty_render_state_get(term->render_state,
                              GHOSTTY_RENDER_STATE_DATA_COLORS, &state_colors);
     frame.app = app;
@@ -651,18 +789,65 @@ void render_frame(App *app)
     if (app->cursor_blinks && !app->cursor_lit)
         cursor_drawn = false;
 
-    /* Rebuild only damaged row layers, then composite them over the freshly
-     * drawn panel. On failure, discard partial layers and repaint directly. */
+    /* 1. Clear to fully transparent; everything below blends over this. */
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    frame.hovered_link = have_hovered_link ? &hovered_link : NULL;
+    frame.row_offset = 0;
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
+    SDL_RenderClear(renderer);
+
+    /* 2. The panel: our rounded fill, or a tint over a DWM backdrop. This is
+     * the terminal's default background, so image layers below the cell
+     * backgrounds go over it. */
+    panel_draw(&app->panel, renderer, pixel_width, pixel_height,
+               chrome_corner_radius(app), chrome_panel_fill_color(app),
+               CHROME_PANEL_BORDER);
+    chrome_draw_title_bar(app, pixel_width, pixel_height);
+
+    /* 3. Images below the cell backgrounds, above the panel fill. */
+    draw_image_layer(app, session, GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND);
+
+    /* 4. Rebuild only damaged row layers, then composite backgrounds, the
+     * below-text images and the text. On failure, discard partial layers and
+     * repaint the whole frame directly in the same layer order. */
     cache = cache_prepare(app, pixel_width, pixel_height);
-    grid_painted = paint_grid(&frame, session, cache, cursor_drawn,
-                              cursor_column, cursor_row, search_bar.offset);
-    if (!grid_painted && cache) {
+    grid_painted = cache && grid_build(&frame, session, cache, cursor_drawn,
+                                       cursor_column, cursor_row,
+                                       search_bar.offset, &full);
+    if (grid_painted) {
+        grid_painted = grid_composite(app, cache, DRAW_BACKGROUND);
+        if (grid_painted) {
+            draw_image_layer(app, session, GHOSTTY_IMAGE_LAYER_BELOW_TEXT);
+            grid_painted = grid_composite(app, cache, DRAW_TEXT);
+        }
+        if (grid_painted)
+            draw_image_layer(app, session, GHOSTTY_IMAGE_LAYER_ABOVE_TEXT);
+        if (!grid_painted) {
+            if (!SDL_SetRenderTarget(renderer, NULL)) {
+                render_invalidate(app);
+                return;
+            }
+            cache_release_rows(cache);
+            cache->unavailable = true;
+        } else {
+            cache->valid = true;
+            if (full) {
+                cache->session = session;
+                cache->colors = frame.colors;
+                cache->scheme = app->settings.colors;
+                cache->opacity = app->panel_opacity;
+            }
+            cache->search_open = session->search.open;
+        }
+    } else if (cache) {
         if (!SDL_SetRenderTarget(renderer, NULL)) {
             render_invalidate(app);
             return;
         }
         cache_release_rows(cache);
         cache->unavailable = true;
+    }
+    if (!grid_painted) {
         frame.row_offset = 0;
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
@@ -671,11 +856,21 @@ void render_frame(App *app)
                    chrome_corner_radius(app), chrome_panel_fill_color(app),
                    CHROME_PANEL_BORDER);
         chrome_draw_title_bar(app, pixel_width, pixel_height);
-        grid_painted = paint_grid(&frame, session, NULL, cursor_drawn,
-                                  cursor_column, cursor_row, search_bar.offset);
+        draw_image_layer(app, session, GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND);
+        grid_painted = grid_direct(&frame, session, DRAW_BACKGROUND,
+                                   cursor_drawn, cursor_column, cursor_row,
+                                   search_bar.offset);
+        if (grid_painted) {
+            draw_image_layer(app, session, GHOSTTY_IMAGE_LAYER_BELOW_TEXT);
+            grid_painted = grid_direct(&frame, session, DRAW_TEXT, cursor_drawn,
+                                       cursor_column, cursor_row,
+                                       search_bar.offset);
+        }
+        if (grid_painted)
+            draw_image_layer(app, session, GHOSTTY_IMAGE_LAYER_ABOVE_TEXT);
     }
 
-    /* 6. Uncommitted IME text goes on top of the cell the terminal cursor
+    /* 5. Uncommitted IME text goes on top of the cell the terminal cursor
      * is in: the screen buffer does not have it yet, so this is the only
      * place a user can see what they are mid-way through typing. It is
      * gated on the cursor being on screen, not on the blink phase - the
@@ -685,14 +880,14 @@ void render_frame(App *app)
         update_text_input_area(app);
     }
 
-    /* 8. The scrollback indicator, over the right edge of the grid. */
+    /* 6. The scrollback indicator, over the right edge of the grid. */
     chrome_draw_scrollbar(app);
 
-    /* 9. Status bar, in the band below the grid. */
+    /* 7. Status bar, in the band below the grid. */
     chrome_draw_statusbar(app, pixel_width, pixel_height,
                           frame.default_foreground);
 
-    /* 10. Visual bell flash overlay, when active. */
+    /* 8. Visual bell flash overlay, when active. */
     if (app->bell_flash_until_ms > 0 &&
         SDL_GetTicks() < app->bell_flash_until_ms) {
         SDL_Color no_border = { 0, 0, 0, 0 };

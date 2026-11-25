@@ -56,6 +56,10 @@ typedef TermClipboardResult (*TermClipboardReadFn)(void *userdata,
 #define TERM_NOTIFICATION_QUEUE 16
 #define TERM_NOTIFICATION_TITLE 256
 #define TERM_NOTIFICATION_BODY 2048
+
+/* How many bytes of Kitty graphics images a terminal keeps. Programs are
+ * untrusted, so this is a cap rather than an invitation. */
+#define TERM_IMAGE_STORAGE_LIMIT (32ull * 1024ull * 1024ull)
 typedef struct TermNotification {
     char title[TERM_NOTIFICATION_TITLE];
     char body[TERM_NOTIFICATION_BODY];
@@ -66,6 +70,7 @@ struct Term {
     GhosttyRenderState            render_state;  /* the frame we draw     */
     GhosttyRenderStateRowIterator row_iterator;  /* walks the rows        */
     GhosttyRenderStateRowCells    cell_iterator; /* walks a row's cells   */
+    GhosttyRenderStateImageIterator image_iterator; /* image placements */
     GhosttyKeyEncoder             key_encoder;   /* key press -> bytes    */
     GhosttyKeyEvent               key_event;     /* the event we fill in  */
     GhosttyMouseEncoder           mouse_encoder; /* pointer -> bytes      */
@@ -153,6 +158,11 @@ bool term_take_notification(Term *term, TermNotification *out);
 
 /* Create the terminal and everything around it. False on failure. */
 bool term_init(Term *term, uint16_t columns, uint16_t rows);
+
+/* Advance playing Kitty graphics animations to `now_ms`. Returns true and
+ * writes the next frame's time when a redraw is due, false when nothing is
+ * playing. The caller schedules one redraw at that time. */
+bool term_animation_tick(Term *term, uint64_t now_ms, uint64_t *next_ms);
 
 /* Free everything. Safe to call on a zeroed struct. */
 void term_free(Term *term);

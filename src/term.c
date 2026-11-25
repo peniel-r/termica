@@ -5,6 +5,7 @@
 #include "term.h"
 
 #include <SDL3/SDL.h>
+#include <ghostty/vt/sys.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -470,13 +471,83 @@ static void on_progress_report(GhosttyTerminal terminal, void *userdata,
     }
 }
 
+/* Kitty graphics accepts PNG payloads only when the embedder supplies a
+ * decoder. SDL3 can read a PNG from a memory stream, so the terminal and the
+ * app use one library for image data. The pixels are copied into a buffer
+ * owned by libghostty's allocator, as the callback contract requires. */
+static bool decode_png(void *userdata, const GhosttyAllocator *allocator,
+                       const uint8_t *data, size_t data_len,
+                       GhosttySysImage *out)
+{
+    SDL_IOStream *stream;
+    SDL_Surface *surface;
+    SDL_Surface *rgba;
+    uint8_t *pixels;
+    size_t length;
+    int width;
+    int height;
+    int row;
+
+    (void)userdata;
+    if (!data || data_len == 0 || !out)
+        return false;
+    stream = SDL_IOFromConstMem(data, data_len);
+    if (!stream)
+        return false;
+    surface = SDL_LoadPNG_IO(stream, true);
+    if (!surface)
+        return false;
+    rgba = SDL_ConvertSurface(surface, SDL_PIXELFORMAT_RGBA32);
+    width = surface->w;
+    height = surface->h;
+    SDL_DestroySurface(surface);
+    if (!rgba || width <= 0 || height <= 0 ||
+        (size_t)width > SIZE_MAX / 4 / (size_t)height) {
+        SDL_DestroySurface(rgba);
+        return false;
+    }
+
+    length = (size_t)width * (size_t)height * 4;
+    pixels = ghostty_alloc(allocator, length);
+    if (!pixels) {
+        SDL_DestroySurface(rgba);
+        return false;
+    }
+    for (row = 0; row < height; row++)
+        memcpy(pixels + (size_t)row * (size_t)width * 4,
+               (const uint8_t *)rgba->pixels + (size_t)row * rgba->pitch,
+               (size_t)width * 4);
+    SDL_DestroySurface(rgba);
+
+    out->width = (uint32_t)width;
+    out->height = (uint32_t)height;
+    out->data = pixels;
+    out->data_len = length;
+    return true;
+}
+
+/* Process-global and not thread-safe, so install the PNG decoder before the
+ * first terminal exists and never touch it again. */
+static void ensure_sys(void)
+{
+    static bool installed;
+
+    if (installed)
+        return;
+    installed = true;
+    ghostty_sys_set(GHOSTTY_SYS_OPT_DECODE_PNG, (const void *)&decode_png);
+}
+
 bool term_init(Term *term, uint16_t columns, uint16_t rows)
 {
     bool ok = false;
+    uint64_t image_limit = TERM_IMAGE_STORAGE_LIMIT;
+    bool image_file_medium = false;
 
     memset(term, 0, sizeof *term);
     term->columns = columns;
     term->rows = rows;
+    ensure_sys();
 
     if (ghostty_terminal_new(NULL, &term->handle, columns, rows)
             != GHOSTTY_SUCCESS)
@@ -487,6 +558,9 @@ bool term_init(Term *term, uint16_t columns, uint16_t rows)
             != GHOSTTY_SUCCESS)
         goto done;
     if (ghostty_render_state_row_cells_new(NULL, &term->cell_iterator)
+            != GHOSTTY_SUCCESS)
+        goto done;
+    if (ghostty_render_state_image_iterator_new(NULL, &term->image_iterator)
             != GHOSTTY_SUCCESS)
         goto done;
     if (ghostty_key_encoder_new(NULL, &term->key_encoder) != GHOSTTY_SUCCESS)
@@ -502,6 +576,17 @@ bool term_init(Term *term, uint16_t columns, uint16_t rows)
     /* The only effect we act on so far is the window title; replies go
      * through the writer, which the app points at the pty. */
     ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_USERDATA, term);
+    /* Kitty graphics are on by default. Keep a bounded store so a program
+     * cannot fill memory with images, and let the app read them back. */
+    ghostty_terminal_set(term->handle,
+                         GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT,
+                         &image_limit);
+    /* Programs may embed image bytes, but must not make the terminal open
+     * arbitrary files on their behalf. This is the library default too; set
+     * it explicitly so a changed default cannot weaken us. */
+    ghostty_terminal_set(term->handle,
+                         GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_FILE,
+                         &image_file_medium);
     ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_BELL,
                          (const void *)on_bell);
     ghostty_terminal_set(term->handle, GHOSTTY_TERMINAL_OPT_TITLE_CHANGED,
@@ -541,6 +626,7 @@ void term_free(Term *term)
     ghostty_mouse_encoder_free(term->mouse_encoder);
     ghostty_key_event_free(term->key_event);
     ghostty_key_encoder_free(term->key_encoder);
+    ghostty_render_state_image_iterator_free(term->image_iterator);
     ghostty_render_state_row_cells_free(term->cell_iterator);
     ghostty_render_state_row_iterator_free(term->row_iterator);
     ghostty_render_state_free(term->render_state);
@@ -595,6 +681,26 @@ void term_write(Term *term, const void *data, size_t length)
     if (!term->handle || length == 0)
         return;
     ghostty_terminal_vt_write(term->handle, (const uint8_t *)data, length);
+}
+
+bool term_animation_tick(Term *term, uint64_t now_ms, uint64_t *next_ms)
+{
+    GhosttyKittyGraphics graphics = NULL;
+    uint64_t generation = 0;
+
+    if (!term || !term->handle || !next_ms)
+        return false;
+    if (ghostty_terminal_get(term->handle,
+                             GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS,
+                             &graphics) != GHOSTTY_SUCCESS || !graphics)
+        return false;
+    if (ghostty_kitty_graphics_get(graphics,
+                                   GHOSTTY_KITTY_GRAPHICS_DATA_GENERATION,
+                                   &generation) != GHOSTTY_SUCCESS ||
+        generation == 0)
+        return false;
+    return ghostty_kitty_graphics_animation_tick(graphics, now_ms, next_ms)
+           == GHOSTTY_SUCCESS;
 }
 
 const char *term_pwd(const Term *term)
