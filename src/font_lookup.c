@@ -29,6 +29,7 @@
 #ifdef _WIN32
 
 #include <limits.h>
+#include <wctype.h>
 #include <windows.h>
 
 #define FONT_NAME_MAX 512
@@ -154,6 +155,24 @@ static int family_match_rank(const wchar_t *display, const wchar_t *family)
     if (display_length == family_length &&
         _wcsicmp(display, family) == 0)
         return 0;
+
+    /* File-style registry names: "IosevkaNerdFont-Regular". */
+    {
+        size_t i = 0, j = 0;
+
+        while (family[i] && display[j]) {
+            if (family[i] == L' ') { i++; continue; }
+            if (towlower(family[i]) != towlower(display[j])) break;
+            i++; j++;
+        }
+        while (family[i] == L' ') i++;
+        if (!family[i] && j > 0 && display[j] == L'-' && display[j + 1]) {
+            const wchar_t *file_style = display + j + 1;
+
+            return (_wcsicmp(file_style, L"Regular") == 0 ||
+                    _wcsicmp(file_style, L"Book") == 0) ? 1 : 2;
+        }
+    }
     if (display_length <= family_length ||
         _wcsnicmp(display, family, family_length) != 0)
         return -1;
@@ -297,6 +316,37 @@ static bool lookup_windows(const char *name, char *out, size_t capacity)
     best.path[0] = L'\0';
     scan_font_key(HKEY_CURRENT_USER, family, &best);
     scan_font_key(HKEY_LOCAL_MACHINE, family, &best);
+
+    /* Nerd Fonts register either as "<Family> NF[M|P]" or as "<Family> Nerd
+     * Font [Mono|Propo]" depending on the build, so try the other spelling. */
+    if (best.rank < 0) {
+        static const struct { const wchar_t *from; const wchar_t *to; } ALIASES[] = {
+            { L" Nerd Font Mono", L" NFM" },
+            { L" Nerd Font Propo", L" NFP" },
+            { L" Nerd Font", L" NF" },
+            { L" NFM", L" Nerd Font Mono" },
+            { L" NFP", L" Nerd Font Propo" },
+            { L" NF", L" Nerd Font" },
+        };
+        size_t family_length = wcslen(family);
+        size_t i;
+
+        for (i = 0; i < sizeof ALIASES / sizeof ALIASES[0] && best.rank < 0; i++) {
+            size_t from_length = wcslen(ALIASES[i].from);
+            wchar_t alias[FONT_NAME_MAX];
+
+            if (family_length < from_length ||
+                _wcsicmp(family + family_length - from_length,
+                         ALIASES[i].from) != 0)
+                continue;
+            if (swprintf(alias, FONT_NAME_MAX, L"%.*ls%ls",
+                         (int)(family_length - from_length), family,
+                         ALIASES[i].to) < 0)
+                continue;
+            scan_font_key(HKEY_CURRENT_USER, alias, &best);
+            scan_font_key(HKEY_LOCAL_MACHINE, alias, &best);
+        }
+    }
     if (best.rank < 0)
         return false;
     return wide_to_utf8(best.path, out, capacity);
